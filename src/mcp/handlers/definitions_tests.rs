@@ -4371,6 +4371,92 @@ fn test_xml_on_demand_name_matches_cdata_and_entity_text() {
 
 #[test]
 #[cfg(feature = "lang-xml")]
+fn test_xml_on_demand_prevalidation_warnings_reach_public_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    std::fs::write(
+        root.join("encoding.props"),
+        r#"<?xml version="1.0" encoding="utf-16"?><Project><Value>marker</Value></Project>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("control.targets"),
+        "<Project><Target>A\u{1}B</Target></Project>",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("valid.csproj"),
+        r#"<?xml version="1.0" encoding="utf-8"?><Project><Value>valid</Value></Project>"#,
+    )
+    .unwrap();
+
+    let mut utf16_bytes = vec![0xff, 0xfe];
+    for unit in r#"<?xml version="1.0" encoding="utf-16"?><Project/>"#.encode_utf16() {
+        utf16_bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    std::fs::write(root.join("actual-utf16.props"), utf16_bytes).unwrap();
+
+    let content_index = crate::ContentIndex {
+        root: root.to_string_lossy().to_string(),
+        ..Default::default()
+    };
+    let context = HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(
+            make_test_def_index(),
+        ))),
+        server_ext: "props,targets,csproj".to_string(),
+        workspace: std::sync::Arc::new(std::sync::RwLock::new(
+            WorkspaceBinding::pinned(root.to_string_lossy().to_string()),
+        )),
+        ..Default::default()
+    };
+
+    for (file, name, warning_fragment) in [
+        ("encoding.props", "Value", Some("declares encoding 'utf-16'")),
+        ("control.targets", "Target", Some("U+0001")),
+        ("valid.csproj", "Value", None),
+    ] {
+        let result = handle_xray_definitions(
+            &context,
+            &json!({
+                "file": [file],
+                "name": [name],
+            }),
+        );
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["definitions"].as_array().unwrap().len(), 1, "{output}");
+        let warnings = output["summary"]["parseWarnings"].as_array().unwrap();
+        match warning_fragment {
+            Some(fragment) => assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.as_str().is_some_and(|text| text.contains(fragment))),
+                "{output}"
+            ),
+            None => assert!(warnings.is_empty(), "{output}"),
+        }
+    }
+
+
+    let utf16_result = handle_xray_definitions(
+        &context,
+        &json!({
+            "file": ["actual-utf16.props"],
+            "name": ["Project"],
+        }),
+    );
+    assert!(utf16_result.is_error, "{}", utf16_result.content[0].text);
+    assert!(
+        utf16_result.content[0].text.contains("Failed to read XML file"),
+        "{}",
+        utf16_result.content[0].text
+    );
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
 fn test_xml_on_demand_malformed_input_reports_warning() {
     let tmp = tempfile::tempdir().unwrap();
     let root = crate::canonicalize_test_root(tmp.path());

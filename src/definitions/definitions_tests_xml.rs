@@ -559,6 +559,149 @@ fn test_mismatched_tags_produce_warning() {
 }
 
 #[test]
+fn test_encoding_declaration_mismatch_produces_warning() {
+    let xml = r#"<?xml version="1.0" encoding="utf-16"?><Root><Value>marker</Value></Root>"#;
+    let result = parse_xml_on_demand_with_warnings(xml, "test.props").unwrap();
+
+    assert!(result.definitions.iter().any(|definition| definition.entry.name == "Value"));
+    assert!(
+        result.warnings.iter().any(|warning| {
+            warning.contains("declares encoding 'utf-16'") && warning.contains("UTF-8")
+        }),
+        "encoding mismatch must be explicit: {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn test_utf8_encoding_declaration_does_not_warn() {
+    for xml in [
+        r#"<?xml version="1.0" encoding="utf-8"?><Root/>"#,
+        concat!("\u{feff}", "<?xml version='1.0' encoding = 'UTF-8'?><Root/>"),
+    ] {
+        let result = parse_xml_on_demand_with_warnings(xml, "test.xml").unwrap();
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    }
+}
+
+#[test]
+fn test_encoding_attribute_outside_declaration_does_not_warn() {
+    let xml = r#"<Root encoding="utf-16"><Value>marker</Value></Root>"#;
+    let result = parse_xml_on_demand_with_warnings(xml, "test.xml").unwrap();
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+#[test]
+fn test_non_declaration_processing_instruction_does_not_warn() {
+    let xml = r#"<?xml-stylesheet encoding="utf-16"?><Root/>"#;
+    let result = parse_xml_on_demand_with_warnings(xml, "test.xml").unwrap();
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+#[test]
+fn test_us_ascii_declaration_requires_ascii_source() {
+    let ascii = r#"<?xml version="1.0" encoding="us-ascii"?><Root>plain</Root>"#;
+    let ascii_result = parse_xml_on_demand_with_warnings(ascii, "test.xml").unwrap();
+    assert!(ascii_result.warnings.is_empty(), "{:?}", ascii_result.warnings);
+
+    let non_ascii = r#"<?xml version="1.0" encoding="us-ascii"?><Root>Привет</Root>"#;
+    let non_ascii_result = parse_xml_on_demand_with_warnings(non_ascii, "test.xml").unwrap();
+    assert!(
+        non_ascii_result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("declares encoding 'us-ascii'")),
+        "{:?}",
+        non_ascii_result.warnings
+    );
+}
+
+#[test]
+fn test_unterminated_encoding_value_relies_on_syntax_warning() {
+    let xml = r#"<?xml version="1.0" encoding="utf-16?><Root/>"#;
+    let result = parse_xml_on_demand_with_warnings(xml, "test.xml").unwrap();
+    assert!(result.warnings.iter().any(|warning| warning.contains("syntax errors")));
+    assert!(!result.warnings.iter().any(|warning| warning.contains("declares encoding")));
+}
+
+#[test]
+fn test_forbidden_xml_1_0_characters_produce_warning() {
+    for (character, code_point) in [('\u{1}', "U+0001"), ('\u{ffff}', "U+FFFF")] {
+        let xml = format!("<Root><Value>A{character}B</Value></Root>");
+        let result = parse_xml_on_demand_with_warnings(&xml, "test.targets").unwrap();
+
+        let value = result
+            .definitions
+            .iter()
+            .find(|definition| definition.entry.name == "Value")
+            .expect("recovered Value element");
+        let expected_text = format!("A{character}B");
+        assert_eq!(value.text_content.as_deref(), Some(expected_text.as_str()));
+        assert!(
+            result.warnings.iter().any(|warning| warning.contains(code_point)),
+            "forbidden {code_point} must be diagnosed: {:?}",
+            result.warnings
+        );
+    }
+}
+
+#[test]
+fn test_valid_xml_1_0_characters_do_not_warn() {
+    let xml = "<Root><Value>tab\tline\nreturn\rПривет 😀</Value></Root>";
+    let result = parse_xml_on_demand_with_warnings(xml, "test.xml").unwrap();
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+#[test]
+fn test_forbidden_character_location_is_reported() {
+    let xml = "<Root>\r\n  <Value>A\u{0}B</Value>\n</Root>";
+    let result = parse_xml_on_demand_with_warnings(xml, "test.xml").unwrap();
+    assert!(
+        result.warnings.iter().any(|warning| {
+            warning.contains("U+0000")
+                && warning.contains("line 2")
+                && warning.contains("column 11")
+        }),
+        "{:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn test_forbidden_characters_are_diagnosed_in_all_xml_regions() {
+    for xml in [
+        "<Root bad=\"A\u{1}B\"/>",
+        "<Root><!-- A\u{1}B --></Root>",
+        "<Root><![CDATA[A\u{1}B]]></Root>",
+    ] {
+        let result = parse_xml_on_demand_with_warnings(xml, "test.xml").unwrap();
+        assert!(
+            result.warnings.iter().any(|warning| warning.contains("U+0001")),
+            "{:?}",
+            result.warnings
+        );
+    }
+}
+
+#[test]
+fn test_forbidden_character_warnings_are_bounded() {
+    const EXPECTED_WARNING_CAP: usize = 8;
+    let controls = "\u{1}".repeat(EXPECTED_WARNING_CAP + 3);
+    let xml = format!("<Root>{controls}</Root>");
+    let result = parse_xml_on_demand_with_warnings(&xml, "test.xml").unwrap();
+    let detail_count = result
+        .warnings
+        .iter()
+        .filter(|warning| warning.contains("forbids raw character"))
+        .count();
+    assert_eq!(detail_count, EXPECTED_WARNING_CAP);
+    assert!(result
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("3 additional forbidden")));
+}
+
+#[test]
 fn test_malformed_cdata_produces_warning() {
     let xml = "<Root><Item><![CDATA[invalid</Item></Root>";
     let result = parse_xml_on_demand_with_warnings(xml, "test.xml").unwrap();

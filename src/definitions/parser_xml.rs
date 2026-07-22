@@ -40,6 +40,9 @@ const MAX_RECURSION_DEPTH: usize = 1024;
 const TEXT_CONTENT_MAX_CHARS: usize = 200;
 const TEXT_CONTENT_TRUNCATE_TO: usize = 197;
 
+const XML_DECLARATION_SCAN_BYTES: usize = 1024;
+const MAX_XML_CHARACTER_WARNINGS: usize = 8;
+
 /// Typed errors from the on-demand XML parser.
 ///
 /// Discriminates between infrastructure failures (grammar load — a bug in our
@@ -104,6 +107,136 @@ pub(crate) fn is_xml_extension(ext: &str) -> bool {
         // Localized resources
         | "resx"
     )
+}
+
+fn xml_declaration_encoding(source: &str) -> Option<&str> {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let bytes = source.as_bytes();
+    if !bytes.starts_with(b"<?xml") || !bytes.get(5).is_some_and(u8::is_ascii_whitespace) {
+        return None;
+    }
+
+    let scan_len = bytes.len().min(XML_DECLARATION_SCAN_BYTES);
+    let declaration_end = bytes[..scan_len]
+        .windows(2)
+        .position(|window| window == b"?>")?;
+    let declaration = std::str::from_utf8(&bytes[5..declaration_end]).ok()?;
+    let bytes = declaration.as_bytes();
+    let mut cursor = 0;
+
+    while cursor < bytes.len() {
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        let name_start = cursor;
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b'=')
+        {
+            cursor += 1;
+        }
+        let name_end = cursor;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'=') {
+            return None;
+        }
+        cursor += 1;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        let quote = *bytes.get(cursor)?;
+        if quote != b'\'' && quote != b'"' {
+            return None;
+        }
+        cursor += 1;
+        let value_start = cursor;
+        while bytes.get(cursor).is_some_and(|byte| *byte != quote) {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() {
+            return None;
+        }
+        let value_end = cursor;
+        cursor += 1;
+
+        let name = declaration.get(name_start..name_end)?;
+        if name.eq_ignore_ascii_case("encoding") {
+            return declaration.get(value_start..value_end);
+        }
+    }
+    None
+}
+
+fn is_utf8_compatible_declaration(encoding: &str, source: &str) -> bool {
+    encoding.eq_ignore_ascii_case("utf-8")
+        || encoding.eq_ignore_ascii_case("utf8")
+        || encoding.eq_ignore_ascii_case("us-ascii") && source.is_ascii()
+}
+
+fn is_valid_xml_1_0_character(character: char) -> bool {
+    matches!(character, '\u{9}' | '\u{a}' | '\u{d}')
+        || ('\u{20}'..='\u{d7ff}').contains(&character)
+        || ('\u{e000}'..='\u{fffd}').contains(&character)
+        || ('\u{10000}'..='\u{10ffff}').contains(&character)
+}
+
+fn prevalidate_xml_source(source: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Some(encoding) = xml_declaration_encoding(source)
+        && !is_utf8_compatible_declaration(encoding, source)
+    {
+        warnings.push(format!(
+            "XML declares encoding '{encoding}', but Xray decoded the file as UTF-8; \
+             structural results may not match strict XML consumers."
+        ));
+    }
+
+    let mut invalid_count = 0usize;
+    let mut line = 1usize;
+    let mut column = 1usize;
+    let mut previous_was_cr = false;
+    for character in source.chars() {
+        if !is_valid_xml_1_0_character(character) {
+            invalid_count += 1;
+            if invalid_count <= MAX_XML_CHARACTER_WARNINGS {
+                warnings.push(format!(
+                    "XML 1.0 forbids raw character U+{:04X} at line {line}, column {column}; \
+                     recovered results may be invalid.",
+                    character as u32
+                ));
+            }
+        }
+
+        match character {
+            '\r' => {
+                line += 1;
+                column = 1;
+                previous_was_cr = true;
+            }
+            '\n' if previous_was_cr => {
+                column = 1;
+                previous_was_cr = false;
+            }
+            '\n' => {
+                line += 1;
+                column = 1;
+                previous_was_cr = false;
+            }
+            _ => {
+                column += 1;
+                previous_was_cr = false;
+            }
+        }
+    }
+    if invalid_count > MAX_XML_CHARACTER_WARNINGS {
+        warnings.push(format!(
+            "XML contains {} additional forbidden XML 1.0 characters.",
+            invalid_count - MAX_XML_CHARACTER_WARNINGS
+        ));
+    }
+    warnings
 }
 
 /// Parse an XML file on-demand and return structured definitions.
@@ -171,7 +304,7 @@ pub(crate) fn parse_xml_on_demand_with_warnings(
     let mut ctx = WalkCtx {
         defs: Vec::new(),
         ancestry: Vec::new(),
-        warnings: Vec::new(),
+        warnings: prevalidate_xml_source(source),
     };
     if root.has_error() {
         ctx.warnings
