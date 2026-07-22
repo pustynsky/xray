@@ -4389,6 +4389,16 @@ fn test_xml_on_demand_prevalidation_warnings_reach_public_response() {
         r#"<?xml version="1.0" encoding="utf-8"?><Project><Value>valid</Value></Project>"#,
     )
     .unwrap();
+    std::fs::write(
+        root.join("duplicate.props"),
+        r#"<Project A="1" A="2"><Value>recovered</Value></Project>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("prefix.targets"),
+        r#"<Project><bad:Target>recovered</bad:Target></Project>"#,
+    )
+    .unwrap();
 
     let mut utf16_bytes = vec![0xff, 0xfe];
     for unit in r#"<?xml version="1.0" encoding="utf-16"?><Project/>"#.encode_utf16() {
@@ -4415,6 +4425,8 @@ fn test_xml_on_demand_prevalidation_warnings_reach_public_response() {
     for (file, name, warning_fragment) in [
         ("encoding.props", "Value", Some("declares encoding 'utf-16'")),
         ("control.targets", "Target", Some("U+0001")),
+        ("duplicate.props", "Project", Some("duplicate attribute 'A'")),
+        ("prefix.targets", "Project", Some("undeclared prefix 'bad'")),
         ("valid.csproj", "Value", None),
     ] {
         let result = handle_xray_definitions(
@@ -4494,11 +4506,16 @@ fn test_xml_on_demand_malformed_input_reports_warning() {
             .any(|warning| {
                 warning
                     .as_str()
-                    .is_some_and(|text| text.contains("syntax errors"))
+                    .is_some_and(|text| text.contains("expected `</Child>`"))
             }),
         "{}",
         output
     );
+    assert!(warnings.iter().all(|warning| {
+        warning
+            .as_str()
+            .is_none_or(|text| !text.contains("syntax errors"))
+    }));
 }
 
 #[test]
