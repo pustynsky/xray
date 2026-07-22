@@ -3562,6 +3562,158 @@ mod audit_regression_tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn test_single_edit_supports_windows_long_path_and_max_length_filename() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let file_name = format!("{}.txt", "x".repeat(246));
+        assert_eq!(file_name.encode_utf16().count(), 250);
+        let target = root.join(&file_name);
+        assert!(target.as_os_str().encode_wide().count() > 260);
+
+        let target_windows = target.to_string_lossy().replace('/', "\\");
+        let verbatim_target = std::path::PathBuf::from(format!(r"\\?\{target_windows}"));
+        std::fs::write(&verbatim_target, "before\n").unwrap();
+        let ctx = make_ctx(&root);
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": file_name,
+            "edits": [{ "search": "before", "replace": "after" }],
+        }));
+
+        assert!(!result.is_error, "long-path edit failed: {}", result.content[0].text);
+        assert_eq!(std::fs::read_to_string(&verbatim_target).unwrap(), "after\n");
+        let leaked_staging_files: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".xray_tmp") || name.contains(".xray_backup"))
+            .collect();
+        assert!(
+            leaked_staging_files.is_empty(),
+            "long-path edit leaked staging files: {leaked_staging_files:?}"
+        );
+    }
+
+
+    #[cfg(windows)]
+    #[test]
+    fn test_single_edit_supports_deep_windows_long_path() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let relative_parent = ["a".repeat(70), "b".repeat(70), "c".repeat(70)].join("/");
+        let relative_path = format!("{relative_parent}/deep.txt");
+        let target = root.join(&relative_path);
+        assert!(target.as_os_str().encode_wide().count() > 260);
+
+        let target_windows = target.to_string_lossy().replace('/', "\\");
+        let verbatim_target = std::path::PathBuf::from(format!(r"\\?\{target_windows}"));
+        std::fs::create_dir_all(verbatim_target.parent().unwrap()).unwrap();
+        std::fs::write(&verbatim_target, "before\n").unwrap();
+        let ctx = make_ctx(&root);
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": relative_path,
+            "edits": [{ "search": "before", "replace": "after" }],
+        }));
+
+        assert!(!result.is_error, "deep long-path edit failed: {}", result.content[0].text);
+        assert_eq!(std::fs::read_to_string(&verbatim_target).unwrap(), "after\n");
+    }
+
+
+    #[cfg(windows)]
+    #[test]
+    fn test_multi_file_edit_supports_windows_long_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let long_name = format!("{}.txt", "x".repeat(246));
+        let long_target = root.join(&long_name);
+        let long_target_windows = long_target.to_string_lossy().replace('/', "\\");
+        let verbatim_long_target =
+            std::path::PathBuf::from(format!(r"\\?\{long_target_windows}"));
+        let short_target = root.join("short.txt");
+        std::fs::write(&verbatim_long_target, "before\n").unwrap();
+        std::fs::write(&short_target, "before\n").unwrap();
+        let ctx = make_ctx(&root);
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "paths": [long_name, "short.txt"],
+            "edits": [{ "search": "before", "replace": "after" }],
+        }));
+
+        assert!(!result.is_error, "multi-file long-path edit failed: {}", result.content[0].text);
+        assert_eq!(std::fs::read_to_string(&verbatim_long_target).unwrap(), "after\n");
+        assert_eq!(std::fs::read_to_string(&short_target).unwrap(), "after\n");
+        let leaked_staging_files: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".xray_tmp") || name.contains(".xray_backup"))
+            .collect();
+        assert!(
+            leaked_staging_files.is_empty(),
+            "multi-file long-path edit leaked staging files: {leaked_staging_files:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_path_uses_verbatim_drive_and_unc_prefixes() {
+        fn decode(path: &std::path::Path) -> String {
+            let wide = super::windows_path(path).expect("convert Windows path");
+            String::from_utf16(&wide[..wide.len() - 1]).unwrap()
+        }
+
+        assert_eq!(decode(std::path::Path::new(r"C:\folder/file.txt")), r"\\?\C:\folder\file.txt");
+        assert_eq!(
+            decode(std::path::Path::new(r"C:\folder\nested\..\file.txt")),
+            r"\\?\C:\folder\file.txt"
+        );
+        assert_eq!(
+            decode(std::path::Path::new(r"\\server\share\folder\file.txt")),
+            r"\\?\UNC\server\share\folder\file.txt"
+        );
+        assert_eq!(
+            decode(std::path::Path::new(r"\\?\C:\folder\file.txt")),
+            r"\\?\C:\folder\file.txt"
+        );
+        assert_eq!(
+            decode(std::path::Path::new(r"\\.\pipe\xray")),
+            r"\\.\pipe\xray"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_path_rejects_interior_nul() {
+        let error = super::windows_path(std::path::Path::new("C:\\folder\0file.txt"))
+            .expect_err("interior NUL must be rejected");
+
+        assert_eq!(error, "Windows path contains an interior NUL character");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_staging_paths_fit_windows_component_limit() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let target = std::path::PathBuf::from(format!("{}.txt", "x".repeat(246)));
+        for staged in [super::temp_path_for(&target), super::backup_path_for(&target)] {
+            let component_len = staged.file_name().unwrap().encode_wide().count();
+            assert!(
+                component_len <= 255,
+                "staging component exceeds Windows limit ({component_len}): {}",
+                staged.display()
+            );
+        }
+    }
+
 
     #[cfg(windows)]
     #[test]
@@ -5929,6 +6081,21 @@ fn test_edit005_temp_path_is_unique_per_call() {
     for _ in 0..1000 {
         let p = super::temp_path_for(&target);
         assert!(seen.insert(p), "temp_path_for produced a collision within 1000 calls");
+    }
+}
+
+
+#[test]
+fn test_staging_paths_fit_portable_component_byte_limit() {
+    let target = PathBuf::from(format!("{}.txt", "界".repeat(250)));
+    for staged in [super::temp_path_for(&target), super::backup_path_for(&target)] {
+        let component = staged.file_name().unwrap().to_string_lossy();
+        assert!(
+            component.len() <= 255,
+            "staging component exceeds portable byte limit ({}): {}",
+            component.len(),
+            staged.display()
+        );
     }
 }
 

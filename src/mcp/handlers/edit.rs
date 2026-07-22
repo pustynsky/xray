@@ -755,9 +755,53 @@ const WINDOWS_PRESERVED_ATTRIBUTES: u32 =
         | windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
 
 #[cfg(windows)]
-fn windows_path(path: &Path) -> Vec<u16> {
+fn windows_path(path: &Path) -> Result<Vec<u16>, String> {
     use std::os::windows::ffi::OsStrExt;
-    path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::path::absolute(path).map_err(|error| {
+            format!(
+                "cannot make Windows path absolute for '{}': {}",
+                path.display(),
+                error
+            )
+        })?
+    };
+    let normalized = lexical_normalize(&absolute);
+    let mut wide: Vec<u16> = normalized
+        .as_os_str()
+        .encode_wide()
+        .map(|unit| if unit == b'/' as u16 { b'\\' as u16 } else { unit })
+        .collect();
+    if wide.contains(&0) {
+        return Err("Windows path contains an interior NUL character".to_string());
+    }
+
+    let backslash = b'\\' as u16;
+    let question = b'?' as u16;
+    let dot = b'.' as u16;
+    let has_verbatim_or_device_prefix = wide.len() >= 4
+        && wide[0] == backslash
+        && wide[1] == backslash
+        && matches!(wide[2], unit if unit == question || unit == dot)
+        && wide[3] == backslash;
+
+    if !has_verbatim_or_device_prefix {
+        if wide.len() >= 2 && wide[0] == backslash && wide[1] == backslash {
+            let mut verbatim_unc: Vec<u16> = r"\\?\UNC\".encode_utf16().collect();
+            verbatim_unc.extend_from_slice(&wide[2..]);
+            wide = verbatim_unc;
+        } else {
+            let mut verbatim: Vec<u16> = r"\\?\".encode_utf16().collect();
+            verbatim.extend(wide);
+            wide = verbatim;
+        }
+    }
+
+    wide.push(0);
+    Ok(wide)
 }
 
 #[cfg(windows)]
@@ -766,7 +810,7 @@ fn get_windows_file_attributes(path: &Path) -> Result<u32, String> {
         GetFileAttributesW,
         INVALID_FILE_ATTRIBUTES,
     };
-    let path_wide = windows_path(path);
+    let path_wide = windows_path(path)?;
     // SAFETY: `path_wide` is a NUL-terminated UTF-16 buffer valid for the call.
     let attributes = unsafe { GetFileAttributesW(path_wide.as_ptr()) };
     if attributes == INVALID_FILE_ATTRIBUTES {
@@ -785,7 +829,7 @@ fn set_windows_file_attributes(path: &Path, attributes: u32) -> Result<(), Strin
         FILE_ATTRIBUTE_NORMAL,
         SetFileAttributesW,
     };
-    let path_wide = windows_path(path);
+    let path_wide = windows_path(path)?;
     let attributes = if attributes == 0 { FILE_ATTRIBUTE_NORMAL } else { attributes };
     // SAFETY: `path_wide` is a NUL-terminated UTF-16 buffer valid for the call.
     if unsafe { SetFileAttributesW(path_wide.as_ptr(), attributes) } == 0 {
@@ -1756,28 +1800,61 @@ fn verify_written_file(resolved: &Path, expected_lf_content: &str, line_ending: 
     ))
 }
 
-/// Generate a per-call unique temp file path in the same directory as `target`.
-///
-/// EDIT-005: a deterministic name (e.g. `.{name}.xray_tmp`) collides between
-/// concurrent `xray_edit` calls on the same file (LLM parallel tool-calls, two
-/// MCP servers, agent-vs-formatter). Both `File::create` succeed (truncate),
-/// both write, both rename → second rename overwrites first → silent lost write.
-/// Including PID + nanosecond timestamp + atomic counter makes practical
-/// collision impossible.
-fn temp_path_for(target: &Path) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
+fn truncate_to_component_limits(
+    value: &str,
+    max_utf16_units: usize,
+    max_utf8_bytes: usize,
+) -> &str {
+    let mut utf16_units = 0;
+    for (index, character) in value.char_indices() {
+        let next_utf16_units = utf16_units + character.len_utf16();
+        let next_utf8_bytes = index + character.len_utf8();
+        if next_utf16_units > max_utf16_units || next_utf8_bytes > max_utf8_bytes {
+            return &value[..index];
+        }
+        utf16_units = next_utf16_units;
+    }
+    value
+}
 
-    let file_name = target.file_name()
-        .map(|n| n.to_string_lossy().to_string())
+/// Build a sibling staging path whose component fits Windows UTF-16 and
+/// portable UTF-8 byte limits without splitting a Unicode scalar value.
+fn staging_path_for(target: &Path, marker: &str, counter: u64) -> PathBuf {
+    const MAX_COMPONENT_UTF16_UNITS: usize = 255;
+
+    let file_name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".to_string());
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
+        .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-    target.with_file_name(format!(".{}.xray_tmp.{}.{}.{}", file_name, pid, nanos, counter))
+    let suffix = format!(".{marker}.{pid}.{nanos}.{counter}");
+    let file_name_utf16_budget = MAX_COMPONENT_UTF16_UNITS
+        .saturating_sub(1)
+        .saturating_sub(suffix.encode_utf16().count());
+    let file_name_utf8_budget = MAX_COMPONENT_UTF16_UNITS
+        .saturating_sub(1)
+        .saturating_sub(suffix.len());
+    let bounded_file_name = truncate_to_component_limits(
+        &file_name,
+        file_name_utf16_budget,
+        file_name_utf8_budget,
+    );
+    target.with_file_name(format!(".{bounded_file_name}{suffix}"))
+}
+
+/// Generate a per-call unique temp file path in the same directory as `target`.
+///
+/// EDIT-005: PID + nanosecond timestamp + atomic counter prevent concurrent
+/// edits of the same target from sharing a staging file.
+fn temp_path_for(target: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    staging_path_for(target, "xray_tmp", COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Backup file path used by `rename_replace` to protect against the Windows
@@ -1786,16 +1863,11 @@ fn backup_path_for(target: &Path) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    let file_name = target.file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "file".to_string());
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-    target.with_file_name(format!(".{}.xray_backup.{}.{}.{}", file_name, pid, nanos, counter))
+    staging_path_for(
+        target,
+        "xray_backup",
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+    )
 }
 
 /// Rename `src` to `dst`, replacing `dst` if it exists.
