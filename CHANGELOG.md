@@ -1,5 +1,17 @@
 # Changelog
 
+
+## 0.3.1 (2026-07-22)
+
+- **C# and TypeScript caller resolution is more precise.** Inline, typed, conditional, and nullish receivers retain their known class instead of expanding to unrelated same-named methods.
+
+- **XML definition parsing handles more real-world input.** Entity decoding and CDATA are supported, and malformed XML is validated before structural parsing so recovery warnings remain accurate.
+
+- **Caller graph truncation is reported truthfully.** `xray_callers` now distinguishes a complete graph from a result cut short by configured limits.
+
+- **Watcher rename reconciliation is atomic.** Rename paths are updated together, avoiding stale index state during file moves.
+
+
 ## 0.3.0 (2026-07-21)
 
 
