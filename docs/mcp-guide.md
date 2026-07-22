@@ -345,8 +345,8 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 | `class`              | Scope to a specific class. DI-aware: `class: "UserService"` also finds callers using `IUserService`. Works for both `"up"` and `"down"` directions. See [DI Support](di-support.md) for the full list of resolved patterns and supported containers. |
 | `direction`          | `"up"` = find callers (default), `"down"` = find callees                                                                                            |
 | `depth`              | Max recursion depth (default: 3, max: 10)                                                                                                           |
-| `maxCallersPerLevel` | Max callers per node (default: 10). Prevents explosion.                                                                                             |
-| `maxTotalNodes`      | Max total nodes in tree (default: 200). Caps output size.                                                                                           |
+| `maxCallersPerLevel` | Max caller/callee nodes emitted per tree level (default: 10). Prevents explosion.                                                                   |
+| `maxTotalNodes`      | Max total nodes emitted in the tree (default: 200). Caps output size.                                                                                |
 | `excludeDir`         | Directory substrings to exclude, e.g. `["\\test\\", "\\Mock\\"]`                                                                                    |
 | `excludeFile`        | File path substrings to exclude                                                                                                                     |
 | `resolveInterfaces`  | Auto-resolve interface → implementation (default: true)                                                                                             |
@@ -500,6 +500,8 @@ Query multiple methods in a single call to reduce MCP round trips. Each method g
 - `maxTotalNodes` — per-method (each gets full budget independently)
 - `maxTotalBodyLines` — shared across all methods
 - Response size auto-scales: `max(base, 32KB × N methods)`, capped at 128KB
+
+When `maxTotalNodes` or `maxCallersPerLevel` omits an otherwise eligible node, `resultStatus` reports `status="partial"`, `complete=false`, `totalKnown=false`, and `safeForExhaustiveClaims=false`. `shown.nodes` is exact; `total.nodes` and `omitted.nodes` are lower bounds because traversal stops at the protective cap. Filling a cap exactly without finding another eligible node remains complete.
 
 **Backward compatibility:** Single-method calls (no comma) return the existing format with `callTree` at the top level. Multi-method calls return `results` array.
 

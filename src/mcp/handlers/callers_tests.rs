@@ -476,6 +476,8 @@ fn test_prefilter_does_not_expand_by_base_types() {
         visited,
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
         interface_lookup_cache: HashMap::new(),
@@ -591,6 +593,8 @@ fn test_callee_tree_depth2_no_cross_class_pollution() {
         visited,
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        total_limit_hit: false,
+        per_level_dropped: 0,
     };
     let callees = callee_builder.build("process", Some("ClassA"), 0);
 
@@ -1645,6 +1649,8 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
         visited,
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
         interface_lookup_cache: HashMap::new(),
@@ -2047,6 +2053,8 @@ fn test_sql_callee_tree_exec_dependencies() {
         visited,
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        total_limit_hit: false,
+        per_level_dropped: 0,
     };
     let callees = callee_builder.build("usp_ProcessBatch", Some("dbo"), 0);
 
@@ -2162,6 +2170,8 @@ fn test_sql_caller_tree_who_calls_sp() {
         visited,
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
         interface_lookup_cache: HashMap::new(),
@@ -2705,6 +2715,8 @@ fn test_impact_analysis_finds_test_methods() {
         visited: HashSet::new(),
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
         interface_lookup_cache: HashMap::new(),
@@ -2753,6 +2765,8 @@ fn test_impact_analysis_finds_test_methods() {
         visited: HashSet::new(),
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
         interface_lookup_cache: HashMap::new(),
@@ -2873,6 +2887,8 @@ fn test_impact_analysis_non_test_method_recurses_normally() {
         visited: HashSet::new(),
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
         interface_lookup_cache: HashMap::new(),
@@ -3168,6 +3184,84 @@ fn test_multi_method_direction_down() {
     assert_eq!(v["query"]["direction"].as_str().unwrap(), "down");
     let results = v["results"].as_array().unwrap();
     assert_eq!(results.len(), 2);
+}
+
+
+#[test]
+fn test_multi_method_total_limit_reports_partial() {
+    let ctx = build_callers_fixture_with_n_callers(3);
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
+        "method": ["process", "missing"],
+        "class": "OrderService",
+        "depth": 1,
+        "maxCallersPerLevel": 10,
+        "maxTotalNodes": 1
+    }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalNodes"], 1, "{output:#}");
+    assert_eq!(output["results"][0]["truncated"], true, "{output:#}");
+    let status = &output["resultStatus"];
+    assert_eq!(status["status"], "partial", "{output:#}");
+    assert_eq!(status["totalKnown"], false, "{output:#}");
+    assert_eq!(status["shown"]["nodes"], 1, "{output:#}");
+    assert_eq!(status["total"]["nodes"], 2, "{output:#}");
+    assert_eq!(status["omitted"]["nodes"], 1, "{output:#}");
+    assert!(status["reasons"].as_array().unwrap().iter()
+        .any(|reason| reason == "max_total_nodes_limit"), "{output:#}");
+}
+
+
+#[test]
+fn test_multi_method_up_per_level_zero_reports_partial() {
+    let ctx = build_callers_fixture_with_n_callers(3);
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
+        "method": ["process", "missing"],
+        "class": "OrderService",
+        "depth": 1,
+        "maxCallersPerLevel": 0,
+        "maxTotalNodes": 10
+    }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalNodes"], 0, "{output:#}");
+    assert_eq!(output["summary"]["perLevelTruncated"], true, "{output:#}");
+    let status = &output["resultStatus"];
+    assert_eq!(status["status"], "partial", "{output:#}");
+    assert_eq!(status["totalKnown"], false, "{output:#}");
+    assert_eq!(status["shown"]["nodes"], 0, "{output:#}");
+    assert!(status["total"]["nodes"].as_u64().unwrap() >= 1, "{output:#}");
+    assert!(status["reasons"].as_array().unwrap().iter()
+        .any(|reason| reason == "max_callers_per_level_limit"), "{output:#}");
+}
+
+#[test]
+fn test_multi_method_down_per_level_limit_reports_partial() {
+    let ctx = build_down_limit_fixture();
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
+        "method": ["start", "missing"],
+        "class": "Root",
+        "direction": "down",
+        "depth": 1,
+        "maxCallersPerLevel": 1,
+        "maxTotalNodes": 10
+    }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalNodes"], 1, "{output:#}");
+    assert_eq!(output["summary"]["perLevelTruncated"], true, "{output:#}");
+    assert_eq!(output["summary"]["callersDroppedPerLevel"], 2, "{output:#}");
+    let status = &output["resultStatus"];
+    assert_eq!(status["status"], "partial", "{output:#}");
+    assert_eq!(status["totalKnown"], false, "{output:#}");
+    assert_eq!(status["shown"]["nodes"], 1, "{output:#}");
+    assert_eq!(status["total"]["nodes"], 3, "{output:#}");
+    assert_eq!(status["omitted"]["nodes"], 2, "{output:#}");
+    assert!(status["reasons"].as_array().unwrap().iter()
+        .any(|reason| reason == "max_callers_per_level_limit"), "{output:#}");
 }
 
 
@@ -3583,6 +3677,8 @@ fn test_per_level_truncation_reports_dropped_count() {
         visited: HashSet::new(),
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
         interface_lookup_cache: HashMap::new(),
@@ -3673,6 +3769,8 @@ fn test_per_level_truncation_not_set_when_under_limit() {
         visited: HashSet::new(),
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
         interface_lookup_cache: HashMap::new(),
@@ -4021,6 +4119,161 @@ fn build_callers_fixture_with_n_callers(num_callers: usize) -> super::HandlerCon
     }
 }
 
+fn build_down_limit_fixture() -> super::HandlerContext {
+    let definitions = vec![
+        class_def(0, "Root", vec![]),
+        method_def(0, "start", "Root", 5, 15),
+        class_def(1, "Alpha", vec![]),
+        method_def(1, "alpha", "Alpha", 5, 15),
+        class_def(1, "Beta", vec![]),
+        method_def(1, "beta", "Beta", 20, 30),
+        class_def(1, "Gamma", vec![]),
+        method_def(1, "gamma", "Gamma", 35, 45),
+    ];
+    let mut method_calls = HashMap::new();
+    method_calls.insert(1, vec![
+        CallSite { method_name: "alpha".to_string(), receiver_type: Some("Alpha".to_string()), line: 7, receiver_is_generic: false },
+        CallSite { method_name: "beta".to_string(), receiver_type: Some("Beta".to_string()), line: 8, receiver_is_generic: false },
+        CallSite { method_name: "gamma".to_string(), receiver_type: Some("Gamma".to_string()), line: 9, receiver_is_generic: false },
+    ]);
+    let def_idx = make_def_index(definitions, method_calls);
+
+    super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(crate::ContentIndex::default())),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        server_ext: "ts".to_string(),
+        ..Default::default()
+    }
+}
+
+
+#[test]
+fn test_max_total_nodes_reports_partial_when_eligible_callers_are_omitted() {
+    let ctx = build_callers_fixture_with_n_callers(3);
+
+    for cap in 1..=3 {
+        let result = handle_xray_callers(&ctx, &serde_json::json!({
+            "method": ["process"],
+            "class": "OrderService",
+            "depth": 1,
+            "maxCallersPerLevel": 10,
+            "maxTotalNodes": cap
+        }));
+        assert!(!result.is_error, "handler should not error: {}", result.content[0].text);
+
+        let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["callTree"].as_array().unwrap().len(), cap, "{output:#}");
+        let status = &output["resultStatus"];
+        let truncated = cap < 3;
+        assert_eq!(status["status"], if truncated { "partial" } else { "complete" }, "{output:#}");
+        assert_eq!(status["complete"], !truncated, "{output:#}");
+        assert_eq!(status["totalKnown"], !truncated, "{output:#}");
+        assert_eq!(status["safeForExhaustiveClaims"], !truncated, "{output:#}");
+        let total_lower_bound = if truncated { cap + 1 } else { cap };
+        assert_eq!(status["shown"]["nodes"].as_u64(), Some(cap as u64), "{output:#}");
+        assert_eq!(status["total"]["nodes"].as_u64(), Some(total_lower_bound as u64), "{output:#}");
+        assert_eq!(status["omitted"]["nodes"].as_u64(), Some((total_lower_bound - cap) as u64), "{output:#}");
+        assert_eq!(status["reasons"].as_array().unwrap().iter()
+            .any(|reason| reason == "max_total_nodes_limit"), truncated, "{output:#}");
+    }
+}
+
+
+#[test]
+fn test_up_max_callers_per_level_zero_reports_partial() {
+    let ctx = build_callers_fixture_with_n_callers(3);
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
+        "method": ["process"],
+        "class": "OrderService",
+        "depth": 1,
+        "maxCallersPerLevel": 0,
+        "maxTotalNodes": 10
+    }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["callTree"].as_array().unwrap().is_empty(), "{output:#}");
+    assert_eq!(output["summary"]["perLevelTruncated"], true, "{output:#}");
+    assert!(output["summary"]["callersDroppedPerLevel"].as_u64().unwrap() >= 1, "{output:#}");
+    let status = &output["resultStatus"];
+    assert_eq!(status["status"], "partial", "{output:#}");
+    assert_eq!(status["complete"], false, "{output:#}");
+    assert_eq!(status["totalKnown"], false, "{output:#}");
+    assert_eq!(status["shown"]["nodes"], 0, "{output:#}");
+    assert!(status["total"]["nodes"].as_u64().unwrap() >= 1, "{output:#}");
+    assert!(status["omitted"]["nodes"].as_u64().unwrap() >= 1, "{output:#}");
+    assert!(status["reasons"].as_array().unwrap().iter()
+        .any(|reason| reason == "max_callers_per_level_limit"), "{output:#}");
+}
+
+#[test]
+fn test_down_max_callers_per_level_reports_partial_when_callees_are_omitted() {
+    let ctx = build_down_limit_fixture();
+
+    for cap in 0..=3 {
+        let result = handle_xray_callers(&ctx, &serde_json::json!({
+            "method": ["start"],
+            "class": "Root",
+            "direction": "down",
+            "depth": 1,
+            "maxCallersPerLevel": cap,
+            "maxTotalNodes": 10
+        }));
+        assert!(!result.is_error, "handler should not error: {}", result.content[0].text);
+
+        let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["callTree"].as_array().unwrap().len(), cap, "{output:#}");
+        let status = &output["resultStatus"];
+        let truncated = cap < 3;
+        assert_eq!(status["status"], if truncated { "partial" } else { "complete" }, "{output:#}");
+        assert_eq!(status["complete"], !truncated, "{output:#}");
+        assert_eq!(status["totalKnown"], !truncated, "{output:#}");
+        assert_eq!(status["safeForExhaustiveClaims"], !truncated, "{output:#}");
+        assert_eq!(status["shown"]["nodes"].as_u64(), Some(cap as u64), "{output:#}");
+        assert_eq!(status["total"]["nodes"].as_u64(), Some(3), "{output:#}");
+        assert_eq!(status["omitted"]["nodes"].as_u64(), Some((3 - cap) as u64), "{output:#}");
+        assert_eq!(status["reasons"].as_array().unwrap().iter()
+            .any(|reason| reason == "max_callers_per_level_limit"), truncated, "{output:#}");
+        if truncated {
+            assert_eq!(output["summary"]["perLevelTruncated"], true, "{output:#}");
+            assert_eq!(output["summary"]["callersDroppedPerLevel"], 3 - cap, "{output:#}");
+        }
+    }
+}
+
+
+#[test]
+fn test_down_max_total_nodes_preserves_exact_fit_completeness() {
+    let ctx = build_down_limit_fixture();
+
+    for cap in 1..=3 {
+        let result = handle_xray_callers(&ctx, &serde_json::json!({
+            "method": ["start"],
+            "class": "Root",
+            "direction": "down",
+            "depth": 1,
+            "maxCallersPerLevel": 10,
+            "maxTotalNodes": cap
+        }));
+        assert!(!result.is_error, "handler should not error: {}", result.content[0].text);
+
+        let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["callTree"].as_array().unwrap().len(), cap, "{output:#}");
+        let status = &output["resultStatus"];
+        let truncated = cap < 3;
+        assert_eq!(status["status"], if truncated { "partial" } else { "complete" }, "{output:#}");
+        assert_eq!(status["totalKnown"], !truncated, "{output:#}");
+        assert_eq!(status["safeForExhaustiveClaims"], !truncated, "{output:#}");
+        let total_lower_bound = if truncated { cap + 1 } else { cap };
+        assert_eq!(status["shown"]["nodes"].as_u64(), Some(cap as u64), "{output:#}");
+        assert_eq!(status["total"]["nodes"].as_u64(), Some(total_lower_bound as u64), "{output:#}");
+        assert_eq!(status["omitted"]["nodes"].as_u64(), Some((total_lower_bound - cap) as u64), "{output:#}");
+        assert_eq!(status["reasons"].as_array().unwrap().iter()
+            .any(|reason| reason == "max_total_nodes_limit"), truncated, "{output:#}");
+    }
+}
+
+
 #[test]
 fn test_advisory_low_count_suppressed_when_truncated() {
     // Regression: the low-count advisory must NOT fire when the result was
@@ -4253,6 +4506,8 @@ fn test_impact_analysis_cap_sets_truncation_flag_when_collection_capped() {
         visited: HashSet::new(),
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
         interface_lookup_cache: HashMap::new(),
@@ -4296,6 +4551,8 @@ fn test_impact_analysis_bounded_collection_starves_late_test_callers() {
         visited: HashSet::new(),
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
         interface_lookup_cache: HashMap::new(),
@@ -4349,6 +4606,8 @@ fn test_impact_analysis_with_class_filter_avoids_starvation() {
         visited: HashSet::new(),
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
         interface_lookup_cache: HashMap::new(),
@@ -4522,6 +4781,8 @@ fn test_mid_tree_iface_expansion_finds_caller_through_sibling_impl() {
         visited: HashSet::new(),
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
         interface_lookup_cache: HashMap::new(),
@@ -4560,6 +4821,8 @@ fn test_mid_tree_iface_expansion_finds_caller_through_sibling_impl() {
         visited: HashSet::new(),
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
         interface_lookup_cache: HashMap::new(),
@@ -4592,6 +4855,8 @@ fn test_mid_tree_iface_expansion_finds_caller_through_sibling_impl() {
         visited: HashSet::new(),
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
         interface_lookup_cache: HashMap::new(),
@@ -4746,6 +5011,8 @@ fn test_root_iface_expansion_honors_visible_depth_budget() {
         visited: HashSet::new(),
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
         interface_lookup_cache: HashMap::new(),
