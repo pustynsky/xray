@@ -90,8 +90,9 @@ fn build_callers_result_status(
     template_navigation: bool,
 ) -> Value {
     let body_complete = !include_body || body_lines_emitted >= body_lines_available;
-    let complete = !truncated && per_level_dropped == 0 && body_complete;
-    let status = if shown_nodes == 0 {
+    let graph_complete = !truncated && per_level_dropped == 0;
+    let complete = graph_complete && body_complete;
+    let status = if shown_nodes == 0 && graph_complete {
         "not_found"
     } else if complete {
         "complete"
@@ -99,7 +100,7 @@ fn build_callers_result_status(
         "partial"
     };
     let mut reasons = Vec::new();
-    if shown_nodes == 0 {
+    if shown_nodes == 0 && graph_complete {
         reasons.push("no_call_graph_matches".to_string());
     }
     if truncated {
@@ -134,6 +135,7 @@ fn build_callers_result_status(
         json!({ "nodes": total_nodes })
     };
     add_collection_accounting(&mut result_status, shown, total);
+    result_status["totalKnown"] = json!(graph_complete);
     result_status["scope"] = json!({
         "productionOnly": production_only,
         "includesTests": !production_only,
@@ -604,6 +606,8 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             visited: HashSet::new(),
             file_cache,
             total_body_lines_emitted,
+            root_accounted_callers: HashSet::new(),
+            total_limit_hit: false,
             tests_found: Vec::new(),
             per_level_dropped: 0,
             interface_lookup_cache: HashMap::new(),
@@ -623,11 +627,10 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         let tree = if resolve_interfaces { dedup_caller_tree(tree) } else { tree };
 
         let total_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
-        // CALL-007: `total_nodes == max_total_nodes` means the builder filled
-        // the cap exactly without trying to add another node — that is NOT
-        // truncation. Use `>` so clients aren't tricked into a panic-loop of
-        // ever-larger `maxTotalNodes` retries on full-but-fitting trees.
-        let truncated = total_nodes > max_total_nodes;
+        let truncated = builder.total_limit_hit;
+        let total_nodes_lower_bound = total_nodes
+            .saturating_add(builder.per_level_dropped)
+            .saturating_add(usize::from(truncated));
         let search_elapsed = search_start.elapsed();
         let mut summary = json!({
             "nodesVisited": builder.visited.len(),
@@ -752,8 +755,8 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         };
         let result_status = build_callers_result_status(
             count_tree_nodes(&tree),
-            total_nodes,
-            result_truncated,
+            total_nodes_lower_bound,
+            truncated,
             builder.per_level_dropped,
             include_body,
             builder.total_body_lines_emitted,
@@ -770,6 +773,8 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             visited: HashSet::new(),
             file_cache,
             total_body_lines_emitted,
+            total_limit_hit: false,
+            per_level_dropped: 0,
         };
         let tree = builder.build(
             &method_name,
@@ -778,11 +783,20 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         );
 
         let total_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
+        let truncated = builder.total_limit_hit;
+        let total_nodes_lower_bound = total_nodes
+            .saturating_add(builder.per_level_dropped)
+            .saturating_add(usize::from(truncated));
         let search_elapsed = search_start.elapsed();
         let mut summary = json!({
             "totalNodes": total_nodes,
+            "truncated": truncated,
             "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
         });
+        if builder.per_level_dropped > 0 {
+            summary["perLevelTruncated"] = json!(true);
+            summary["callersDroppedPerLevel"] = json!(builder.per_level_dropped);
+        }
         if include_body {
             summary["totalBodyLinesReturned"] = json!(builder.total_body_lines_emitted);
             let (_, tree_available) = compute_body_lines_from_tree(&tree, root_method.as_ref());
@@ -841,9 +855,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         };
         let result_status = build_callers_result_status(
             count_tree_nodes(&tree),
-            total_nodes,
-            total_nodes > max_total_nodes,
-            0,
+            total_nodes_lower_bound,
+            truncated,
+            builder.per_level_dropped,
             include_body,
             builder.total_body_lines_emitted,
             body_lines_available,
@@ -934,6 +948,7 @@ fn handle_multi_method_callers(
     let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
     let mut total_nodes_all: usize = 0;
+    let mut total_nodes_lower_bound_all: usize = 0;
     // MINOR-7: aggregate per-level truncation across all methods in the batch.
     let mut total_per_level_dropped: usize = 0;
 
@@ -1009,6 +1024,8 @@ fn handle_multi_method_callers(
                 visited: HashSet::new(),
                 file_cache,
                 total_body_lines_emitted,
+                root_accounted_callers: HashSet::new(),
+                total_limit_hit: false,
                 tests_found: Vec::new(),
                 per_level_dropped: 0,
                 interface_lookup_cache: HashMap::new(),
@@ -1026,14 +1043,17 @@ fn handle_multi_method_callers(
             let method_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
             total_nodes_all += method_nodes;
 
+            method_result["nodesInTree"] = json!(count_tree_nodes(&tree));
             method_result["callTree"] = json!(tree);
-            method_result["nodesInTree"] = json!(method_nodes);
             method_result["nodesVisited"] = json!(builder.visited.len());
-            // CALL-007: `>` not `>=` — exact-fit is not truncation.
-            let method_truncated = method_nodes > max_total_nodes;
+            let method_truncated = builder.total_limit_hit;
             method_result["truncated"] = json!(method_truncated);
             // MINOR-7: per-method per-level truncation signal
             let method_dropped = builder.per_level_dropped;
+            total_nodes_lower_bound_all = total_nodes_lower_bound_all
+                .saturating_add(method_nodes)
+                .saturating_add(method_dropped)
+                .saturating_add(usize::from(method_truncated));
             total_per_level_dropped += method_dropped;
             if method_dropped > 0 {
                 method_result["perLevelTruncated"] = json!(true);
@@ -1091,6 +1111,8 @@ fn handle_multi_method_callers(
                 visited: HashSet::new(),
                 file_cache,
                 total_body_lines_emitted,
+                total_limit_hit: false,
+                per_level_dropped: 0,
             };
             let tree = builder.build(
                 method_name,
@@ -1102,10 +1124,20 @@ fn handle_multi_method_callers(
             let method_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
             total_nodes_all += method_nodes;
 
+            method_result["nodesInTree"] = json!(count_tree_nodes(&tree));
             method_result["callTree"] = json!(tree);
-            method_result["nodesInTree"] = json!(method_nodes);
-            let method_truncated = method_nodes > max_total_nodes;
+            let method_truncated = builder.total_limit_hit;
             method_result["truncated"] = json!(method_truncated);
+            let method_dropped = builder.per_level_dropped;
+            total_nodes_lower_bound_all = total_nodes_lower_bound_all
+                .saturating_add(method_nodes)
+                .saturating_add(method_dropped)
+                .saturating_add(usize::from(method_truncated));
+            total_per_level_dropped += method_dropped;
+            if method_dropped > 0 {
+                method_result["perLevelTruncated"] = json!(true);
+                method_result["callersDroppedPerLevel"] = json!(method_dropped);
+            }
 
             if let Some(root) = &root_method {
                 method_result["rootMethod"] = root.clone();
@@ -1194,7 +1226,7 @@ fn handle_multi_method_callers(
 
     let result_status = build_callers_result_status(
         shown_nodes,
-        total_nodes_all,
+        total_nodes_lower_bound_all,
         any_truncated,
         total_per_level_dropped,
         include_body,
@@ -1430,18 +1462,36 @@ fn build_grep_references(
 
 // ─── Internal helpers ───────────────────────────────────────────────
 
+fn caller_output_identity(
+    caller_name: &str,
+    caller_parent: Option<&str>,
+    caller_line: u32,
+    file_path: &str,
+) -> String {
+    let file_name = Path::new(file_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("?");
+    format!(
+        "{}.{}.{}.{}",
+        caller_parent.unwrap_or("?"),
+        caller_name,
+        file_name,
+        caller_line,
+    )
+}
+
 /// Remove duplicate nodes from the caller tree (can occur with resolveInterfaces
 /// when the same caller is found through multiple interface implementations).
 fn dedup_caller_tree(tree: Vec<Value>) -> Vec<Value> {
     let mut seen: HashSet<String> = HashSet::new();
     tree.into_iter()
         .filter(|node| {
-            let key = format!(
-                "{}.{}.{}.{}",
-                node.get("class").and_then(|v| v.as_str()).unwrap_or("?"),
+            let key = caller_output_identity(
                 node.get("method").and_then(|v| v.as_str()).unwrap_or("?"),
+                node.get("class").and_then(|v| v.as_str()),
+                node.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                 node.get("file").and_then(|v| v.as_str()).unwrap_or("?"),
-                node.get("line").and_then(|v| v.as_u64()).unwrap_or(0),
             );
             seen.insert(key)
         })
@@ -1469,6 +1519,26 @@ fn build_extension_methods_lower(
 struct CallerLimits {
     max_callers_per_level: usize,
     max_total_nodes: usize,
+}
+
+
+fn try_reserve_graph_node(
+    node_count: &AtomicUsize,
+    max_total_nodes: usize,
+    total_limit_hit: &mut bool,
+) -> bool {
+    let reserved = node_count.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |current| (current < max_total_nodes).then_some(current + 1),
+    );
+    if reserved.is_err() {
+        // Set only after an eligible node is found beyond the budget. Merely
+        // filling the cap remains an exact-fit complete result.
+        *total_limit_hit = true;
+        return false;
+    }
+    true
 }
 
 /// Shared context for caller/callee tree building.
@@ -1658,6 +1728,8 @@ struct CallerTreeBuilder<'a> {
     visited: HashSet<String>,
     file_cache: HashMap<String, Option<String>>,
     total_body_lines_emitted: usize,
+    root_accounted_callers: HashSet<String>,
+    total_limit_hit: bool,
     tests_found: Vec<Value>,
     /// MINOR-7: counts callers dropped by per-level `maxCallersPerLevel` truncation.
     /// Exposed in the summary as `perLevelTruncated` / `callersDroppedPerLevel` so
@@ -1745,7 +1817,7 @@ impl CallerTreeBuilder<'_> {
         let mut callers: Vec<Value> = Vec::new();
 
         for &di in name_indices {
-            if self.ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= self.ctx.limits.max_total_nodes { break; }
+            if self.total_limit_hit { break; }
             if let Some(def) = def_idx.definitions.get(di as usize)
                 // A1 fix: Only expand interface callers for method-like definitions.
                 // Without this filter, properties/fields/enum members with the same name
@@ -2195,13 +2267,9 @@ impl CallerTreeBuilder<'_> {
         current_depth: usize,
         call_chain: &[String],
     ) -> Vec<Value> {
-        if current_depth >= self.max_depth {
+        if current_depth >= self.max_depth || self.total_limit_hit {
             return Vec::new();
         }
-        if self.ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= self.ctx.limits.max_total_nodes {
-            return Vec::new();
-        }
-
         let method_lower = method_name.to_lowercase();
 
         let target_line = find_target_line(self.ctx.def_idx, &method_lower, parent_class);
@@ -2246,15 +2314,15 @@ impl CallerTreeBuilder<'_> {
         // Impact analysis uses a higher but still bounded limit to prevent latency
         // blow-up on popular method names in large indexes.
         let collection_limit = if self.ctx.impact_analysis {
-            (self.ctx.limits.max_callers_per_level * 20).min(5000)
+            self.ctx.limits.max_callers_per_level.saturating_mul(20).min(5000)
         } else {
-            self.ctx.limits.max_callers_per_level * 3
-        };
+            self.ctx.limits.max_callers_per_level.saturating_mul(3)
+        }
+        .max(1);
 
         let mut collection_capped = false;
         for posting in postings {
             if caller_map.len() >= collection_limit { collection_capped = true; break; }
-            if self.ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= self.ctx.limits.max_total_nodes { break; }
 
             // If we have a parent class context, skip files that don't reference that class
             if let Some(ref pids) = parent_file_ids
@@ -2276,7 +2344,6 @@ impl CallerTreeBuilder<'_> {
 
             for &line in &posting.lines {
                 if caller_map.len() >= collection_limit { break; }
-                if self.ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= self.ctx.limits.max_total_nodes { break; }
 
                 if definition_locations.contains(&(def_fid, line)) { continue; }
 
@@ -2332,6 +2399,28 @@ impl CallerTreeBuilder<'_> {
 
         if collection_capped && self.ctx.impact_analysis {
             self.ctx.impact_analysis_truncated.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        if current_depth == 0 {
+            caller_order.retain(|caller_key| {
+                let info = &caller_map[caller_key];
+                let identity = caller_output_identity(
+                    &info.name,
+                    info.parent.as_deref(),
+                    info.line,
+                    &info.file_path,
+                );
+                !self.root_accounted_callers.contains(&identity)
+            });
+            for caller_key in &caller_order {
+                let info = &caller_map[caller_key];
+                self.root_accounted_callers.insert(caller_output_identity(
+                    &info.name,
+                    info.parent.as_deref(),
+                    info.line,
+                    &info.file_path,
+                ));
+            }
         }
 
         // Phase 1.5: Sort callers — non-test first (primary), popularity DESC (secondary)
@@ -2396,9 +2485,13 @@ impl CallerTreeBuilder<'_> {
                 None => continue,
             };
 
-            if self.ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= self.ctx.limits.max_total_nodes { break; }
-            self.ctx.node_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
+            if !try_reserve_graph_node(
+                self.ctx.node_count,
+                self.ctx.limits.max_total_nodes,
+                &mut self.total_limit_hit,
+            ) {
+                break;
+            }
             let mut sorted_call_sites = info.call_sites.clone();
             sorted_call_sites.sort();
 
@@ -2674,6 +2767,8 @@ struct CalleeTreeBuilder<'a> {
     visited: HashSet<String>,
     file_cache: HashMap<String, Option<String>>,
     total_body_lines_emitted: usize,
+    total_limit_hit: bool,
+    per_level_dropped: usize,
 }
 
 impl CalleeTreeBuilder<'_> {
@@ -2683,17 +2778,13 @@ impl CalleeTreeBuilder<'_> {
         class_filter: Option<&str>,
         current_depth: usize,
     ) -> Vec<Value> {
-        if current_depth >= self.max_depth {
+        if current_depth >= self.max_depth || self.total_limit_hit {
             return Vec::new();
         }
         let def_idx = self.ctx.def_idx;
         let _ext_filter = self.ctx.ext_filter;
         let limits = self.ctx.limits;
         let node_count = self.ctx.node_count;
-
-        if node_count.load(std::sync::atomic::Ordering::Relaxed) >= limits.max_total_nodes {
-            return Vec::new();
-        }
 
         let method_lower = method_name.to_lowercase();
 
@@ -2745,10 +2836,7 @@ impl CalleeTreeBuilder<'_> {
         let mut callees: Vec<Value> = Vec::new();
         let mut seen_callees: HashSet<String> = HashSet::new();
 
-        for &method_di in &method_def_indices {
-            if callees.len() >= limits.max_callers_per_level { break; }
-            if node_count.load(std::sync::atomic::Ordering::Relaxed) >= limits.max_total_nodes { break; }
-
+        'methods: for &method_di in &method_def_indices {
             // Get pre-computed call sites for this method
             let call_sites = match def_idx.method_calls.get(&method_di) {
                 Some(calls) => calls,
@@ -2756,18 +2844,12 @@ impl CalleeTreeBuilder<'_> {
             };
 
             for call in call_sites {
-                if callees.len() >= limits.max_callers_per_level { break; }
-                if node_count.load(std::sync::atomic::Ordering::Relaxed) >= limits.max_total_nodes { break; }
-
                 // Resolve this call site to actual definitions
                 let caller_parent = def_idx.definitions.get(method_di as usize)
                     .and_then(|d| d.parent.as_deref());
                 let resolved = resolve_call_site(call, def_idx, caller_parent);
 
                 for callee_di in resolved {
-                    if callees.len() >= limits.max_callers_per_level { break; }
-                    if node_count.load(std::sync::atomic::Ordering::Relaxed) >= limits.max_total_nodes { break; }
-
                     let callee_def = match def_idx.definitions.get(callee_di as usize) {
                         Some(d) => d,
                         None => continue,
@@ -2790,9 +2872,19 @@ impl CalleeTreeBuilder<'_> {
                     );
 
                     if seen_callees.contains(&callee_key) { continue; }
-                    seen_callees.insert(callee_key.clone());
-
-                    node_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if callees.len() >= limits.max_callers_per_level {
+                        seen_callees.insert(callee_key);
+                        self.per_level_dropped += 1;
+                        continue;
+                    }
+                    if !try_reserve_graph_node(
+                        node_count,
+                        limits.max_total_nodes,
+                        &mut self.total_limit_hit,
+                    ) {
+                        break 'methods;
+                    }
+                    seen_callees.insert(callee_key);
 
                     let sub_callees = self.build(
                         &callee_def.name,

@@ -514,6 +514,122 @@ fn test_xray_callers_down_class_filter() {
 }
 
 #[test]
+fn test_xray_callers_interface_duplicate_does_not_consume_total_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let source_file = root.join("InterfaceDuplicate.cs");
+    std::fs::write(
+        &source_file,
+        r#"public interface ITarget {
+    void Execute();
+}
+public sealed class Target : ITarget {
+    public void Execute() { }
+}
+public sealed class Caller {
+    public void Call(Target concrete, ITarget contract) {
+        concrete.Execute();
+        contract.Execute();
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let mut definition_index = DefinitionIndex {
+        root: root.to_string_lossy().to_string(),
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    crate::definitions::update_file_definitions(&mut definition_index, &source_file);
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let context = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(definition_index))),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(
+            root.to_string_lossy().to_string(),
+        ))),
+        server_ext: "cs".to_string(),
+        ..Default::default()
+    };
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["Execute"],
+            "class": "ITarget",
+            "depth": 1,
+            "resolveInterfaces": true,
+            "maxCallersPerLevel": 10,
+            "maxTotalNodes": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["callTree"].as_array().unwrap().len(), 1, "{output:#}");
+    let status = &output["resultStatus"];
+    assert_eq!(status["status"], "complete", "{output:#}");
+    assert_eq!(status["complete"], true, "{output:#}");
+    assert_eq!(status["totalKnown"], true, "{output:#}");
+    assert_eq!(status["shown"]["nodes"], 1, "{output:#}");
+    assert_eq!(status["total"]["nodes"], 1, "{output:#}");
+    assert_eq!(status["omitted"]["nodes"], 0, "{output:#}");
+
+    let batch_result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["Execute", "Missing"],
+            "class": "ITarget",
+            "depth": 1,
+            "resolveInterfaces": true,
+            "maxCallersPerLevel": 10,
+            "maxTotalNodes": 1
+        }),
+    );
+    assert!(!batch_result.is_error, "{}", batch_result.content[0].text);
+    let batch_output: Value = serde_json::from_str(&batch_result.content[0].text).unwrap();
+    assert_eq!(batch_output["results"][0]["nodesInTree"], 1, "{batch_output:#}");
+    assert_eq!(batch_output["results"][0]["truncated"], false, "{batch_output:#}");
+    assert_eq!(batch_output["resultStatus"]["status"], "complete", "{batch_output:#}");
+    assert_eq!(batch_output["resultStatus"]["totalKnown"], true, "{batch_output:#}");
+    assert_eq!(batch_output["resultStatus"]["omitted"]["nodes"], 0, "{batch_output:#}");
+
+    for methods in [vec!["Execute"], vec!["Execute", "Missing"]] {
+        let zero_result = dispatch_tool(
+            &context,
+            "xray_callers",
+            &json!({
+                "method": methods,
+                "class": "ITarget",
+                "depth": 1,
+                "resolveInterfaces": true,
+                "maxCallersPerLevel": 0,
+                "maxTotalNodes": 10
+            }),
+        );
+        assert!(!zero_result.is_error, "{}", zero_result.content[0].text);
+        let zero_output: Value = serde_json::from_str(&zero_result.content[0].text).unwrap();
+        let status = &zero_output["resultStatus"];
+        assert_eq!(status["status"], "partial", "{zero_output:#}");
+        assert_eq!(status["totalKnown"], false, "{zero_output:#}");
+        assert_eq!(status["shown"]["nodes"], 0, "{zero_output:#}");
+        assert_eq!(status["total"]["nodes"], 1, "{zero_output:#}");
+        assert_eq!(status["omitted"]["nodes"], 1, "{zero_output:#}");
+        assert_eq!(zero_output["summary"]["callersDroppedPerLevel"], 1, "{zero_output:#}");
+    }
+}
+
+
+#[test]
 fn test_xray_callers_direct_receiver_types() {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::canonicalize_test_root(temp.path());
