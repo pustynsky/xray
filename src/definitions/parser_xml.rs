@@ -356,101 +356,116 @@ fn walk_xml_node(
     depth: usize,
     ctx: &mut WalkCtx,
 ) {
-    if depth > MAX_RECURSION_DEPTH {
-        // Depth-limit tripwire (WALKER-3). We stop descending here; any elements
-        // deeper than this are silently dropped, but we record a warning so the
-        // handler can surface "results may be incomplete".
-        ctx.warnings.push(format!(
-            "XML nesting exceeded {} levels; subtree at line {} truncated.",
-            MAX_RECURSION_DEPTH,
-            node.start_position().row + 1
-        ));
-        return;
+    enum WalkAction<'tree> {
+        Visit {
+            node: tree_sitter::Node<'tree>,
+            parent_index: Option<usize>,
+            depth: usize,
+        },
+        LeaveElement,
     }
 
-    let kind = node.kind();
+    let mut pending = vec![WalkAction::Visit {
+        node,
+        parent_index,
+        depth,
+    }];
 
-    match kind {
-        "element" => {
-            // Extract element name from STag or EmptyElemTag child
-            if let Some(element_name) = extract_element_name(node, source) {
-                let line_start = node.start_position().row as u32 + 1;
-                let line_end = node.end_position().row as u32 + 1;
-
-                // Build signature: ancestry path. We clone the live stack once
-                // here (only when pushing a def), not per-level.
-                let sig_name = build_element_signature_name(node, source, &element_name);
-                let mut sig_parts: Vec<String> = ctx.ancestry.clone();
-                sig_parts.push(sig_name);
-                let signature = sig_parts.join(" > ");
-
-                // Extract XML attributes
-                let attributes = extract_xml_attributes(node, source);
-
-                // Extract text content (for leaf elements). Early-exits internally
-                // on the first element/EmptyElemTag child (WALKER-7), so block
-                // elements do not pay for a full CharData sweep.
-                let text_content = extract_text_content(node, source);
-
-                // Parent name is the current top of the ancestry stack — WALKER-4
-                // replaced the separate `parent_name: Option<&str>` argument with
-                // this lookup for a single source of truth.
-                let parent_name = ctx.ancestry.last().cloned();
-
-                let def_index = ctx.defs.len();
-                ctx.defs.push(XmlDefinition {
-                    entry: DefinitionEntry {
-                        file_id: 0, // Not used for on-demand
-                        name: element_name.clone(),
-                        kind: DefinitionKind::XmlElement,
-                        line_start,
-                        line_end,
-                        parent: parent_name,
-                        signature: Some(signature),
-                        modifiers: Vec::new(),
-                        attributes,
-                        base_types: Vec::new(),
-                    },
-                    text_content,
-                    has_child_elements: false, // Will be updated after walk
-                    parent_index,
-                });
-
-                // Persistent-stack recursion (WALKER-1): push + pop instead of
-                // cloning the full ancestry Vec on every level.
-                ctx.ancestry.push(element_name);
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    walk_xml_node(child, source, Some(def_index), depth + 1, ctx);
-                }
+    while let Some(action) = pending.pop() {
+        let (node, parent_index, depth) = match action {
+            WalkAction::Visit {
+                node,
+                parent_index,
+                depth,
+            } => (node, parent_index, depth),
+            WalkAction::LeaveElement => {
                 ctx.ancestry.pop();
-            } else {
-                // WALKER-2: tree-sitter did not recover a usable STag/EmptyElemTag
-                // for this `element` node (malformed XML — e.g. unterminated tag,
-                // junk before opening angle bracket). We record a warning, skip
-                // adding a definition, but still descend so nested well-formed
-                // elements inside are not silently lost.
-                ctx.warnings.push(format!(
-                    "Could not extract element name at line {}; children still walked.",
-                    node.start_position().row + 1
-                ));
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    walk_xml_node(child, source, parent_index, depth + 1, ctx);
+                continue;
+            }
+        };
+
+        if depth > MAX_RECURSION_DEPTH {
+            ctx.warnings.push(format!(
+                "XML nesting exceeded {} levels; subtree at line {} truncated.",
+                MAX_RECURSION_DEPTH,
+                node.start_position().row + 1
+            ));
+            continue;
+        }
+
+        match node.kind() {
+            "element" => {
+                if let Some(element_name) = extract_element_name(node, source) {
+                    let line_start = node.start_position().row as u32 + 1;
+                    let line_end = node.end_position().row as u32 + 1;
+
+                    let sig_name =
+                        build_element_signature_name(node, source, &element_name);
+                    let mut sig_parts: Vec<String> = ctx.ancestry.clone();
+                    sig_parts.push(sig_name);
+                    let signature = sig_parts.join(" > ");
+
+                    let attributes = extract_xml_attributes(node, source);
+                    let text_content = extract_text_content(node, source);
+                    let parent_name = ctx.ancestry.last().cloned();
+
+                    let def_index = ctx.defs.len();
+                    ctx.defs.push(XmlDefinition {
+                        entry: DefinitionEntry {
+                            file_id: 0,
+                            name: element_name.clone(),
+                            kind: DefinitionKind::XmlElement,
+                            line_start,
+                            line_end,
+                            parent: parent_name,
+                            signature: Some(signature),
+                            modifiers: Vec::new(),
+                            attributes,
+                            base_types: Vec::new(),
+                        },
+                        text_content,
+                        has_child_elements: false,
+                        parent_index,
+                    });
+
+                    ctx.ancestry.push(element_name);
+                    pending.push(WalkAction::LeaveElement);
+
+                    let mut cursor = node.walk();
+                    let children: Vec<_> = node.children(&mut cursor).collect();
+                    for child in children.into_iter().rev() {
+                        pending.push(WalkAction::Visit {
+                            node: child,
+                            parent_index: Some(def_index),
+                            depth: depth + 1,
+                        });
+                    }
+                } else {
+                    ctx.warnings.push(format!(
+                        "Could not extract element name at line {}; children still walked.",
+                        node.start_position().row + 1
+                    ));
+                    let mut cursor = node.walk();
+                    let children: Vec<_> = node.children(&mut cursor).collect();
+                    for child in children.into_iter().rev() {
+                        pending.push(WalkAction::Visit {
+                            node: child,
+                            parent_index,
+                            depth: depth + 1,
+                        });
+                    }
                 }
             }
-        }
-        // EmptyElemTag is always wrapped by an `element` node in tree-sitter-xml,
-        // so it's already handled by the `element` branch above. Skip to avoid duplicates.
-        _ => {
-            // Non-element nodes (document, prolog, content wrappers, misc) are
-            // transparent for parent tracking — their element children inherit
-            // the current `parent_index`/`ancestry` as if the wrapper weren't there.
-            // Depth counter still increments to keep the MAX_RECURSION_DEPTH budget
-            // tight against adversarial inputs (WALKER-5: comment for the reader).
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                walk_xml_node(child, source, parent_index, depth + 1, ctx);
+            _ => {
+                let mut cursor = node.walk();
+                let children: Vec<_> = node.children(&mut cursor).collect();
+                for child in children.into_iter().rev() {
+                    pending.push(WalkAction::Visit {
+                        node: child,
+                        parent_index,
+                        depth: depth + 1,
+                    });
+                }
             }
         }
     }

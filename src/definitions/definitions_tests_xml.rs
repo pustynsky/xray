@@ -804,6 +804,58 @@ fn test_deeply_nested_no_stack_overflow() {
     }
 }
 
+
+#[test]
+fn test_deep_xml_depth_496_survives_mcp_sized_stack() {
+    let current_exe = std::env::current_exe().expect("resolve current test executable");
+    let output = std::process::Command::new(current_exe)
+        .args([
+            "--exact",
+            "definitions::tests_xml::deep_xml_depth_496_child_case",
+            "--nocapture",
+        ])
+        .env("RUST_MIN_STACK", "1048576")
+        .env("XRAY_DEEP_XML_CHILD", "1")
+        .output()
+        .expect("run isolated deep XML parser test");
+
+    assert!(
+        output.status.success(),
+        "deep XML child failed with {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn deep_xml_depth_496_child_case() {
+    if std::env::var_os("XRAY_DEEP_XML_CHILD").is_none() {
+        return;
+    }
+
+    const DEPTH: usize = 496;
+    let mut xml = String::from("<?xml version=\"1.0\"?>\r\n<Root>\r\n");
+    for _ in 0..DEPTH {
+        xml.push_str("<N>\r\n");
+    }
+    xml.push_str("<Leaf>deepest</Leaf>\r\n");
+    for _ in 0..DEPTH {
+        xml.push_str("</N>\r\n");
+    }
+    xml.push_str("</Root>\r\n");
+
+    let result = parse_xml_on_demand_with_warnings(&xml, "deep-496.xml")
+        .expect("valid deeply nested XML should parse");
+    assert_eq!(result.definitions.len(), DEPTH + 2);
+    let leaf = result
+        .definitions
+        .last()
+        .expect("deepest leaf definition should be retained");
+    assert_eq!(leaf.entry.name, "Leaf");
+    assert_eq!(leaf.text_content.as_deref(), Some("deepest"));
+}
+
 // --- Extended extension set (Phase 2) ----------------------------------
 
 #[test]
