@@ -38,7 +38,7 @@ use code_xray::{generate_trigrams, tokenize, ContentIndex, Posting, TrigramIndex
 #[allow(dead_code, unused_imports)]
 #[path = "../src/mcp/handlers/file_scope.rs"]
 mod file_scope;
-use file_scope::ResolvedFileScope;
+use file_scope::{intersect_sorted_candidate_ids, ResolvedFileScope};
 
 #[allow(dead_code, unused_imports)]
 #[path = "../src/mcp/handlers/token_regex.rs"]
@@ -1125,6 +1125,56 @@ fn build_token_vocabulary_index(vocabulary_size: usize, file_count: usize) -> Co
     }
 }
 
+fn evenly_spaced_definition_ids(total: usize, count: usize) -> Vec<u32> {
+    if count >= total {
+        return (0..total).map(|definition_id| definition_id as u32).collect();
+    }
+
+    (0..count)
+        .map(|position| ((position * total) / count) as u32)
+        .collect()
+}
+
+fn bench_definition_candidate_intersection(c: &mut Criterion) {
+    let mut group = c.benchmark_group("definition_candidate_intersection");
+
+    for &definition_count in BENCH_SIZES {
+        let secondary_candidates: Vec<u32> = (0..definition_count)
+            .map(|definition_id| definition_id as u32)
+            .collect();
+        let one_percent = (definition_count / 100).max(1);
+        let ten_percent = (definition_count / 10).max(1);
+
+        for (scope_label, scope_count) in [
+            ("1", 1),
+            ("10", 10.min(definition_count)),
+            ("1pct", one_percent),
+            ("10pct", ten_percent),
+            ("all", definition_count),
+        ] {
+            let scoped_definition_ids = evenly_spaced_definition_ids(
+                definition_count,
+                scope_count,
+            );
+            group.bench_function(
+                BenchmarkId::new(definition_count.to_string(), scope_label),
+                |b| {
+                    b.iter(|| {
+                        let intersection = intersect_sorted_candidate_ids(
+                            black_box(&secondary_candidates),
+                            black_box(&scoped_definition_ids),
+                        );
+                        black_box(intersection);
+                    })
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
+
 fn bench_token_regex_expand(c: &mut Criterion) {
     let mut group = c.benchmark_group("token_regex_expand");
 
@@ -1174,6 +1224,7 @@ criterion_group!(
     bench_posting_scope_filter,
     bench_phrase_scope_filter,
     bench_token_regex_expand,
+    bench_definition_candidate_intersection,
     bench_index_build,
     bench_serialization,
     bench_trigram_build,

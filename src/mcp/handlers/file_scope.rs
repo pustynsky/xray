@@ -164,6 +164,47 @@ impl ResolvedFileScope {
     }
 }
 
+/// Intersects two strictly ascending, duplicate-free definition ID slices.
+pub(crate) fn intersect_sorted_candidate_ids(
+    candidates: &[u32],
+    scoped_ids: &[u32],
+) -> Vec<u32> {
+    debug_assert!(candidates.windows(2).all(|pair| pair[0] < pair[1]));
+    debug_assert!(scoped_ids.windows(2).all(|pair| pair[0] < pair[1]));
+
+    const BINARY_SEARCH_RATIO: usize = 8;
+
+    if candidates.len().saturating_mul(BINARY_SEARCH_RATIO) < scoped_ids.len() {
+        return candidates.iter()
+            .copied()
+            .filter(|candidate| scoped_ids.binary_search(candidate).is_ok())
+            .collect();
+    }
+    if scoped_ids.len().saturating_mul(BINARY_SEARCH_RATIO) < candidates.len() {
+        return scoped_ids.iter()
+            .copied()
+            .filter(|candidate| candidates.binary_search(candidate).is_ok())
+            .collect();
+    }
+
+    let mut intersection = Vec::with_capacity(candidates.len().min(scoped_ids.len()));
+    let mut candidate_pos = 0;
+    let mut scoped_pos = 0;
+    while candidate_pos < candidates.len() && scoped_pos < scoped_ids.len() {
+        match candidates[candidate_pos].cmp(&scoped_ids[scoped_pos]) {
+            std::cmp::Ordering::Less => candidate_pos += 1,
+            std::cmp::Ordering::Greater => scoped_pos += 1,
+            std::cmp::Ordering::Equal => {
+                intersection.push(candidates[candidate_pos]);
+                candidate_pos += 1;
+                scoped_pos += 1;
+            }
+        }
+    }
+    intersection
+}
+
+
 pub(crate) enum ScopeFileIdIter<'a> {
     All(Range<usize>),
     Filtered(slice::Iter<'a, u32>),
@@ -274,6 +315,25 @@ mod tests {
 
         assert_eq!(all.intersect_candidate_ids(&candidates), vec![0, 64, 129]);
         assert_eq!(filtered.intersect_candidate_ids(&candidates), vec![0, 64]);
+    }
+
+    #[test]
+    fn sorted_candidate_intersection_handles_adaptive_size_ratios() {
+        let dense: Vec<u32> = (0..100).collect();
+        let sparse = vec![1, 50, 99, 200];
+
+        assert_eq!(
+            intersect_sorted_candidate_ids(&dense, &sparse),
+            vec![1, 50, 99]
+        );
+        assert_eq!(
+            intersect_sorted_candidate_ids(&sparse, &dense),
+            vec![1, 50, 99]
+        );
+        assert_eq!(
+            intersect_sorted_candidate_ids(&[1, 3, 5], &[2, 3, 4]),
+            vec![3]
+        );
     }
 
     #[test]
