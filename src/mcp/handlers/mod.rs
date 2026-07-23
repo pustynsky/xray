@@ -5,6 +5,7 @@ mod callers;
 mod arg_validation;
 mod definitions;
 mod edit;
+mod file_scope;
 mod fast;
 mod git;
 mod grep;

@@ -30,16 +30,23 @@
 //! latency claims about production behaviour.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // Import from the code-xray crate
 use code_xray::{generate_trigrams, tokenize, ContentIndex, Posting, TrigramIndex};
+
+#[allow(dead_code, unused_imports)]
+#[path = "../src/mcp/handlers/file_scope.rs"]
+mod file_scope;
+use file_scope::ResolvedFileScope;
 
 // ─── Shared parameter sets (BENCH-018) ───────────────────────────────
 
 /// Standard file-count sweep used by most benches. Keep in sync with the
 /// regression-tracking baselines under `target/criterion/`.
 const BENCH_SIZES: &[usize] = &[1_000, 10_000, 50_000];
+
+const SCOPED_BENCH_SIZES: &[usize] = &[1_000, 10_000, 50_000];
 
 /// Reduced sweep for benches whose per-iteration cost is dominated by
 /// allocation / serialization, where 50k files would push wall-clock past
@@ -904,12 +911,196 @@ fn bench_line_regex_literal_extraction(c: &mut Criterion) {
     group.finish();
 }
 
+fn build_scope_paths(num_files: usize) -> Vec<String> {
+    (0..num_files)
+        .map(|file_id| {
+            format!(
+                "src/Services/Feature_{:06}/Generated/SharedLikeLongPath/File_{:06}.cs",
+                file_id, file_id
+            )
+        })
+        .collect()
+}
+
+fn bench_scope_resolution(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scope_resolution");
+
+    for &num_files in SCOPED_BENCH_SIZES {
+        let files = build_scope_paths(num_files);
+        let single_suffix = format!("File_{:06}.cs", num_files - 1);
+
+        group.bench_with_input(
+            BenchmarkId::new("single_linear", num_files),
+            &files,
+            |b, files| {
+                b.iter(|| {
+                    let scope = ResolvedFileScope::resolve(files, true, None, |path| {
+                        path.ends_with(black_box(single_suffix.as_str()))
+                    });
+                    black_box(scope.len());
+                })
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("one_percent", num_files),
+            &files,
+            |b, files| {
+                b.iter(|| {
+                    let scope = ResolvedFileScope::resolve(files, true, None, |path| {
+                        path.ends_with("00.cs")
+                    });
+                    black_box(scope.len());
+                })
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("all_filtered", num_files),
+            &files,
+            |b, files| {
+                b.iter(|| {
+                    let scope = ResolvedFileScope::resolve(files, true, None, |_| true);
+                    black_box(scope.len());
+                })
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("all_unfiltered", num_files),
+            &files,
+            |b, files| {
+                b.iter(|| {
+                    let scope = ResolvedFileScope::resolve(files, false, None, |_| false);
+                    black_box(scope.len());
+                })
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("single_exact_map", num_files),
+            &files,
+            |b, files| {
+                b.iter(|| {
+                    let scope = ResolvedFileScope::resolve(
+                        files,
+                        true,
+                        Some((num_files - 1) as u32),
+                        |_| true,
+                    );
+                    black_box(scope.len());
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_line_regex_schedule(c: &mut Criterion) {
+    let mut group = c.benchmark_group("line_regex_schedule");
+
+    for &num_files in SCOPED_BENCH_SIZES {
+        let files = build_scope_paths(num_files);
+        let all_scope = ResolvedFileScope::resolve(&files, false, None, |_| false);
+        let single_scope = ResolvedFileScope::resolve(&files, true, None, |path| {
+            path.ends_with(&format!("File_{:06}.cs", num_files - 1))
+        });
+        let single_candidate = HashSet::from([(num_files - 1) as u32]);
+        let one_percent_candidates: HashSet<u32> =
+            (0..num_files).step_by(100).map(|file_id| file_id as u32).collect();
+        let all_candidates: HashSet<u32> =
+            (0..num_files).map(|file_id| file_id as u32).collect();
+
+        group.bench_function(BenchmarkId::new("all_scope_k1", num_files), |b| {
+            b.iter(|| black_box(all_scope.intersect_candidate_ids(&single_candidate)))
+        });
+        group.bench_function(BenchmarkId::new("all_scope_one_percent", num_files), |b| {
+            b.iter(|| black_box(all_scope.intersect_candidate_ids(&one_percent_candidates)))
+        });
+        group.bench_function(BenchmarkId::new("single_scope_all_prefilter", num_files), |b| {
+            b.iter(|| black_box(single_scope.intersect_candidate_ids(&all_candidates)))
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_posting_scope_filter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("posting_scope_filter");
+
+    for &num_files in SCOPED_BENCH_SIZES {
+        let files = build_scope_paths(num_files);
+        let postings: Vec<u32> = (0..num_files).map(|file_id| file_id as u32).collect();
+        let single_scope = ResolvedFileScope::resolve(&files, true, None, |path| {
+            path.ends_with(&format!("File_{:06}.cs", num_files - 1))
+        });
+        let one_percent_scope = ResolvedFileScope::resolve(&files, true, None, |path| {
+            path.ends_with("00.cs")
+        });
+        let all_scope = ResolvedFileScope::resolve(&files, false, None, |_| false);
+
+        for (shape, scope) in [
+            ("k1", &single_scope),
+            ("one_percent", &one_percent_scope),
+            ("all", &all_scope),
+        ] {
+            group.bench_function(BenchmarkId::new(shape, num_files), |b| {
+                b.iter(|| {
+                    let matched = postings.iter()
+                        .filter(|file_id| scope.contains(**file_id))
+                        .count();
+                    black_box(matched);
+                })
+            });
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_phrase_scope_filter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("phrase_scope_filter");
+
+    for &num_files in SCOPED_BENCH_SIZES {
+        let files = build_scope_paths(num_files);
+        let postings: Vec<(u32, Vec<u32>)> = (0..num_files)
+            .map(|file_id| (file_id as u32, vec![1, 3, 3, 8]))
+            .collect();
+        let single_scope = ResolvedFileScope::resolve(&files, true, None, |path| {
+            path.ends_with(&format!("File_{:06}.cs", num_files - 1))
+        });
+        let one_percent_scope = ResolvedFileScope::resolve(&files, true, None, |path| {
+            path.ends_with("00.cs")
+        });
+
+        for (shape, scope) in [("k1", &single_scope), ("one_percent", &one_percent_scope)] {
+            group.bench_function(BenchmarkId::new(shape, num_files), |b| {
+                b.iter(|| {
+                    let materialized: Vec<(u32, Vec<u32>)> = postings.iter()
+                        .filter(|(file_id, _)| scope.contains(*file_id))
+                        .map(|(file_id, lines)| {
+                            let mut lines = lines.clone();
+                            lines.sort_unstable();
+                            lines.dedup();
+                            (*file_id, lines)
+                        })
+                        .collect();
+                    black_box(materialized);
+                })
+            });
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_tokenize,
     bench_index_lookup,
     bench_tfidf_scoring,
     bench_regex_scan,
+    bench_scope_resolution,
+    bench_line_regex_schedule,
+    bench_posting_scope_filter,
+    bench_phrase_scope_filter,
     bench_index_build,
     bench_serialization,
     bench_trigram_build,

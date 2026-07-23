@@ -2168,6 +2168,12 @@ fn test_substring_matched_tokens_filtered_by_exclude() {
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
 
     assert_eq!(output["summary"]["totalFiles"], 1);
+    assert_eq!(output["summary"]["scope"]["requested"], true);
+    assert_eq!(output["summary"]["scope"]["strategy"], "linearScan");
+    assert_eq!(output["summary"]["scope"]["indexFiles"], 2);
+    assert_eq!(output["summary"]["scope"]["matchedFiles"], 1);
+    assert!(output.get("coverage").is_none(),
+        "exclude-only must not request coverage diagnostics: {}", output);
 
     let matched_tokens = output["summary"]["matchedTokens"].as_array().unwrap();
     let token_names: Vec<&str> = matched_tokens.iter()
@@ -4468,14 +4474,21 @@ fn test_xray_grep_literal_prefilter_scope_aware_counters_with_dir_scope() {
     let scan = &out["summary"]["lineRegexScan"];
     assert!(scan.is_object(),
         "scoped lineRegex summary should include scan telemetry; got: {}", out["summary"]);
-    assert_eq!(scan["filesSkippedByPrefilter"].as_u64(), Some(6),
-        "prefilter should skip the six non-candidate files before scope checks; got: {}", scan);
-    assert_eq!(scan["filesSkippedByScope"].as_u64(), Some(2),
-        "scope should reject the two outside candidate files; got: {}", scan);
+    assert_eq!(scan["schemaVersion"].as_u64(), Some(2));
+    assert_eq!(scan["filesConsidered"].as_u64(), Some(10));
+    assert_eq!(scan["scopeFiles"].as_u64(), Some(4));
+    assert_eq!(scan["scheduledFiles"].as_u64(), Some(2));
+    assert_eq!(scan["filesSkippedByScope"].as_u64(), Some(6),
+        "scope should reject the six outside files before prefilter accounting; got: {}", scan);
+    assert_eq!(scan["filesSkippedByPrefilter"].as_u64(), Some(2),
+        "prefilter should reject the two in-scope non-candidates; got: {}", scan);
+    assert_eq!(scan["filesVisited"].as_u64(), Some(2));
     assert_eq!(scan["filesRead"].as_u64(), Some(2),
         "scoped query should read only the two inside candidate files; got: {}", scan);
     assert_eq!(scan["matchedFiles"].as_u64(), Some(2),
         "scoped query should report two final matched files; got: {}", scan);
+    assert_eq!(out["execution"]["filesScanned"].as_u64(), Some(2));
+    assert_eq!(out["execution"]["filesConsidered"].as_u64(), Some(10));
 
     cleanup_tmp(&tmp_dir);
 }

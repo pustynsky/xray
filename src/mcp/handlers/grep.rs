@@ -18,6 +18,7 @@ use super::utils::{self,
     matches_ext_filter, partition_verified_lines, read_enum_string_with_default, sorted_intersect,
     stale_lines_warning, stale_phrase_warning, validate_search_dir,
 };
+use super::file_scope::ResolvedFileScope;
 use super::HandlerContext;
 
 #[path = "grep_literal_extract.rs"]
@@ -688,6 +689,7 @@ fn apply_invert(
     mut result: ToolCallResult,
     index: &ContentIndex,
     params: &GrepSearchParams,
+    scope: &ResolvedFileScope,
 ) -> ToolCallResult {
     let Some(content) = result.content.first_mut() else { return result; };
     let mut output: Value = match serde_json::from_str(&content.text) {
@@ -705,16 +707,11 @@ fn apply_invert(
         }
     }
 
-    // 2. Walk index.files, build complement filtered by passes_file_filters.
-    //    Reuses the same scope rules as the forward search so the user sees a
-    //    consistent universe definition (file=, dir=, ext=, exclude=).
+    // 2. Walk the same resolved universe used by the forward search.
     let mut complement: Vec<String> = Vec::new();
-    let mut total_in_scope: usize = 0;
-    for file_path in index.files.iter() {
-        if !passes_file_filters(file_path, params) {
-            continue;
-        }
-        total_in_scope += 1;
+    let total_in_scope = scope.len();
+    for file_id in scope.iter_ids() {
+        let file_path = &index.files[file_id as usize];
         if matched.contains(file_path) {
             continue;
         }
@@ -921,6 +918,9 @@ struct LineRegexScanTelemetry {
     response_finalize_duration: Duration,
     parallel_scan: bool,
     worker_threads: usize,
+    files_considered: usize,
+    scope_files: usize,
+    scheduled_files: usize,
     files_visited: usize,
     files_skipped_by_prefilter: usize,
     files_skipped_by_scope: usize,
@@ -1132,6 +1132,10 @@ impl LineRegexScanTelemetry {
             "responseBuildMs": self.response_build_ms(),
             "responseFinalizeMs": self.response_finalize_ms(),
             "scanResidualMs": self.scan_residual_ms(),
+            "schemaVersion": 2,
+            "filesConsidered": self.files_considered,
+            "scopeFiles": self.scope_files,
+            "scheduledFiles": self.scheduled_files,
             "filesVisited": self.files_visited,
             "filesSkippedByPrefilter": self.files_skipped_by_prefilter,
             "filesSkippedByScope": self.files_skipped_by_scope,
@@ -1209,12 +1213,9 @@ fn line_regex_phase_hint(
     prefilter_reason: Option<&str>,
 ) -> String {
     let prefilter_context = if prefilter_used {
-        let candidate_files = telemetry
-            .files_visited
-            .saturating_sub(telemetry.files_skipped_by_prefilter);
         format!(
             "The literal-trigram prefilter narrowed the scan to {} candidate files.",
-            candidate_files
+            telemetry.scheduled_files
         )
     } else if let Some(reason) = prefilter_reason {
         format!(
@@ -2087,61 +2088,28 @@ fn passes_common_file_filters(file_path: &str, params: &GrepSearchParams) -> boo
 
 
 fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
-    // Exact-file mode (set ONLY by the `dir=<file>` auto-convert branch).
-    // Supersedes dir/file_filter scoping — the user's intent was unambiguously
-    // "this exact file", so we full-path equality-check and short-circuit.
-    // Without this, the recursive prefix `dir_filter=<parent>` would still
-    // accept `<parent>/sub/Service.cs` and the basename match would let it
-    // through (the gap the reviewer flagged).
-    if let Some(target) = params.exact_file_path {
-        let fp_norm = file_path.to_lowercase().replace('\\', "/");
-        let target_norm = target.to_lowercase().replace('\\', "/");
-        if fp_norm != target_norm {
-            // Preserve logical-path semantics first. Only if the logical paths
-            // differ do we attempt the narrow canonical fallback used for
-            // Windows 8.3 short/long path aliases. We do NOT canonicalize the
-            // requested target unconditionally, because that would resolve
-            // symlinked workspace paths to their external targets and break the
-            // exact-file contract for logical paths like `root/personal/note.md`.
-            let Some(target_canonical) = params.exact_file_path_canonical else {
-                return false;
-            };
-            let Ok(fp_canonical) = std::fs::canonicalize(file_path) else {
-                return false;
-            };
-            let fp_canonical_norm = crate::clean_path(&fp_canonical.to_string_lossy())
-                .to_lowercase();
-            let target_canonical_norm = target_canonical.to_lowercase().replace('\\', "/");
-            if fp_canonical_norm != target_canonical_norm {
-                return false;
-            }
-        }
-        // Still apply ext / exclude filters below (they're cheap and harmless
-        // for a single file; they also keep behavior consistent if the caller
-        // ever adds an explicit `ext` that contradicts the auto-converted path).
-    } else {
-        // Dir prefix filter (subdirectory search) — only meaningful in scoped mode.
-        if let Some(prefix) = params.dir_filter
-            && !is_under_dir(file_path, prefix) { return false; }
+    debug_assert!(params.exact_file_path.is_none());
 
-        // File name/path filter (substring OR over the user-supplied array):
-        // each entry in `file_filter` is one substring; the file passes if any
-        // entry hits either the full path or the basename (case-insensitive).
-        // Empty Vec means "no filter".
-        if !params.file_filter.is_empty() {
-            let basename_lower = std::path::Path::new(file_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_lowercase())
-                .unwrap_or_default();
-            let fp_lower = file_path.to_lowercase().replace('\\', "/");
-            let any_match = params.file_filter.iter()
-                .map(|t| t.to_lowercase())
-                .any(|needle| {
-                    fp_lower.contains(&needle) || basename_lower.contains(&needle)
-                });
-            if !any_match { return false; }
-        }
+    if let Some(prefix) = params.dir_filter
+        && !is_under_dir(file_path, prefix) { return false; }
+
+    // File name/path filter (substring OR over the user-supplied array):
+    // each entry in `file_filter` is one substring; the file passes if any
+    // entry hits either the full path or the basename (case-insensitive).
+    // Empty Vec means "no filter".
+    if !params.file_filter.is_empty() {
+        let basename_lower = std::path::Path::new(file_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+        let fp_lower = file_path.to_lowercase().replace('\\', "/");
+        let any_match = params.file_filter.iter()
+            .map(|t| t.to_lowercase())
+            .any(|needle| {
+                fp_lower.contains(&needle) || basename_lower.contains(&needle)
+            });
+        if !any_match { return false; }
     }
 
     passes_common_file_filters(file_path, params)
@@ -2174,6 +2142,29 @@ fn params_have_scope_filter(params: &GrepSearchParams) -> bool {
         || !params.ext_filter.is_empty()
         || !params.exclude_patterns.is_empty()
         || !params.exclude_lower.is_empty()
+}
+
+fn resolve_grep_file_scope(
+    index: &ContentIndex,
+    params: &GrepSearchParams,
+) -> ResolvedFileScope {
+    let exact_file_id = params.exact_file_path.as_ref().and_then(|logical_path| {
+        let path_to_id = index.path_to_id.as_ref()?;
+        let logical_key = crate::path_identity_key(std::path::Path::new(logical_path));
+        path_to_id.get(&logical_key).copied().or_else(|| {
+            params.exact_file_path_canonical.as_ref().and_then(|canonical_path| {
+                let canonical_key = crate::path_identity_key(std::path::Path::new(canonical_path));
+                path_to_id.get(&canonical_key).copied()
+            })
+        })
+    });
+
+    ResolvedFileScope::resolve(
+        &index.files,
+        params_have_scope_filter(params),
+        exact_file_id,
+        |path| passes_file_filters_for_coverage(path, params),
+    )
 }
 
 /// Parsed arguments for the grep handler. Extracts all parameter parsing
@@ -2558,7 +2549,8 @@ fn expand_regex_terms(
 fn score_normal_token_search(
     terms: &[String],
     index: &ContentIndex,
-    params: &GrepSearchParams,
+    _params: &GrepSearchParams,
+    scope: &ResolvedFileScope,
 ) -> HashMap<u32, FileScoreEntry> {
     let total_docs = index.files.len() as f64;
     let mut file_scores: HashMap<u32, FileScoreEntry> = HashMap::new();
@@ -2570,12 +2562,13 @@ fn score_normal_token_search(
             let idf = (total_docs / doc_freq).ln();
 
             for posting in postings {
+                if !scope.contains(posting.file_id) {
+                    continue;
+                }
                 let file_path = match index.files.get(posting.file_id as usize) {
                     Some(p) => p,
                     None => continue,
                 };
-
-                if !passes_file_filters(file_path, params) { continue; }
 
                 let occurrences = posting.lines.len();
                 let file_total = if (posting.file_id as usize) < index.file_token_counts.len() {
@@ -2764,13 +2757,16 @@ fn grep_has_explicit_scope(parsed: &ParsedGrepArgs) -> bool {
 }
 
 fn grep_scope_path_key(path: &str) -> String {
-    crate::clean_path(path).to_lowercase()
+    crate::path_identity_key(std::path::Path::new(path))
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn collect_grep_scope_coverage(
     ctx: &HandlerContext,
     index: &ContentIndex,
     params: &GrepSearchParams,
+    scope: &ResolvedFileScope,
 ) -> Result<GrepScopeCoverage, String> {
     let guard = ctx.file_index.read()
         .map_err(|error| format!("Failed to read file index: {}", error))?;
@@ -2785,7 +2781,8 @@ fn collect_grep_scope_coverage(
     }
 
     let mut indexed_paths = std::collections::BTreeSet::new();
-    for path in index.files.iter().filter(|path| passes_file_filters_for_coverage(path, params)) {
+    for file_id in scope.iter_ids() {
+        let path = &index.files[file_id as usize];
         let key = grep_scope_path_key(path);
         indexed_paths.insert(key.clone());
         matched_paths.entry(key).or_insert_with(|| path.clone());
@@ -2814,6 +2811,46 @@ fn collect_grep_scope_coverage(
         extensions: extensions.into_iter().collect(),
         extension_not_indexed,
     })
+}
+
+fn apply_grep_scope_telemetry(
+    result: &mut ToolCallResult,
+    scope: &ResolvedFileScope,
+) {
+    let Some(text) = result.content.first_mut().map(|content| &mut content.text) else {
+        return;
+    };
+    let Ok(mut output) = serde_json::from_str::<Value>(text) else {
+        return;
+    };
+
+    let line_regex_compat = output.get("summary")
+        .and_then(|summary| summary.get("lineRegexScan"))
+        .map(|scan| {
+            (
+                scan.get("filesConsidered").cloned(),
+                scan.get("scheduledFiles").cloned(),
+            )
+        });
+
+    if let Some(summary) = output.get_mut("summary").and_then(Value::as_object_mut) {
+        summary.insert("scope".to_string(), json!({
+            "requested": !scope.is_all(),
+            "strategy": scope.strategy().as_str(),
+            "indexFiles": scope.total_files(),
+            "matchedFiles": scope.len(),
+            "resolutionMs": scope.resolution_duration().as_secs_f64() * 1000.0,
+        }));
+    }
+
+    if let Some((Some(files_considered), Some(scheduled_files))) = line_regex_compat
+        && let Some(execution) = output.get_mut("execution").and_then(Value::as_object_mut)
+    {
+        execution.insert("filesScanned".to_string(), scheduled_files);
+        execution.insert("filesConsidered".to_string(), files_considered);
+    }
+
+    *text = json_to_string(&output);
 }
 
 fn apply_grep_scope_coverage(
@@ -3099,8 +3136,9 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         files_only: parsed.files_only,
         invert_cap: parsed.invert_cap,
     };
+    let file_scope = resolve_grep_file_scope(&index, &grep_params);
     let scope_coverage = if coverage_requested {
-        match collect_grep_scope_coverage(ctx, &index, &grep_params) {
+        match collect_grep_scope_coverage(ctx, &index, &grep_params, &file_scope) {
             Ok(coverage) => Some(coverage),
             Err(error) => return ToolCallResult::error(error),
         }
@@ -3110,11 +3148,18 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
 
     // --- Substring search mode
     if parsed.use_substring {
-        let mut result = handle_substring_search(ctx, &index, &parsed.terms, &grep_params);
+        let mut result = handle_substring_search(
+            ctx,
+            &index,
+            &parsed.terms,
+            &grep_params,
+            &file_scope,
+        );
         inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
         if parsed.invert {
-            result = apply_invert(result, &index, &grep_params);
+            result = apply_invert(result, &index, &grep_params, &file_scope);
         }
+        apply_grep_scope_telemetry(&mut result, &file_scope);
         apply_grep_scope_coverage(&mut result, scope_coverage.as_ref());
         attach_trigram_query_timing(&mut result, search_start.elapsed(), trigram_timing);
         return result;
@@ -3127,11 +3172,18 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         if phrases.is_empty() {
             return ToolCallResult::error("No search terms provided".to_string());
         }
-        let mut result = handle_multi_phrase_search(ctx, &index, &phrases, &grep_params);
+        let mut result = handle_multi_phrase_search(
+            ctx,
+            &index,
+            &phrases,
+            &grep_params,
+            &file_scope,
+        );
         inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
         if parsed.invert {
-            result = apply_invert(result, &index, &grep_params);
+            result = apply_invert(result, &index, &grep_params, &file_scope);
         }
+        apply_grep_scope_telemetry(&mut result, &file_scope);
         apply_grep_scope_coverage(&mut result, scope_coverage.as_ref());
         return result;
     }
@@ -3142,11 +3194,18 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         // `,` inside an entry is preserved (e.g. CSV-shape regex
         // `^[^,]+,[^,]+$`, log prefix `^ERROR,WARN:`).
         let patterns: Vec<String> = parsed.terms.clone();
-        let mut result = handle_line_regex_search(ctx, &index, patterns, &grep_params);
+        let mut result = handle_line_regex_search(
+            ctx,
+            &index,
+            patterns,
+            &grep_params,
+            &file_scope,
+        );
         inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
         if parsed.invert {
-            result = apply_invert(result, &index, &grep_params);
+            result = apply_invert(result, &index, &grep_params, &file_scope);
         }
+        apply_grep_scope_telemetry(&mut result, &file_scope);
         apply_grep_scope_coverage(&mut result, scope_coverage.as_ref());
         attach_trigram_query_timing(&mut result, search_start.elapsed(), trigram_timing);
         return result;
@@ -3177,7 +3236,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     let search_mode = if parsed.use_regex { "regex" } else if parsed.mode_and { "and" } else { "or" };
     let term_count_for_all = if parsed.use_regex { raw_terms.len() } else { terms.len() };
 
-    let file_scores = score_normal_token_search(&terms, &index, &grep_params);
+    let file_scores = score_normal_token_search(&terms, &index, &grep_params, &file_scope);
 
     let (mut results, total_files, total_occurrences) =
         finalize_grep_results(file_scores, parsed.mode_and, term_count_for_all);
@@ -3213,8 +3272,9 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
 
     if parsed.invert {
-        result = apply_invert(result, &index, &grep_params);
+        result = apply_invert(result, &index, &grep_params, &file_scope);
     }
+    apply_grep_scope_telemetry(&mut result, &file_scope);
     apply_grep_scope_coverage(&mut result, scope_coverage.as_ref());
     result
 }
@@ -3247,6 +3307,7 @@ fn auto_switch_to_phrase_if_needed(
     terms: &[String],
     raw_terms: &[String],
     params: &GrepSearchParams,
+    scope: &ResolvedFileScope,
 ) -> Option<ToolCallResult> {
     let has_spaces = raw_terms.iter().any(|t| t.contains(' '));
     let has_punctuation = raw_terms.iter().any(|t| has_non_token_chars(t));
@@ -3266,7 +3327,7 @@ fn auto_switch_to_phrase_if_needed(
     debug!("[substring-trace] {} — auto-switching to phrase mode", reason);
     // Each `terms` entry is one phrase, taken verbatim (literal-comma-safe).
     let phrases: Vec<String> = terms.to_vec();
-    let mut result = handle_multi_phrase_search(ctx, index, &phrases, params);
+    let mut result = handle_multi_phrase_search(ctx, index, &phrases, params, scope);
     // Inject a note explaining the auto-switch
     if let Some(text) = result.content.first_mut().map(|c| &mut c.text)
         && let Ok(mut output) = serde_json::from_str::<serde_json::Value>(text) {
@@ -3357,7 +3418,7 @@ fn score_token_postings(
     matched_tokens: &[String],
     term_idx: usize,
     index: &ContentIndex,
-    params: &GrepSearchParams,
+    scope: &ResolvedFileScope,
     total_docs: f64,
     tokens_with_hits: &mut HashSet<String>,
     file_scores: &mut HashMap<u32, FileScoreEntry>,
@@ -3374,12 +3435,13 @@ fn score_token_postings(
 
             for posting in postings {
                 term_postings_checked += 1;
+                if !scope.contains(posting.file_id) {
+                    continue;
+                }
                 let file_path = match index.files.get(posting.file_id as usize) {
                     Some(p) => p,
                     None => continue,
                 };
-
-                if !passes_file_filters(file_path, params) { continue; }
 
                 term_files_passed += 1;
                 tokens_with_hits.insert(token.clone());
@@ -3545,6 +3607,7 @@ fn handle_substring_search(
     index: &ContentIndex,
     terms: &[String],
     params: &GrepSearchParams,
+    scope: &ResolvedFileScope,
 ) -> ToolCallResult {
     // Stage 1: Terms parsing — lowercase the user-supplied entries (already
     // trimmed and de-empty'd by `read_string_array`). Substring search runs
@@ -3561,7 +3624,9 @@ fn handle_substring_search(
     }
 
     // Auto-switch to phrase mode when terms contain spaces or non-token characters
-    if let Some(result) = auto_switch_to_phrase_if_needed(ctx, index, terms, &raw_terms, params) {
+    if let Some(result) =
+        auto_switch_to_phrase_if_needed(ctx, index, terms, &raw_terms, params, scope)
+    {
         return result;
     }
 
@@ -3606,7 +3671,7 @@ fn handle_substring_search(
         };
 
         score_token_postings(
-            &matched_tokens, term_idx, index, params, total_docs,
+            &matched_tokens, term_idx, index, scope, total_docs,
             &mut tokens_with_hits, &mut file_scores, &mut file_matched_terms,
         );
     }
@@ -3652,6 +3717,7 @@ fn handle_phrase_search(
     index: &ContentIndex,
     phrase: &str,
     params: &GrepSearchParams,
+    scope: &ResolvedFileScope,
 ) -> ToolCallResult {
     let show_lines = params.show_lines;
     let context_lines = params.context_lines;
@@ -3661,7 +3727,7 @@ fn handle_phrase_search(
 
     // C1 refactor: Delegate tokenization, candidate search, and phrase verification
     // to collect_phrase_matches() — eliminating ~85 lines of duplicated logic.
-    let (mut results, diag) = match collect_phrase_matches(index, phrase, params) {
+    let (mut results, diag) = match collect_phrase_matches(index, phrase, params, scope) {
         Ok(r) => r,
         Err(e) => return ToolCallResult::error(e),
     };
@@ -4031,6 +4097,7 @@ fn collect_phrase_matches(
     index: &ContentIndex,
     phrase: &str,
     params: &GrepSearchParams,
+    scope: &ResolvedFileScope,
 ) -> Result<(Vec<PhraseFileMatch>, PhraseSearchDiag), String> {
     let show_lines = params.show_lines;
     let mut diag = PhraseSearchDiag::default();
@@ -4090,11 +4157,10 @@ fn collect_phrase_matches(
         let mut pass_count = 0usize;
         let mut map: HashMap<u32, Vec<u32>> = HashMap::with_capacity(postings.len());
         for p in postings {
-            let path = match index.files.get(p.file_id as usize) {
-                Some(p) => p,
-                None => continue,
-            };
-            if !passes_file_filters(path, params) {
+            if !scope.contains(p.file_id) {
+                continue;
+            }
+            if index.files.get(p.file_id as usize).is_none() {
                 continue;
             }
             // Postings record a line number once per occurrence; dedup so
@@ -4335,10 +4401,11 @@ fn handle_multi_phrase_search(
     index: &ContentIndex,
     phrases: &[String],
     params: &GrepSearchParams,
+    scope: &ResolvedFileScope,
 ) -> ToolCallResult {
     // Single phrase → delegate to existing handler
     if phrases.len() == 1 {
-        return handle_phrase_search(ctx, index, &phrases[0], params);
+        return handle_phrase_search(ctx, index, &phrases[0], params, scope);
     }
 
     let max_results = params.max_results;
@@ -4356,7 +4423,7 @@ fn handle_multi_phrase_search(
     let mut phrase_warnings_omitted = 0usize;
 
     for phrase in phrases {
-        match collect_phrase_matches(index, phrase, params) {
+        match collect_phrase_matches(index, phrase, params, scope) {
             Ok((matches, diag)) => {
                 if diag.has_missing_tokens() {
                     if phrase_warnings.len() < PHRASE_WARNINGS_MAX {
@@ -4489,6 +4556,7 @@ fn handle_line_regex_search(
     index: &ContentIndex,
     patterns: Vec<String>,
     params: &GrepSearchParams,
+    scope: &ResolvedFileScope,
 ) -> ToolCallResult {
     // AC-4 differential-test toggle: production code always passes `true`,
     // but the `cfg(test)` build honours a thread-local override so a
@@ -4499,7 +4567,7 @@ fn handle_line_regex_search(
     let prefilter_enabled = !line_regex_prefilter_disabled_for_test();
     #[cfg(not(test))]
     let prefilter_enabled = !params.trigram_stale;
-    handle_line_regex_search_inner(ctx, index, patterns, params, prefilter_enabled)
+    handle_line_regex_search_inner(ctx, index, patterns, params, scope, prefilter_enabled)
 }
 
 #[cfg(test)]
@@ -4527,13 +4595,6 @@ pub(crate) fn set_line_regex_prefilter_disabled_for_test(disabled: bool) {
 /// literal-trigram prefilter (kept here in step 2 only to enable the
 /// `#[cfg(test)]` differential check added in step 5). For now both call
 /// sites pass `true` and the flag is intentionally unused.
-fn line_regex_candidate_count(
-    index: &ContentIndex,
-    candidate_file_ids: Option<&HashSet<u32>>,
-) -> usize {
-    candidate_file_ids.map_or(index.files.len(), HashSet::len)
-}
-
 fn line_regex_scan_worker_threads(candidate_count: usize) -> usize {
     if candidate_count < LINE_REGEX_PARALLEL_SCAN_MIN_FILES {
         return 1;
@@ -4545,32 +4606,11 @@ fn line_regex_scan_worker_threads(candidate_count: usize) -> usize {
 }
 
 fn scan_line_regex_file(
-    file_id: usize,
     file_path: &str,
-    candidate_file_ids: Option<&HashSet<u32>>,
     compiled: &[regex::Regex],
-    params: &GrepSearchParams,
 ) -> LineRegexFileScanOutput {
     let mut output = LineRegexFileScanOutput::default();
     output.counters.files_visited = 1;
-
-    let candidate_filter_start = Instant::now();
-    if let Some(candidates) = candidate_file_ids
-        && !candidates.contains(&(file_id as u32))
-    {
-        output.timings.candidate_filter_duration = candidate_filter_start.elapsed();
-        output.counters.files_skipped_by_prefilter = 1;
-        return output;
-    }
-    output.timings.candidate_filter_duration = candidate_filter_start.elapsed();
-
-    let scope_filter_start = Instant::now();
-    if !passes_file_filters(file_path, params) {
-        output.timings.scope_filter_duration = scope_filter_start.elapsed();
-        output.counters.files_skipped_by_scope = 1;
-        return output;
-    }
-    output.timings.scope_filter_duration = scope_filter_start.elapsed();
 
     let read_start = Instant::now();
     let content = match read_file_lossy(std::path::Path::new(file_path)) {
@@ -4616,50 +4656,60 @@ fn scan_line_regex_file(
     output
 }
 
+#[derive(Debug)]
+struct LineRegexScanPlan {
+    scheduled_file_ids: Vec<u32>,
+    scope_files: usize,
+    prefilter_files_global: Option<usize>,
+    prefilter_files_in_scope: Option<usize>,
+}
+
+impl LineRegexScanPlan {
+    fn build(scope: &ResolvedFileScope, candidate_file_ids: Option<&HashSet<u32>>) -> Self {
+        let scheduled_file_ids = if scope.is_empty() {
+            Vec::new()
+        } else {
+            candidate_file_ids
+                .map(|candidates| scope.intersect_candidate_ids(candidates))
+                .unwrap_or_else(|| scope.iter_ids().collect())
+        };
+        Self {
+            prefilter_files_global: candidate_file_ids.map(HashSet::len),
+            prefilter_files_in_scope: candidate_file_ids.map(|_| scheduled_file_ids.len()),
+            scheduled_file_ids,
+            scope_files: scope.len(),
+        }
+    }
+}
+
 fn collect_line_regex_scan_outputs(
     index: &ContentIndex,
-    candidate_file_ids: Option<&HashSet<u32>>,
+    plan: &LineRegexScanPlan,
     compiled: &[regex::Regex],
-    params: &GrepSearchParams,
 ) -> Result<(Vec<LineRegexFileScanOutput>, bool, usize, Duration), String> {
-    let candidate_count = line_regex_candidate_count(index, candidate_file_ids);
-    let worker_threads = line_regex_scan_worker_threads(candidate_count);
+    let worker_threads = line_regex_scan_worker_threads(plan.scheduled_file_ids.len());
     let parallel_scan = worker_threads > 1;
     let scan_start = Instant::now();
 
     if !parallel_scan {
-        let outputs = index.files.iter().enumerate()
-            .map(|(file_id, file_path)| {
-                scan_line_regex_file(
-                    file_id,
-                    file_path,
-                    candidate_file_ids,
-                    compiled,
-                    params,
-                )
-            })
+        let outputs = plan.scheduled_file_ids.iter()
+            .map(|&file_id| scan_line_regex_file(&index.files[file_id as usize], compiled))
             .collect();
         return Ok((outputs, false, 1, scan_start.elapsed()));
     }
 
-    let chunk_size = index.files.len().div_ceil(worker_threads);
-    let mut outputs: Vec<LineRegexFileScanOutput> = Vec::with_capacity(index.files.len());
+    let chunk_size = plan.scheduled_file_ids.len().div_ceil(worker_threads);
+    let mut outputs: Vec<LineRegexFileScanOutput> =
+        Vec::with_capacity(plan.scheduled_file_ids.len());
     let mut worker_panicked = false;
 
     std::thread::scope(|scope| {
         let mut handles = Vec::new();
-        for (chunk_index, file_chunk) in index.files.chunks(chunk_size).enumerate() {
-            let first_file_id = chunk_index * chunk_size;
+        for file_id_chunk in plan.scheduled_file_ids.chunks(chunk_size) {
             handles.push(scope.spawn(move || {
-                file_chunk.iter().enumerate()
-                    .map(|(offset, file_path)| {
-                        scan_line_regex_file(
-                            first_file_id + offset,
-                            file_path,
-                            candidate_file_ids,
-                            compiled,
-                            params,
-                        )
+                file_id_chunk.iter()
+                    .map(|&file_id| {
+                        scan_line_regex_file(&index.files[file_id as usize], compiled)
                     })
                     .collect::<Vec<_>>()
             }));
@@ -4721,6 +4771,7 @@ fn handle_line_regex_search_inner(
     index: &ContentIndex,
     patterns: Vec<String>,
     params: &GrepSearchParams,
+    scope: &ResolvedFileScope,
     prefilter_enabled: bool,
 ) -> ToolCallResult {
     // `patterns` is supplied by the caller as one regex per array entry
@@ -4800,33 +4851,28 @@ fn handle_line_regex_search_inner(
     // this, scoped queries on a 60k-file index always reported the same
     // global counts, which is the cognitive trap that motivated the
     // alternation-split advisory revert.
-    if params_have_scope_filter(params) {
-        let scope_count_start = Instant::now();
-        let mut total_after = 0usize;
-        let mut cand_after = 0usize;
-        for (file_id, file_path) in index.files.iter().enumerate() {
-            if !passes_file_filters(file_path, params) {
-                continue;
-            }
-            total_after += 1;
-            if let Some(ref candidates) = candidate_file_ids
-                && candidates.contains(&(file_id as u32))
-            {
-                cand_after += 1;
-            }
-        }
-        prefilter_info.total_files_after_scope = Some(total_after);
-        if candidate_file_ids.is_some() {
-            prefilter_info.candidate_files_after_scope = Some(cand_after);
-        }
-        scan_telemetry.scope_count_duration = scope_count_start.elapsed();
+    let scope_count_start = Instant::now();
+    let scan_plan = LineRegexScanPlan::build(scope, candidate_file_ids.as_ref());
+    if !scope.is_all() {
+        prefilter_info.total_files_after_scope = Some(scan_plan.scope_files);
+        prefilter_info.candidate_files_after_scope = scan_plan.prefilter_files_in_scope;
     }
+    if let Some(prefilter_files_global) = scan_plan.prefilter_files_global {
+        prefilter_info.candidate_files = prefilter_files_global;
+    }
+    scan_telemetry.scope_count_duration = scope_count_start.elapsed();
+    scan_telemetry.files_considered = scope.total_files();
+    scan_telemetry.scope_files = scan_plan.scope_files;
+    scan_telemetry.scheduled_files = scan_plan.scheduled_file_ids.len();
+    scan_telemetry.files_skipped_by_scope = scope.skipped_by_scope();
+    scan_telemetry.files_skipped_by_prefilter = scan_plan
+        .scope_files
+        .saturating_sub(scan_plan.scheduled_file_ids.len());
 
     let (scan_outputs, parallel_scan, worker_threads, scan_duration) = match collect_line_regex_scan_outputs(
         index,
-        candidate_file_ids.as_ref(),
+        &scan_plan,
         &compiled,
-        params,
     ) {
         Ok(scan_result) => scan_result,
         Err(error) => return ToolCallResult::error(error),

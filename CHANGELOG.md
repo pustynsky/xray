@@ -1,6 +1,15 @@
 # Changelog
 
 
+## Unreleased
+
+- **Scoped grep queries now resolve their content-index file scope once per request.** Normal token, substring, phrase, line-regex, coverage, and invert paths reuse a compact query-local membership mask. No on-disk index format change is required.
+
+- **Line-regex telemetry now uses schema v2 funnel accounting.** `summary.lineRegexScan` includes `schemaVersion=2`, `filesConsidered`, `scopeFiles`, and `scheduledFiles`; `filesVisited` now counts scanner invocations rather than the whole index. Transitional `execution.filesConsidered` preserves the old index-size meaning while `execution.filesScanned` reports scheduled files.
+
+- **Scoped-query Criterion coverage was added.** The `scope_resolution`, `line_regex_schedule`, `posting_scope_filter`, and `phrase_scope_filter` groups cover 1k, 10k, and 50k synthetic workspaces.
+
+
 ## 0.3.1 (2026-07-22)
 
 - **C# and TypeScript caller resolution is more precise.** Inline, typed, conditional, and nullish receivers retain their known class instead of expanding to unrelated same-named methods.
