@@ -490,7 +490,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "resolveInterfaces": {
                         "type": "boolean",
-                        "description": "Auto-resolve interface methods to implementations (default: true)"
+                        "description": "Interface resolution policy: false keeps direct interface nodes only; true also expands implementation callers/callees. Echoed as query.resolveInterfaces. (default: true)"
                     },
                     "includeBody": {
                         "type": "boolean",
