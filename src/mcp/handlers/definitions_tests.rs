@@ -1853,6 +1853,163 @@ fn test_apply_entry_filters_combined_file_and_parent() {
 }
 
 #[test]
+fn test_definition_file_scope_intersects_secondary_candidates_and_excludes_tombstones() {
+    let mut index = make_test_def_index();
+    let tombstoned_idx = index.definitions.len() as u32;
+    let mut tombstoned = index.definitions[3].clone();
+    tombstoned.name = "TombstonedMethod".to_string();
+    index.definitions.push(tombstoned);
+    index.kind_index
+        .entry(DefinitionKind::Method)
+        .or_default()
+        .push(tombstoned_idx);
+
+    let args = parse_definition_args(&json!({
+        "file": ["UserService.cs"],
+        "kind": ["method"]
+    })).unwrap();
+    let scope = ResolvedDefinitionFileScope::resolve(&index, &args);
+    let selection = collect_candidates_in_scope(&index, &args, Some(&scope)).unwrap();
+
+    assert_eq!(
+        selection.before_file_scope,
+        3,
+        "secondary index includes the synthetic tombstone"
+    );
+    assert_eq!(scope.file_count(), 1);
+    assert_eq!(selection.indices, vec![1]);
+}
+
+#[test]
+fn test_definition_file_scope_reports_compact_candidate_telemetry() {
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(ContentIndex::default())),
+        def_index: Some(Arc::new(RwLock::new(make_test_def_index()))),
+        ..Default::default()
+    };
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": ["UserService.cs"],
+        "kind": ["method"]
+    }));
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let summary = &output["summary"];
+    assert_eq!(summary["candidateDefinitionsBeforeFileScope"], 2);
+    assert_eq!(summary["candidateDefinitionsAfterFileScope"], 1);
+    assert_eq!(summary["scopeFiles"], 1);
+    assert!(summary["scopeResolutionMs"].is_number());
+}
+
+#[test]
+fn test_definition_file_scope_intersects_all_secondary_filters() {
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(ContentIndex::default())),
+        def_index: Some(Arc::new(RwLock::new(make_test_def_index()))),
+        ..Default::default()
+    };
+    let cases = [
+        ("name", json!({"file": ["UserService.cs"], "name": ["Service"]}), vec!["UserService"]),
+        ("regex name", json!({"file": ["UserService.cs"], "name": ["^Get"], "regex": true}), vec!["GetUser"]),
+        ("kind", json!({"file": ["UserService.cs"], "kind": ["method"]}), vec!["GetUser"]),
+        ("attribute", json!({"file": ["UserService.cs"], "attribute": "injectable"}), vec!["UserService"]),
+        ("parent", json!({"file": ["UserService.cs"], "parent": ["UserService"]}), vec!["GetUser"]),
+        ("excludeDir", json!({"file": ["UserService.cs"], "excludeDir": ["src"], "autoCorrect": false}), vec![]),
+        ("no matching file", json!({"file": ["Missing.cs"], "autoCorrect": false}), vec![]),
+    ];
+
+    for (label, args, expected_names) in cases {
+        let result = handle_xray_definitions(&ctx, &args);
+        assert!(!result.is_error, "{label}: {}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let names: Vec<&str> = output["definitions"].as_array().unwrap().iter()
+            .map(|definition| definition["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, expected_names, "{label}");
+        assert!(output["summary"]["candidateDefinitionsBeforeFileScope"].is_number(), "{label}");
+        assert!(output["summary"]["candidateDefinitionsAfterFileScope"].is_number(), "{label}");
+    }
+}
+
+#[test]
+fn test_definition_file_scope_intersects_base_type_filters() {
+    let ctx = make_transitive_inheritance_ctx();
+    let cases = [
+        (
+            "direct",
+            json!({"file": ["Services.cs"], "baseType": "BaseService"}),
+            vec!["MiddleService"],
+        ),
+        (
+            "transitive",
+            json!({
+                "file": ["Concrete.cs"],
+                "baseType": "BaseService",
+                "baseTypeTransitive": true
+            }),
+            vec!["ConcreteService"],
+        ),
+    ];
+
+    for (label, args, expected_names) in cases {
+        let result = handle_xray_definitions(&ctx, &args);
+        assert!(!result.is_error, "{label}: {}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let names: Vec<&str> = output["definitions"].as_array().unwrap().iter()
+            .map(|definition| definition["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, expected_names, "{label}");
+    }
+}
+
+#[test]
+fn test_large_definition_file_scope_reports_candidate_reduction() {
+    const FILE_COUNT: usize = 100;
+    const DEFINITIONS_PER_FILE: usize = 100;
+    let mut index = DefinitionIndex::default();
+
+    for file_id in 0..FILE_COUNT {
+        index.files.push(format!("C:/src/file_{file_id:03}.cs"));
+        let mut file_definitions = Vec::with_capacity(DEFINITIONS_PER_FILE);
+        for definition_in_file in 0..DEFINITIONS_PER_FILE {
+            let definition_id = index.definitions.len() as u32;
+            index.definitions.push(DefinitionEntry {
+                name: format!("Method_{file_id:03}_{definition_in_file:03}"),
+                kind: DefinitionKind::Method,
+                file_id: file_id as u32,
+                line_start: definition_in_file as u32 + 1,
+                line_end: definition_in_file as u32 + 1,
+                signature: None,
+                parent: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: vec![],
+            });
+            file_definitions.push(definition_id);
+            index.kind_index
+                .entry(DefinitionKind::Method)
+                .or_default()
+                .push(definition_id);
+        }
+        index.file_index.insert(file_id as u32, file_definitions);
+    }
+
+    let args = parse_definition_args(&json!({
+        "file": ["file_042.cs"],
+        "kind": ["method"]
+    })).unwrap();
+    let scope = ResolvedDefinitionFileScope::resolve(&index, &args);
+    let selection = collect_candidates_in_scope(&index, &args, Some(&scope)).unwrap();
+
+    assert_eq!(selection.before_file_scope, FILE_COUNT * DEFINITIONS_PER_FILE);
+    assert_eq!(selection.indices.len(), DEFINITIONS_PER_FILE);
+    assert_eq!(scope.file_count(), 1);
+    assert!(selection.indices.iter().all(|definition_id| {
+        index.definitions[*definition_id as usize].file_id == 42
+    }));
+}
+
+#[test]
 fn test_apply_entry_filters_case_insensitive_file() {
     let index = make_test_def_index();
     let candidates: Vec<u32> = (0..4).collect();
@@ -4942,6 +5099,120 @@ fn test_contains_line_rejects_multi_file_array() {
     assert!(msg.contains("containsLine=5"),
         "error must include actionable hint with line; got: {msg}");
 }
+
+#[test]
+fn test_contains_line_full_path_uses_exact_path_to_id_scope() {
+    let exact_path = r"C:\one\Helper.cs";
+    let other_path = r"C:\two\Helper.cs";
+    let mut index = make_test_def_index();
+    index.files = vec![exact_path.to_string(), other_path.to_string()];
+    index.path_to_id.insert(
+        crate::path_identity_key(std::path::Path::new(exact_path)),
+        0,
+    );
+    index.path_to_id.insert(
+        crate::path_identity_key(std::path::Path::new(other_path)),
+        1,
+    );
+
+    let args = parse_definition_args(&json!({
+        "file": [exact_path],
+        "containsLine": 10
+    })).unwrap();
+    let scope = resolve_contains_line_file_scope(&index, &args, exact_path);
+    assert!(scope.exact_path_match);
+    assert_eq!(scope.files.iter_ids().collect::<Vec<_>>(), vec![0]);
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(ContentIndex::default())),
+        def_index: Some(Arc::new(RwLock::new(index))),
+        ..Default::default()
+    };
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": [exact_path],
+        "containsLine": 10
+    }));
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["scopeFiles"], 1);
+    let definitions = output["containingDefinitions"].as_array().unwrap();
+    assert_eq!(definitions.len(), 2);
+    assert!(definitions.iter().all(|definition| definition["file"] == exact_path));
+}
+
+#[test]
+fn test_contains_line_basename_fallback_preserves_multiple_file_matches() {
+    let mut index = make_test_def_index();
+    index.files = vec![
+        r"C:\one\Helper.cs".to_string(),
+        r"C:\two\Helper.cs".to_string(),
+    ];
+    for (file_id, file_path) in index.files.iter().enumerate() {
+        index.path_to_id.insert(
+            crate::path_identity_key(std::path::Path::new(file_path)),
+            file_id as u32,
+        );
+    }
+    let args = parse_definition_args(&json!({
+        "file": ["Helper.cs"],
+        "containsLine": 10
+    })).unwrap();
+    let scope = resolve_contains_line_file_scope(&index, &args, "Helper.cs");
+    assert!(!scope.exact_path_match);
+    assert_eq!(scope.files.iter_ids().collect::<Vec<_>>(), vec![0, 1]);
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(ContentIndex::default())),
+        def_index: Some(Arc::new(RwLock::new(index))),
+        ..Default::default()
+    };
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": ["Helper.cs"],
+        "containsLine": 10
+    }));
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["scopeFiles"], 2);
+    assert_eq!(output["containingDefinitions"].as_array().unwrap().len(), 4);
+}
+
+#[test]
+fn test_contains_line_exclude_dir_is_applied_during_scope_resolution() {
+    let mut index = make_test_def_index();
+    index.files = vec![
+        r"C:\test\Helper.cs".to_string(),
+        r"C:\src\Helper.cs".to_string(),
+    ];
+    let request = json!({
+        "file": ["Helper.cs"],
+        "containsLine": 10,
+        "excludeDir": ["test"]
+    });
+    let args = parse_definition_args(&request).unwrap();
+    let scope = resolve_contains_line_file_scope(&index, &args, "Helper.cs");
+    assert_eq!(scope.files.iter_ids().collect::<Vec<_>>(), vec![1]);
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(ContentIndex::default())),
+        def_index: Some(Arc::new(RwLock::new(index))),
+        ..Default::default()
+    };
+    let result = handle_xray_definitions(&ctx, &request);
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["candidateDefinitionsBeforeFileScope"], 4);
+    assert_eq!(output["summary"]["candidateDefinitionsAfterFileScope"], 2);
+    assert_eq!(output["summary"]["scopeFiles"], 1);
+    let definitions = output["containingDefinitions"].as_array().unwrap();
+    assert_eq!(definitions.len(), 2);
+    assert!(definitions.iter().all(|definition| {
+        definition["file"] == r"C:\src\Helper.cs"
+    }));
+}
+
 
 #[test]
 fn test_contains_line_single_file_array_still_works() {

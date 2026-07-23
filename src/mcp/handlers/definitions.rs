@@ -10,7 +10,7 @@
 //! 7. Output formatting ([`format_search_output`])
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -22,6 +22,7 @@ use crate::mcp::lock_order;
 use super::utils::{add_collection_accounting, attach_result_status, build_result_status, inject_body_into_obj, inject_branch_warning, inject_index_degraded, best_match_tier, json_to_string, name_similarity, read_enum_string_opt, read_string};
 use super::HandlerContext;
 use super::advisory_hints::value_source_hint;
+use super::file_scope::{intersect_sorted_candidate_ids, ResolvedFileScope};
 
 // XML on-demand parsing lives in `super::xml_on_demand` behind the `lang-xml`
 // feature flag. `definitions.rs` only re-exports `DefinitionSearchArgs` to that
@@ -357,14 +358,35 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
         return handle_contains_line_mode(&index, &parsed, line_num, search_start, ctx, content_idx);
     }
 
-    // 4. Collect candidate indices from index-based filters
-    let (candidates, def_to_term) = match collect_candidates(&index, &parsed) {
+    // 4. Resolve definition-local file scope once, then intersect it with
+    // candidates from the secondary indexes before materializing entries.
+    let file_scope = parsed.file_filter_terms.as_ref()
+        .map(|_| ResolvedDefinitionFileScope::resolve(&index, &parsed));
+    let candidate_selection = match collect_candidates_in_scope(
+        &index,
+        &parsed,
+        file_scope.as_ref(),
+    ) {
         Ok(result) => result,
         Err(msg) => return ToolCallResult::error(msg),
     };
+    let scope_telemetry = file_scope.as_ref().map(|scope| DefinitionScopeTelemetry {
+        candidate_definitions_before_file_scope: candidate_selection.before_file_scope,
+        candidate_definitions_after_file_scope: candidate_selection.indices.len(),
+        scope_files: scope.file_count(),
+        scope_resolution_duration: scope.resolution_duration,
+    });
+    let candidates = candidate_selection.indices;
+    let def_to_term = candidate_selection.def_to_term;
 
-    // 5. Apply entry-level filters (file, parent, excludeDir)
-    let mut results = apply_entry_filters(&index, &candidates, &parsed);
+    // 5. Apply entry-level filters (parent, excludeDir). File membership was
+    // already applied by definition ID, so do not normalize paths per candidate.
+    let mut results = apply_entry_filters_in_scope(
+        &index,
+        &candidates,
+        &parsed,
+        file_scope.is_some(),
+    );
 
     // 6. Apply code stats filters
     let stats_info = match apply_stats_filters(&index, &mut results, &parsed) {
@@ -388,7 +410,15 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
 
     // 9. Auto-summary: if results won't fit AND it's a broad query, return grouped summary
     if should_auto_summary(&parsed, total_results) {
-        return build_auto_summary(&index, &results, &parsed, total_results, search_start, ctx);
+        return build_auto_summary_with_scope(
+            &index,
+            &results,
+            &parsed,
+            total_results,
+            search_start,
+            ctx,
+            scope_telemetry.as_ref(),
+        );
     }
 
     // 10. Apply max results
@@ -399,8 +429,18 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
     let search_elapsed = search_start.elapsed();
 
     // 11. Format output
-    format_search_output(&index, &results, &parsed, total_results, &stats_info,
-                         &term_breakdown, search_elapsed, ctx, content_idx)
+    format_search_output(
+        &index,
+        &results,
+        &parsed,
+        total_results,
+        &stats_info,
+        &term_breakdown,
+        search_elapsed,
+        ctx,
+        content_idx,
+        scope_telemetry.as_ref(),
+    )
 }
 
 // ─── Audit mode ──────────────────────────────────────────────────────
@@ -488,6 +528,44 @@ fn handle_audit_mode(
 
 // ─── ContainsLine mode ───────────────────────────────────────────────
 
+#[derive(Debug)]
+struct ResolvedContainsLineFileScope {
+    files: ResolvedFileScope,
+    exact_path_match: bool,
+    resolution_duration: Duration,
+}
+
+fn resolve_contains_line_file_scope(
+    index: &DefinitionIndex,
+    args: &DefinitionSearchArgs,
+    file_filter: &str,
+) -> ResolvedContainsLineFileScope {
+    let started = Instant::now();
+    let exact_file_id = index.path_to_id
+        .get(&crate::path_identity_key(std::path::Path::new(file_filter)))
+        .copied();
+    let exact_path_match = exact_file_id.is_some();
+    let file_substr = file_filter.replace('\\', "/").to_lowercase();
+    let files = ResolvedFileScope::resolve(
+        &index.files,
+        true,
+        exact_file_id,
+        |file_path| {
+            let normalized_path = file_path.replace('\\', "/").to_lowercase();
+            (exact_path_match || normalized_path.contains(&file_substr))
+                && (args.exclude_patterns.is_empty()
+                    || !args.exclude_patterns.matches(&normalized_path))
+        },
+    );
+
+    ResolvedContainsLineFileScope {
+        files,
+        exact_path_match,
+        resolution_duration: started.elapsed(),
+    }
+}
+
+
 fn handle_contains_line_mode(
     index: &DefinitionIndex,
     args: &DefinitionSearchArgs,
@@ -519,26 +597,30 @@ fn handle_contains_line_mode(
         ),
     };
     let file_substr = file_filter.replace('\\', "/").to_lowercase();
+    let file_scope = resolve_contains_line_file_scope(index, args, file_filter);
+    let matched_any_file = !file_scope.files.is_empty();
+    debug_assert!(!file_scope.exact_path_match || file_scope.files.len() <= 1);
+    let candidate_definitions_after_file_scope: usize = file_scope.files.iter_ids()
+        .filter_map(|file_id| index.file_index.get(&file_id))
+        .map(Vec::len)
+        .sum();
+    let scope_telemetry = DefinitionScopeTelemetry {
+        candidate_definitions_before_file_scope: index.file_index.values().map(Vec::len).sum(),
+        candidate_definitions_after_file_scope,
+        scope_files: file_scope.files.len(),
+        scope_resolution_duration: file_scope.resolution_duration,
+    };
 
     let mut containing_defs: Vec<Value> = Vec::new();
     let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
     let mut total_body_lines_available: usize = 0;
-    let mut matched_any_file = false;
 
-    for (file_id, file_path) in index.files.iter().enumerate() {
-        if !file_path.replace('\\', "/").to_lowercase().contains(&file_substr) {
+    for file_id in file_scope.files.iter_ids() {
+        let Some(file_path) = index.files.get(file_id as usize) else {
             continue;
-        }
-        matched_any_file = true;
-        // A2 fix: Apply excludeDir filter using pre-computed patterns
-        if !args.exclude_patterns.is_empty() {
-            let path_lower = file_path.to_lowercase().replace('\\', "/");
-            if args.exclude_patterns.matches(&path_lower) {
-                continue;
-            }
-        }
-        if let Some(def_indices) = index.file_index.get(&(file_id as u32)) {
+        };
+        if let Some(def_indices) = index.file_index.get(&file_id) {
             let mut matching: Vec<&DefinitionEntry> = def_indices.iter()
                 .filter_map(|&di| index.definitions.get(di as usize))
                 .filter(|d| d.line_start <= line_num && d.line_end >= line_num)
@@ -627,6 +709,7 @@ fn handle_contains_line_mode(
         "totalResults": containing_defs.len(),
         "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
     });
+    inject_definition_scope_telemetry(&mut summary, Some(&scope_telemetry));
     if args.include_body {
         summary["totalBodyLinesReturned"] = json!(total_body_lines_emitted);
         if total_body_lines_emitted < total_body_lines_available {
@@ -702,10 +785,79 @@ pub(super) fn unsupported_extension_hint_candidate<'a>(file_substr: &'a str, act
 /// (kind, attribute, baseType, name). Returns candidate indices and
 /// a mapping from definition index to which name term matched it
 /// (used for termBreakdown in multi-term queries).
+#[derive(Debug)]
+struct ResolvedDefinitionFileScope {
+    files: ResolvedFileScope,
+    definition_ids: Vec<u32>,
+    resolution_duration: Duration,
+}
+
+impl ResolvedDefinitionFileScope {
+    fn resolve(index: &DefinitionIndex, args: &DefinitionSearchArgs) -> Self {
+        let started = Instant::now();
+        let file_terms = args.file_filter_terms.as_deref().unwrap_or_default();
+        let files = ResolvedFileScope::resolve(&index.files, true, None, |file_path| {
+            let normalized_path = file_path.replace('\\', "/").to_lowercase();
+            file_terms.iter().any(|term| normalized_path.contains(term))
+                && (args.exclude_patterns.is_empty()
+                    || !args.exclude_patterns.matches(&normalized_path))
+        });
+        let mut definition_ids: Vec<u32> = files.iter_ids()
+            .filter_map(|file_id| index.file_index.get(&file_id))
+            .flatten()
+            .copied()
+            .collect();
+        definition_ids.sort_unstable();
+        definition_ids.dedup();
+
+        Self {
+            files,
+            definition_ids,
+            resolution_duration: started.elapsed(),
+        }
+    }
+
+    fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    fn intersect_candidate_ids(&self, candidates: Vec<u32>) -> Vec<u32> {
+        intersect_sorted_candidate_ids(&candidates, &self.definition_ids)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DefinitionScopeTelemetry {
+    candidate_definitions_before_file_scope: usize,
+    candidate_definitions_after_file_scope: usize,
+    scope_files: usize,
+    scope_resolution_duration: Duration,
+}
+
+
+#[derive(Debug)]
+struct CollectedDefinitionCandidates {
+    indices: Vec<u32>,
+    def_to_term: HashMap<u32, usize>,
+    before_file_scope: usize,
+}
+
+#[cfg(test)]
 fn collect_candidates(
     index: &DefinitionIndex,
     args: &DefinitionSearchArgs,
 ) -> Result<(Vec<u32>, HashMap<u32, usize>), String> {
+    let file_scope = args.file_filter_terms.as_ref()
+        .map(|_| ResolvedDefinitionFileScope::resolve(index, args));
+    let selection = collect_candidates_in_scope(index, args, file_scope.as_ref())?;
+    Ok((selection.indices, selection.def_to_term))
+}
+
+fn collect_candidates_in_scope(
+    index: &DefinitionIndex,
+    args: &DefinitionSearchArgs,
+    file_scope: Option<&ResolvedDefinitionFileScope>,
+) -> Result<CollectedDefinitionCandidates, String> {
     let mut candidate_indices: Option<Vec<u32>> = None;
     let mut def_to_term: HashMap<u32, usize> = HashMap::new();
 
@@ -861,64 +1013,61 @@ fn collect_candidates(
         }
     }
 
-    // File-only fast path: when the only filter is `file=`, narrow via the
-    // file_index lookup table BEFORE collecting all active definitions. The
-    // unfiltered fallback below would walk every entry of `index.file_index`
-    // (~1M defs on the Shared workspace), then hand them to `apply_entry_filters`
-    // which re-normalizes each path string and substring-checks it. For a
-    // single-file query the user wants ~30 results, not 1M iterations.
-    //
-    // This mirrors the prefilter shape used by `xray_grep` (per-term postings
-    // before TF-IDF) and the `containsLine` mode below, both of which already
-    // narrow by file before doing per-definition work. Bug observed 2026-05-03:
-    // `xray_definitions file=["IB2BWorkflowsManager.cs"]` took 2.1 s on Shared,
-    // dropping to ~30-80 ms after this prefilter.
-    //
-    // Path normalization here MUST match `apply_entry_filters` exactly
-    // (`replace('\\', "/").to_lowercase()`) so that the post-filter is a no-op
-    // and we do not silently drop matches on case-sensitive filesystems.
-    if candidate_indices.is_none()
-        && let Some(ref file_terms) = args.file_filter_terms
-    {
-        let mut narrowed: Vec<u32> = Vec::new();
-        for (file_id, file_path) in index.files.iter().enumerate() {
-            let file_lower = file_path.replace('\\', "/").to_lowercase();
-            if file_terms.iter().any(|t| file_lower.contains(t.as_str()))
-                && let Some(defs) = index.file_index.get(&(file_id as u32))
-            {
-                narrowed.extend(defs);
-            }
-        }
-        candidate_indices = Some(narrowed);
+    if let Some(indices) = candidate_indices.as_mut() {
+        indices.sort_unstable();
+        indices.dedup();
     }
+    let before_file_scope = candidate_indices.as_ref()
+        .map(Vec::len)
+        .unwrap_or_else(|| index.file_index.values().map(Vec::len).sum());
 
-    // If no filters applied, return all ACTIVE definitions (via file_index to exclude tombstoned)
-    let mut candidates = candidate_indices.unwrap_or_else(|| {
-        index.file_index.values().flat_map(|v| v.iter().copied()).collect()
-    });
+    let mut candidates = match (candidate_indices, file_scope) {
+        (Some(indices), Some(scope)) => scope.intersect_candidate_ids(indices),
+        (None, Some(scope)) => scope.definition_ids.clone(),
+        (Some(indices), None) => indices,
+        (None, None) => index.file_index.values()
+            .flat_map(|definitions| definitions.iter().copied())
+            .collect(),
+    };
 
-    // Deduplicate
     candidates.sort_unstable();
     candidates.dedup();
 
-    Ok((candidates, def_to_term))
+    Ok(CollectedDefinitionCandidates {
+        indices: candidates,
+        def_to_term,
+        before_file_scope,
+    })
 }
 
 // ─── Entry-level filtering ───────────────────────────────────────────
 
 /// Apply post-index filters on actual definition entries: file, parent, excludeDir.
+#[cfg(test)]
 fn apply_entry_filters<'a>(
     index: &'a DefinitionIndex,
     candidates: &[u32],
     args: &DefinitionSearchArgs,
+) -> Vec<(u32, &'a DefinitionEntry)> {
+    apply_entry_filters_in_scope(index, candidates, args, false)
+}
+
+fn apply_entry_filters_in_scope<'a>(
+    index: &'a DefinitionIndex,
+    candidates: &[u32],
+    args: &DefinitionSearchArgs,
+    file_scope_applied: bool,
 ) -> Vec<(u32, &'a DefinitionEntry)> {
     candidates.iter()
         .filter_map(|&idx| {
             let def = index.definitions.get(idx as usize)?;
             let file_path = index.files.get(def.file_id as usize)?;
 
-            // File filter: use pre-parsed terms (avoids re-parsing per candidate)
-            if let Some(ref file_terms) = args.file_filter_terms {
+            // Legacy callers can still pass global candidates. The handler
+            // skips this path after ID-based file-scope intersection.
+            if !file_scope_applied
+                && let Some(ref file_terms) = args.file_filter_terms
+            {
                 let file_lower = file_path.replace('\\', "/").to_lowercase();
                 if !file_terms.iter().any(|t| file_lower.contains(t.as_str())) {
                     return None;
@@ -938,8 +1087,9 @@ fn apply_entry_filters<'a>(
                 }
             }
 
-            // Exclude dir: use pre-computed patterns (avoids per-candidate allocations)
-            if !args.exclude_patterns.is_empty() {
+            // Scoped handler calls already applied excludeDir at file-ID
+            // resolution; legacy/unscoped callers retain entry-level filtering.
+            if !file_scope_applied && !args.exclude_patterns.is_empty() {
                 let path_lower = file_path.to_lowercase().replace('\\', "/");
                 if args.exclude_patterns.matches(&path_lower) {
                     return None;
@@ -1467,6 +1617,7 @@ fn format_search_output(
     search_elapsed: std::time::Duration,
     ctx: &HandlerContext,
     content_idx: Option<&ContentIndex>,
+    scope_telemetry: Option<&DefinitionScopeTelemetry>,
 ) -> ToolCallResult {
     let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
@@ -1498,11 +1649,12 @@ fn format_search_output(
             }
         }
 
-    let summary = build_search_summary(
+    let mut summary = build_search_summary(
         index, &defs_json, args, total_results,
         stats_info, term_breakdown, total_body_lines_emitted,
         total_body_lines_available, search_elapsed, ctx, content_idx,
     );
+    inject_definition_scope_telemetry(&mut summary, scope_telemetry);
 
     let suggestions = if total_results == 0 {
         suggested_name_matches(index, args)
@@ -2032,8 +2184,19 @@ fn try_kind_correction(
     let mut probe_args = original_args.clone();
     probe_args.kind_filter = None;
 
-    let (candidates, _) = collect_candidates(index, &probe_args).ok()?;
-    let filtered = apply_entry_filters(index, &candidates, &probe_args);
+    let file_scope = probe_args.file_filter_terms.as_ref()
+        .map(|_| ResolvedDefinitionFileScope::resolve(index, &probe_args));
+    let candidate_selection = collect_candidates_in_scope(
+        index,
+        &probe_args,
+        file_scope.as_ref(),
+    ).ok()?;
+    let filtered = apply_entry_filters_in_scope(
+        index,
+        &candidate_selection.indices,
+        &probe_args,
+        file_scope.is_some(),
+    );
 
     if filtered.is_empty() {
         return None;
@@ -2142,8 +2305,23 @@ fn run_corrected_search(
     content_idx: Option<&ContentIndex>,
     auto_correction: Value,
 ) -> Option<ToolCallResult> {
-    let (candidates, def_to_term) = collect_candidates(index, args).ok()?;
-    let mut results = apply_entry_filters(index, &candidates, args);
+    let file_scope = args.file_filter_terms.as_ref()
+        .map(|_| ResolvedDefinitionFileScope::resolve(index, args));
+    let candidate_selection = collect_candidates_in_scope(index, args, file_scope.as_ref()).ok()?;
+    let scope_telemetry = file_scope.as_ref().map(|scope| DefinitionScopeTelemetry {
+        candidate_definitions_before_file_scope: candidate_selection.before_file_scope,
+        candidate_definitions_after_file_scope: candidate_selection.indices.len(),
+        scope_files: scope.file_count(),
+        scope_resolution_duration: scope.resolution_duration,
+    });
+    let candidates = candidate_selection.indices;
+    let def_to_term = candidate_selection.def_to_term;
+    let mut results = apply_entry_filters_in_scope(
+        index,
+        &candidates,
+        args,
+        file_scope.is_some(),
+    );
 
     // Apply stats filters (ignore error — correction is best-effort)
     let stats_info = apply_stats_filters(index, &mut results, args).ok()?;
@@ -2165,6 +2343,7 @@ fn run_corrected_search(
     let tool_result = format_search_output(
         index, &results, args, total_results, &stats_info,
         &term_breakdown, search_elapsed, ctx, content_idx,
+        scope_telemetry.as_ref(),
     );
 
     if let Some(content) = tool_result.content.first()
@@ -2572,6 +2751,25 @@ impl AutoSummaryGroup {
 
 /// Build a directory-grouped summary instead of returning truncated entries.
 /// Called when should_auto_summary() returns true.
+fn inject_definition_scope_telemetry(
+    summary: &mut Value,
+    telemetry: Option<&DefinitionScopeTelemetry>,
+) {
+    let Some(telemetry) = telemetry else {
+        return;
+    };
+
+    summary["candidateDefinitionsBeforeFileScope"] =
+        json!(telemetry.candidate_definitions_before_file_scope);
+    summary["candidateDefinitionsAfterFileScope"] =
+        json!(telemetry.candidate_definitions_after_file_scope);
+    summary["scopeFiles"] = json!(telemetry.scope_files);
+    summary["scopeResolutionMs"] =
+        json!(telemetry.scope_resolution_duration.as_secs_f64() * 1000.0);
+}
+
+
+#[cfg(test)]
 fn build_auto_summary(
     index: &DefinitionIndex,
     results: &[(u32, &DefinitionEntry)],
@@ -2579,6 +2777,26 @@ fn build_auto_summary(
     total_results: usize,
     search_start: Instant,
     ctx: &HandlerContext,
+) -> ToolCallResult {
+    build_auto_summary_with_scope(
+        index,
+        results,
+        args,
+        total_results,
+        search_start,
+        ctx,
+        None,
+    )
+}
+
+fn build_auto_summary_with_scope(
+    index: &DefinitionIndex,
+    results: &[(u32, &DefinitionEntry)],
+    args: &DefinitionSearchArgs,
+    total_results: usize,
+    search_start: Instant,
+    ctx: &HandlerContext,
+    scope_telemetry: Option<&DefinitionScopeTelemetry>,
 ) -> ToolCallResult {
     let file_filter_base = args.file_filter.as_deref().unwrap_or("");
     // When the caller did not narrow with `file=`, group relative to the
@@ -2638,6 +2856,7 @@ fn build_auto_summary(
         "indexFiles": index.files.len(),
         "totalDefinitions": active_definitions,
     });
+    inject_definition_scope_telemetry(&mut summary, scope_telemetry);
     inject_branch_warning(&mut summary, ctx);
     inject_index_degraded(&mut summary, index.worker_panics);
 

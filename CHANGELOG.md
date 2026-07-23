@@ -9,6 +9,8 @@
 
 - **Token-regex responses now preserve the user query without vocabulary amplification.** `termsSearched` contains the raw patterns while bounded `regexExpansion` metadata reports examined/matched tokens and posting counters; `countOnly` omits token previews. Matching semantics and the on-disk index format are unchanged, and the `token_regex_expand` Criterion group covers 1k, 10k, and 50k vocabularies.
 
+- **Scoped definition queries now intersect file-derived active definition IDs before materializing results.** `file` combines early with name, regex, kind, attribute, base-type, parent, and exclusion filters; exact full-path `containsLine` requests use `path_to_id` while basename queries keep substring fallback semantics. Definition summaries add `candidateDefinitionsBeforeFileScope`, `candidateDefinitionsAfterFileScope`, `scopeFiles`, and `scopeResolutionMs`; the before count is the post-secondary-filter candidate set for ordinary searches and the active definition universe for `containsLine`. The `definition_candidate_intersection` Criterion group covers 1k, 10k, and 50k definitions. The on-disk index format is unchanged.
+
 - **Scoped-query Criterion coverage was added.** The `scope_resolution`, `line_regex_schedule`, `posting_scope_filter`, and `phrase_scope_filter` groups cover 1k, 10k, and 50k synthetic workspaces.
 
 
