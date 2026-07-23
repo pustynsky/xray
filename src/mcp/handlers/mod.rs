@@ -9,6 +9,7 @@ mod file_scope;
 mod fast;
 mod git;
 mod grep;
+pub(crate) mod token_regex;
 pub(crate) use grep::{start_warm_trigram_index, warm_trigram_index};
 pub(crate) mod utils;
 #[cfg(feature = "lang-xml")]

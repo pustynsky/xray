@@ -488,10 +488,12 @@ fn test_expand_regex_terms_basic() {
     index.index.insert("unrelated".to_string(), vec![Posting { file_id: 0, lines: vec![3] }]);
 
     let terms = vec![".*service".to_string()];
-    let expanded = expand_regex_terms(&terms, &index).unwrap();
-    assert!(expanded.contains(&"userservice".to_string()));
-    assert!(expanded.contains(&"orderservice".to_string()));
-    assert!(!expanded.contains(&"unrelated".to_string()));
+    let expansion = expand_regex_terms(&terms, &index).unwrap();
+    assert_eq!(expansion.patterns, 1);
+    assert_eq!(expansion.tokens_examined, 3);
+    assert!(expansion.expanded_tokens.contains(&"userservice".to_string()));
+    assert!(expansion.expanded_tokens.contains(&"orderservice".to_string()));
+    assert!(!expansion.expanded_tokens.contains(&"unrelated".to_string()));
 }
 
 #[test]
@@ -517,7 +519,7 @@ fn test_score_normal_token_search_basic() {
 
     let params = make_params(&None, &[], &[], &[]);
     let terms = vec!["hello".to_string()];
-    let scores = score_normal_token_search(
+    let (scores, _) = score_normal_token_search(
         &terms,
         &index,
         &params,
@@ -535,7 +537,7 @@ fn test_score_normal_token_search_no_match() {
     let index = ContentIndex::default();
     let params = make_params(&None, &[], &[], &[]);
     let terms = vec!["nonexistent".to_string()];
-    let scores = score_normal_token_search(
+    let (scores, _) = score_normal_token_search(
         &terms,
         &index,
         &params,
@@ -585,7 +587,9 @@ fn test_build_grep_response_count_only() {
     }];
     let terms = vec!["hello".to_string()];
 
-    let result = build_grep_response(&results, &terms, 1, 2, "or", &index, &ctx, &params);
+    let result = build_grep_response(
+        &results, &terms, &terms, None, 1, 2, "or", &index, &ctx, &params,
+    );
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(v.get("summary").is_some());
@@ -606,7 +610,9 @@ fn test_build_grep_response_zero_results_not_found() {
     let results: Vec<FileScoreEntry> = Vec::new();
     let terms = vec!["missing".to_string()];
 
-    let result = build_grep_response(&results, &terms, 0, 0, "or", &index, &ctx, &params);
+    let result = build_grep_response(
+        &results, &terms, &terms, None, 0, 0, "or", &index, &ctx, &params,
+    );
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(v["resultStatus"]["status"], "not_found");
@@ -633,7 +639,9 @@ fn test_build_grep_response_with_files() {
     }];
     let terms = vec!["hello".to_string()];
 
-    let result = build_grep_response(&results, &terms, 1, 1, "or", &index, &ctx, &params);
+    let result = build_grep_response(
+        &results, &terms, &terms, None, 1, 1, "or", &index, &ctx, &params,
+    );
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(v.get("files").is_some());
@@ -698,13 +706,17 @@ fn test_expand_regex_terms_dedups_overlapping_matches_grep014() {
     // Two patterns that both match `UserService`. Without dedup it would
     // appear twice and double-count its scoring contribution downstream.
     let raw = vec!["User.*".to_string(), ".*Service".to_string()];
-    let expanded = expand_regex_terms(&raw, &index).unwrap();
-    let user_service_count = expanded.iter().filter(|s| s.as_str() == "UserService").count();
-    assert_eq!(user_service_count, 1, "expanded={:?}", expanded);
+    let expansion = expand_regex_terms(&raw, &index).unwrap();
+    assert_eq!(expansion.patterns, 2);
+    assert_eq!(expansion.tokens_examined, 6);
+    let user_service_count = expansion.expanded_tokens.iter()
+        .filter(|token| token.as_str() == "UserService")
+        .count();
+    assert_eq!(user_service_count, 1, "expanded={:?}", expansion.expanded_tokens);
     // Verify the result is sorted (precondition for dedup).
-    let mut sorted = expanded.clone();
+    let mut sorted = expansion.expanded_tokens.clone();
     sorted.sort();
-    assert_eq!(expanded, sorted);
+    assert_eq!(expansion.expanded_tokens, sorted);
 }
 
 // ─── line_regex_perf_hint tests (AC-1) ──────────────────────────

@@ -40,6 +40,11 @@ use code_xray::{generate_trigrams, tokenize, ContentIndex, Posting, TrigramIndex
 mod file_scope;
 use file_scope::ResolvedFileScope;
 
+#[allow(dead_code, unused_imports)]
+#[path = "../src/mcp/handlers/token_regex.rs"]
+mod token_regex;
+use token_regex::expand_regex_terms;
+
 // ─── Shared parameter sets (BENCH-018) ───────────────────────────────
 
 /// Standard file-count sweep used by most benches. Keep in sync with the
@@ -1091,6 +1096,73 @@ fn bench_phrase_scope_filter(c: &mut Criterion) {
     group.finish();
 }
 
+fn build_token_vocabulary_index(vocabulary_size: usize, file_count: usize) -> ContentIndex {
+    let files: Vec<String> = (0..file_count)
+        .map(|file_id| format!("src/file_{file_id:04}.rs"))
+        .collect();
+    let mut index = HashMap::with_capacity(vocabulary_size);
+    let mut file_token_counts = vec![0u32; file_count];
+    for token_id in 0..vocabulary_size {
+        let file_id = token_id % file_count;
+        file_token_counts[file_id] = file_token_counts[file_id].saturating_add(1);
+        index.insert(
+            format!("token_{token_id:05}"),
+            vec![Posting {
+                file_id: file_id as u32,
+                lines: vec![1],
+            }],
+        );
+    }
+
+    ContentIndex {
+        root: ".".to_string(),
+        files,
+        index,
+        total_tokens: vocabulary_size as u64,
+        extensions: vec!["rs".to_string()],
+        file_token_counts,
+        ..Default::default()
+    }
+}
+
+fn bench_token_regex_expand(c: &mut Criterion) {
+    let mut group = c.benchmark_group("token_regex_expand");
+
+    for &vocabulary_size in BENCH_SIZES {
+        let index = build_token_vocabulary_index(vocabulary_size, 1_000);
+        let one_file_scope = ResolvedFileScope::resolve(&index.files, true, None, |path| {
+            path.ends_with("file_0000.rs")
+        });
+        let all_scope = ResolvedFileScope::resolve(&index.files, false, None, |_| false);
+        let one_pattern = vec![".*".to_string()];
+        let overlapping_patterns = vec!["token_.*".to_string(), ".*0".to_string()];
+
+        for (shape, patterns, scope) in [
+            ("patterns_1/k_1", &one_pattern, &one_file_scope),
+            ("patterns_1/k_all", &one_pattern, &all_scope),
+            ("patterns_2/k_1", &overlapping_patterns, &one_file_scope),
+        ] {
+            group.bench_function(BenchmarkId::new(shape, vocabulary_size), |b| {
+                b.iter(|| {
+                    let expansion = expand_regex_terms(black_box(patterns), &index).unwrap();
+                    let postings_in_scope = expansion.expanded_tokens.iter()
+                        .filter_map(|token| index.index.get(token))
+                        .flat_map(|postings| postings.iter())
+                        .filter(|posting| scope.contains(posting.file_id))
+                        .count();
+                    black_box((
+                        expansion.tokens_examined,
+                        expansion.expanded_tokens.len(),
+                        postings_in_scope,
+                    ));
+                })
+            });
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_tokenize,
@@ -1101,6 +1173,7 @@ criterion_group!(
     bench_line_regex_schedule,
     bench_posting_scope_filter,
     bench_phrase_scope_filter,
+    bench_token_regex_expand,
     bench_index_build,
     bench_serialization,
     bench_trigram_build,

@@ -7,6 +7,8 @@
 
 - **Line-regex telemetry now uses schema v2 funnel accounting.** `summary.lineRegexScan` includes `schemaVersion=2`, `filesConsidered`, `scopeFiles`, and `scheduledFiles`; `filesVisited` now counts scanner invocations rather than the whole index. Transitional `execution.filesConsidered` preserves the old index-size meaning while `execution.filesScanned` reports scheduled files.
 
+- **Token-regex responses now preserve the user query without vocabulary amplification.** `termsSearched` contains the raw patterns while bounded `regexExpansion` metadata reports examined/matched tokens and posting counters; `countOnly` omits token previews. Matching semantics and the on-disk index format are unchanged, and the `token_regex_expand` Criterion group covers 1k, 10k, and 50k vocabularies.
+
 - **Scoped-query Criterion coverage was added.** The `scope_resolution`, `line_regex_schedule`, `posting_scope_filter`, and `phrase_scope_filter` groups cover 1k, 10k, and 50k synthetic workspaces.
 
 

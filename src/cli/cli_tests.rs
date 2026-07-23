@@ -176,6 +176,17 @@ fn test_expand_regex_terms_multiple_patterns() {
 }
 
 #[test]
+fn test_expand_regex_terms_preserves_overlapping_pattern_duplicates() {
+    let mut index_keys: HashMap<String, Vec<Posting>> = HashMap::new();
+    index_keys.insert("userservice".to_string(), vec![]);
+
+    let terms = vec!["user.*".to_string(), ".*service".to_string()];
+    let result = expand_regex_terms(&terms, &index_keys).unwrap();
+
+    assert_eq!(result, vec!["userservice", "userservice"]);
+}
+
+#[test]
 fn test_expand_regex_terms_case_insensitive() {
     let mut index_keys: HashMap<String, Vec<Posting>> = HashMap::new();
     index_keys.insert("httpclient".to_string(), vec![]);

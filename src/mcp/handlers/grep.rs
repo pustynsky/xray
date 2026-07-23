@@ -19,6 +19,9 @@ use super::utils::{self,
     stale_lines_warning, stale_phrase_warning, validate_search_dir,
 };
 use super::file_scope::ResolvedFileScope;
+use super::token_regex::{expand_regex_terms, RegexExpansion, TokenSearchTelemetry};
+#[cfg(test)]
+use super::token_regex::TOKEN_REGEX_PREVIEW_MAX;
 use super::HandlerContext;
 
 #[path = "grep_literal_extract.rs"]
@@ -2515,35 +2518,6 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         invert_cap,
     })
 }
-
-/// Expand regex patterns against index keys. Returns expanded terms or error.
-fn expand_regex_terms(
-    raw_terms: &[String],
-    index: &ContentIndex,
-) -> Result<Vec<String>, ToolCallResult> {
-    let mut expanded = Vec::new();
-    for pat in raw_terms {
-        match regex::Regex::new(&format!("(?i)^{}$", pat)) {
-            Ok(re) => {
-                let matching: Vec<String> = index.index.keys()
-                    .filter(|k| re.is_match(k))
-                    .cloned()
-                    .collect();
-                expanded.extend(matching);
-            }
-            Err(e) => return Err(ToolCallResult::error(format!("Invalid regex '{}': {}", pat, e))),
-        }
-    }
-    // GREP-014: dedupe expanded terms across patterns. Two patterns that
-    // overlap on the same token (e.g. `User.*,.*Service` both hit
-    // `UserService`) would otherwise have that token contribute its
-    // TF-IDF score twice in `score_normal_token_search`, silently skewing
-    // file ranking toward documents that match multiple input patterns.
-    expanded.sort();
-    expanded.dedup();
-    Ok(expanded)
-}
-
 /// Score files for normal (non-substring, non-phrase) token search.
 /// Iterates over terms, looks up postings, computes TF-IDF, accumulates file scores.
 fn score_normal_token_search(
@@ -2551,20 +2525,24 @@ fn score_normal_token_search(
     index: &ContentIndex,
     _params: &GrepSearchParams,
     scope: &ResolvedFileScope,
-) -> HashMap<u32, FileScoreEntry> {
+) -> (HashMap<u32, FileScoreEntry>, TokenSearchTelemetry) {
     let total_docs = index.files.len() as f64;
     let mut file_scores: HashMap<u32, FileScoreEntry> = HashMap::new();
+    let mut telemetry = TokenSearchTelemetry::default();
 
     for term in terms {
         if let Some(postings) = index.index.get(term.as_str()) {
+            telemetry.posting_lists_visited = telemetry.posting_lists_visited.saturating_add(1);
             let doc_freq = postings.len() as f64;
             if doc_freq == 0.0 { continue; }
             let idf = (total_docs / doc_freq).ln();
 
             for posting in postings {
+                telemetry.postings_checked = telemetry.postings_checked.saturating_add(1);
                 if !scope.contains(posting.file_id) {
                     continue;
                 }
+                telemetry.postings_in_scope = telemetry.postings_in_scope.saturating_add(1);
                 let file_path = match index.files.get(posting.file_id as usize) {
                     Some(p) => p,
                     None => continue,
@@ -2596,14 +2574,16 @@ fn score_normal_token_search(
         }
     }
 
-    file_scores
+    (file_scores, telemetry)
 }
 
 /// Build the final JSON response for grep results (normal and substring modes).
 #[allow(clippy::too_many_arguments)]
 fn build_grep_response(
     results: &[FileScoreEntry],
-    terms: &[String],
+    execution_terms: &[String],
+    reported_terms: &[String],
+    regex_expansion: Option<&RegexExpansion>,
     total_files: usize,
     total_occurrences: usize,
     search_mode: &str,
@@ -2614,12 +2594,15 @@ fn build_grep_response(
     let search_elapsed = params.search_start.elapsed();
 
     if params.count_only {
-        let terms_value = json!(terms);
+        let terms_value = json!(reported_terms);
         let mut summary = build_grep_base_summary(
             total_files, total_occurrences, &terms_value, search_mode,
             index, search_elapsed, ctx, true, params.lock_wait_ms,
         );
         apply_dir_auto_converted_note(&mut summary, params);
+        if let Some(expansion) = regex_expansion {
+            summary["regexExpansion"] = expansion.to_json(true);
+        }
         let result_status = build_grep_result_status(0, 0, total_files, total_occurrences, true);
         let execution = build_grep_execution(params, search_mode, None, false, Some(total_files), None);
         let output = finalize_grep_output(
@@ -2632,14 +2615,16 @@ fn build_grep_response(
         return ToolCallResult::success(json_to_string(&output));
     }
 
-    let terms_lower: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
+    let terms_lower: Vec<String> = execution_terms.iter()
+        .map(|term| term.to_lowercase())
+        .collect();
     let mut stale_line_files = 0usize;
     let files_json: Vec<Value> = results.iter().map(|r| {
         let mut file_obj = json!({
             "path": r.file_path,
             "score": (r.tf_idf * 10000.0).round() / 10000.0,
             "occurrences": r.occurrences,
-            "termsMatched": format!("{}/{}", r.terms_matched, terms.len()),
+            "termsMatched": format!("{}/{}", r.terms_matched, execution_terms.len()),
             "lines": r.lines,
         });
 
@@ -2663,12 +2648,15 @@ fn build_grep_response(
         file_obj
     }).collect();
 
-    let terms_value = json!(terms);
+    let terms_value = json!(reported_terms);
     let mut summary = build_grep_base_summary(
         total_files, total_occurrences, &terms_value, search_mode,
         index, search_elapsed, ctx, true, params.lock_wait_ms,
     );
     apply_dir_auto_converted_note(&mut summary, params);
+    if let Some(expansion) = regex_expansion {
+        summary["regexExpansion"] = expansion.to_json(false);
+    }
     if stale_line_files > 0 {
         summary["warnings"] = json!([stale_lines_warning(stale_line_files)]);
     }
@@ -3224,19 +3212,26 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         return ToolCallResult::error("No search terms provided".to_string());
     }
 
-    let terms: Vec<String> = if parsed.use_regex {
+    let mut regex_expansion = if parsed.use_regex {
         match expand_regex_terms(&raw_terms, &index) {
-            Ok(t) => t,
-            Err(e) => return e,
+            Ok(expansion) => Some(expansion),
+            Err(error) => return ToolCallResult::error(error.to_string()),
         }
     } else {
-        raw_terms.clone()
+        None
     };
-
     let search_mode = if parsed.use_regex { "regex" } else if parsed.mode_and { "and" } else { "or" };
-    let term_count_for_all = if parsed.use_regex { raw_terms.len() } else { terms.len() };
+    let term_count_for_all = raw_terms.len();
 
-    let file_scores = score_normal_token_search(&terms, &index, &grep_params, &file_scope);
+    let (file_scores, token_search_telemetry) = {
+        let execution_terms = regex_expansion.as_ref()
+            .map(|expansion| expansion.expanded_tokens.as_slice())
+            .unwrap_or(raw_terms.as_slice());
+        score_normal_token_search(execution_terms, &index, &grep_params, &file_scope)
+    };
+    if let Some(expansion) = regex_expansion.as_mut() {
+        expansion.posting_telemetry = token_search_telemetry;
+    }
 
     let (mut results, total_files, total_occurrences) =
         finalize_grep_results(file_scores, parsed.mode_and, term_count_for_all);
@@ -3245,9 +3240,25 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         results.truncate(parsed.max_results);
     }
 
+    let execution_terms = regex_expansion.as_ref()
+        .map(|expansion| expansion.expanded_tokens.as_slice())
+        .unwrap_or(raw_terms.as_slice());
+    let reported_terms = if parsed.use_regex {
+        parsed.terms.as_slice()
+    } else {
+        raw_terms.as_slice()
+    };
     let mut result = build_grep_response(
-        &results, &terms, total_files, total_occurrences,
-        search_mode, &index, ctx, &grep_params,
+        &results,
+        execution_terms,
+        reported_terms,
+        regex_expansion.as_ref(),
+        total_files,
+        total_occurrences,
+        search_mode,
+        &index,
+        ctx,
+        &grep_params,
     );
 
     // Explain regex constructs whose meaning differs between token and line search.
