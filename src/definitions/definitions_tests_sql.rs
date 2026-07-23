@@ -239,6 +239,169 @@ CREATE TYPE [dbo].[OrderItemTableType] AS TABLE
     assert_eq!(type_defs[0].name, "OrderItemTableType");
 }
 
+#[test]
+fn test_sql_standalone_alter_modules_are_discovered() {
+    let source = r#"
+ALTER PROCEDURE [dbo].[Alter Proc]
+    @Id INT,
+    @Label NVARCHAR(50)
+AS
+BEGIN
+    EXEC [dbo].[Leaf Proc]
+END
+GO
+ALTER FUNCTION "dbo"."Alter Function"
+(
+    @Value INT
+)
+RETURNS INT
+AS
+BEGIN
+    RETURN CASE
+        WHEN @Value <= 0 THEN 0
+        ELSE "dbo"."Alter Function"(@Value - 1)
+    END
+END
+GO
+ALTER VIEW [reporting].[Alter View]
+AS
+SELECT 1 AS [Value]
+"#;
+    let (defs, call_sites, _) = parse_sql_definitions(source, 0);
+
+    let procedure_index = defs
+        .iter()
+        .position(|definition| {
+            definition.kind == DefinitionKind::StoredProcedure
+                && definition.name == "Alter Proc"
+                && definition.parent.as_deref() == Some("dbo")
+        })
+        .unwrap_or_else(|| panic!("missing standalone ALTER PROCEDURE: {defs:#?}"));
+    let procedure = &defs[procedure_index];
+    let procedure_signature = procedure.signature.as_deref().unwrap();
+    assert!(procedure_signature.starts_with("ALTER PROCEDURE [dbo].[Alter Proc]"));
+    assert!(procedure_signature.contains("@Id"));
+    assert!(procedure_signature.contains("@Label"));
+
+    let calls = call_sites
+        .iter()
+        .find(|(definition_index, _)| *definition_index == procedure_index)
+        .map(|(_, calls)| calls)
+        .unwrap_or_else(|| panic!("missing ALTER PROCEDURE body calls: {call_sites:#?}"));
+    assert_eq!(calls.len(), 1, "unexpected ALTER PROCEDURE calls: {calls:#?}");
+    assert_eq!(calls[0].method_name, "Leaf Proc");
+    assert_eq!(calls[0].receiver_type.as_deref(), Some("dbo"));
+
+    let function_index = defs
+        .iter()
+        .position(|definition| {
+            definition.kind == DefinitionKind::SqlFunction
+                && definition.name == "Alter Function"
+                && definition.parent.as_deref() == Some("dbo")
+        })
+        .unwrap_or_else(|| panic!("missing standalone ALTER FUNCTION: {defs:#?}"));
+    let function_signature = defs[function_index].signature.as_deref().unwrap();
+    assert!(function_signature.starts_with("ALTER FUNCTION \"dbo\".\"Alter Function\""));
+    assert!(function_signature.contains("@Value"));
+    let function_calls = call_sites
+        .iter()
+        .find(|(definition_index, _)| *definition_index == function_index)
+        .map(|(_, calls)| calls)
+        .unwrap_or_else(|| panic!("missing ALTER FUNCTION recursion: {call_sites:#?}"));
+    assert_eq!(
+        function_calls.len(),
+        1,
+        "declaration suppression must preserve only real recursion: {function_calls:#?}"
+    );
+    assert_eq!(function_calls[0].method_name, "Alter Function");
+    assert_eq!(function_calls[0].receiver_type.as_deref(), Some("dbo"));
+
+    let view = defs
+        .iter()
+        .find(|definition| {
+            definition.kind == DefinitionKind::View
+                && definition.name == "Alter View"
+                && definition.parent.as_deref() == Some("reporting")
+        })
+        .unwrap_or_else(|| panic!("missing standalone ALTER VIEW: {defs:#?}"));
+    assert_eq!(view.signature.as_deref(), Some("ALTER VIEW reporting.[Alter View]"));
+}
+
+#[test]
+fn test_sql_create_or_alter_multiline_verb_preserves_signature_and_recursion() {
+    let source = r#"CREATE
+OR
+ALTER
+FUNCTION [dbo].[Multiline Recursive](@Value INT)
+RETURNS INT
+AS
+BEGIN
+    RETURN CASE
+        WHEN @Value <= 0 THEN 0
+        ELSE [dbo].[Multiline Recursive](@Value - 1)
+    END
+END
+"#;
+    let (defs, call_sites, _) = parse_sql_definitions(source, 0);
+
+    assert_eq!(defs.len(), 1, "multiline declaration was not discovered: {defs:#?}");
+    let function = &defs[0];
+    assert_eq!(function.kind, DefinitionKind::SqlFunction);
+    assert_eq!(function.name, "Multiline Recursive");
+    assert_eq!(function.parent.as_deref(), Some("dbo"));
+    assert!(
+        function.signature.as_deref().unwrap()
+            .starts_with("CREATE OR ALTER FUNCTION [dbo].[Multiline Recursive]")
+    );
+
+    let calls = &call_sites
+        .iter()
+        .find(|(definition_index, _)| *definition_index == 0)
+        .map(|(_, calls)| calls)
+        .unwrap_or_else(|| panic!("missing multiline function recursion: {call_sites:#?}"));
+    assert_eq!(calls.len(), 1, "declaration became an extra self-edge: {calls:#?}");
+    assert_eq!(calls[0].method_name, "Multiline Recursive");
+    assert_eq!(calls[0].receiver_type.as_deref(), Some("dbo"));
+}
+
+#[test]
+fn test_sql_alter_proc_shorthand_ignores_non_module_alter_and_non_code() {
+    let source = r#"
+SELECT N'ALTER PROCEDURE [dbo].[Literal Fake] AS SELECT 1';
+-- ALTER FUNCTION [dbo].[Comment Fake]() RETURNS INT AS BEGIN RETURN 1 END
+GO
+ALTER /* deployment header */ PROC [ops].[Short Alter]
+    @Id INT
+AS
+BEGIN
+    SELECT @Id
+END
+GO
+ALTER TABLE [dbo].[Ignored Table] ADD [Value] INT
+GO
+ALTER INDEX [IX Ignored] ON [dbo].[Ignored Table] REBUILD
+GO
+ALTER TYPE [dbo].[Ignored Type] ADD MEMBER [Value] INT
+"#;
+    let (defs, call_sites, _) = parse_sql_definitions(source, 0);
+
+    assert_eq!(defs.len(), 1, "non-module ALTER produced definitions: {defs:#?}");
+    let procedure = &defs[0];
+    assert_eq!(procedure.kind, DefinitionKind::StoredProcedure);
+    assert_eq!(procedure.name, "Short Alter");
+    assert_eq!(procedure.parent.as_deref(), Some("ops"));
+    let signature = procedure.signature.as_deref().unwrap();
+    assert!(signature.starts_with("ALTER /* deployment header */ PROC"));
+    assert!(signature.contains("@Id"));
+    assert!(call_sites.is_empty(), "unexpected calls from ALTER PROC: {call_sites:#?}");
+    assert!(defs.iter().all(|definition| {
+        !matches!(
+            definition.kind,
+            DefinitionKind::Table | DefinitionKind::SqlIndex | DefinitionKind::UserDefinedType
+        )
+    }));
+}
+
 // ─── Test 9: CREATE OR ALTER ───────────────────────────────────────
 
 #[test]
@@ -259,6 +422,10 @@ END
     let proc_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::StoredProcedure).collect();
     assert_eq!(proc_defs.len(), 1, "Expected 1 stored procedure");
     assert_eq!(proc_defs[0].name, "usp_UpdateOrder");
+    assert!(
+        proc_defs[0].signature.as_deref().unwrap()
+            .starts_with("CREATE OR ALTER PROCEDURE [Sales].[usp_UpdateOrder]")
+    );
 }
 
 // ─── Test 10: Call sites — EXEC ────────────────────────────────────
@@ -1464,6 +1631,10 @@ END
     let func_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::SqlFunction).collect();
     assert_eq!(func_defs.len(), 1, "Expected 1 function for CREATE OR ALTER FUNCTION");
     assert_eq!(func_defs[0].name, "udf_GetFullName");
+    assert!(
+        func_defs[0].signature.as_deref().unwrap()
+            .starts_with("CREATE OR ALTER FUNCTION [dbo].[udf_GetFullName]")
+    );
 }
 
 #[test]
@@ -1478,6 +1649,10 @@ SELECT * FROM [dbo].[Orders] WHERE [StatusCode] = 1
     let view_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::View).collect();
     assert_eq!(view_defs.len(), 1, "Expected 1 view for CREATE OR ALTER VIEW");
     assert_eq!(view_defs[0].name, "vw_ActiveOrders");
+    assert_eq!(
+        view_defs[0].signature.as_deref(),
+        Some("CREATE OR ALTER VIEW dbo.vw_ActiveOrders")
+    );
 }
 
 #[test]
