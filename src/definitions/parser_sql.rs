@@ -15,9 +15,15 @@ static GO_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^\s*GO\s*$").unwrap()
 });
 
-static CREATE_RE: LazyLock<Regex> = LazyLock::new(|| {
+static CREATE_NON_MODULE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?im)^\s*CREATE\s+(OR\s+ALTER\s+)?(UNIQUE\s+)?(CLUSTERED\s+|NONCLUSTERED\s+)?(PROCEDURE|PROC|FUNCTION|TABLE|VIEW|TYPE|INDEX)\s+"
+        r"(?im)^\s*CREATE\s+(UNIQUE\s+)?(CLUSTERED\s+|NONCLUSTERED\s+)?(TABLE|TYPE|INDEX)\s+"
+    ).unwrap()
+});
+
+static MODULE_DECLARATION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?im)^\s*(?P<verb>CREATE(?:\s+OR\s+ALTER)?|ALTER)\s+(?P<kind>PROCEDURE|PROC|FUNCTION|VIEW)\s+"
     ).unwrap()
 });
 
@@ -49,10 +55,6 @@ static CONSTRAINT_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 static CREATE_TABLE_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)CREATE\s+TABLE").unwrap()
-});
-
-static CREATE_VIEW_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)CREATE\s+(?:OR\s+ALTER\s+)?VIEW\s+").unwrap()
 });
 
 static CREATE_TYPE_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -91,10 +93,6 @@ static DELETE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\bDELETE\s+FROM\s+").unwrap()
 });
 
-
-static CREATE_FUNCTION_DECL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bCREATE\s+(?:OR\s+ALTER\s+)?FUNCTION\s+").unwrap()
-});
 
 #[allow(unused_imports)]
 use super::types::*;
@@ -143,6 +141,73 @@ struct Batch<'a> {
     start_line_offset: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqlDeclarationVerb {
+    Create,
+    CreateOrAlter,
+    Alter,
+}
+
+impl SqlDeclarationVerb {
+    fn as_sql(self) -> &'static str {
+        match self {
+            Self::Create => "CREATE",
+            Self::CreateOrAlter => "CREATE OR ALTER",
+            Self::Alter => "ALTER",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqlModuleKind {
+    Procedure,
+    Function,
+    View,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SqlModuleDeclaration {
+    verb: SqlDeclarationVerb,
+    kind: SqlModuleKind,
+    start: usize,
+    name_start: usize,
+}
+
+fn find_sql_module_declaration(text: &str) -> Option<SqlModuleDeclaration> {
+    let captures = MODULE_DECLARATION_RE.captures(text)?;
+    let matched = captures.get(0)?;
+    let verb_match = captures.name("verb")?;
+    let verb_words: Vec<_> = verb_match.as_str().split_whitespace().collect();
+    let verb = match verb_words.as_slice() {
+        [word] if word.eq_ignore_ascii_case("CREATE") => SqlDeclarationVerb::Create,
+        [word] if word.eq_ignore_ascii_case("ALTER") => SqlDeclarationVerb::Alter,
+        [create, or, alter]
+            if create.eq_ignore_ascii_case("CREATE")
+                && or.eq_ignore_ascii_case("OR")
+                && alter.eq_ignore_ascii_case("ALTER") => SqlDeclarationVerb::CreateOrAlter,
+        _ => return None,
+    };
+    let raw_kind = captures.name("kind")?.as_str();
+    let kind = if raw_kind.eq_ignore_ascii_case("PROCEDURE")
+        || raw_kind.eq_ignore_ascii_case("PROC")
+    {
+        SqlModuleKind::Procedure
+    } else if raw_kind.eq_ignore_ascii_case("FUNCTION") {
+        SqlModuleKind::Function
+    } else if raw_kind.eq_ignore_ascii_case("VIEW") {
+        SqlModuleKind::View
+    } else {
+        return None;
+    };
+
+    Some(SqlModuleDeclaration {
+        verb,
+        kind,
+        start: verb_match.start(),
+        name_start: matched.end(),
+    })
+}
+
 /// Split lines by GO delimiter. Each GO on its own line (with optional whitespace)
 /// starts a new batch.
 fn split_go_batches<'a>(lines: &'a [&'a str]) -> Vec<Batch<'a>> {
@@ -182,32 +247,31 @@ fn parse_batch(
     code_stats: &mut Vec<(usize, CodeStats)>,
 ) {
     let batch_text = batch.lines.join("\n");
-    let search_text = mask_sql_comments_preserve_offsets(&batch_text);
-    let search_upper = search_text.to_uppercase();
+    let search_text = mask_sql_comments_and_literals_preserve_offsets(&batch_text);
+    let anchor_text = mask_sql_delimited_identifiers_preserve_offsets(&search_text);
 
-    // Try to match CREATE statements
-    if let Some(m) = CREATE_RE.find(&search_text) {
-        let after_keyword = &batch_text[m.end()..];
-        let keyword = extract_keyword_from_match(&search_upper[m.start()..m.end()]);
+    if let Some(declaration) = find_sql_module_declaration(&anchor_text) {
+        match declaration.kind {
+            SqlModuleKind::Procedure | SqlModuleKind::Function => {
+                parse_procedure_or_function(
+                    batch, file_id, &batch_text, declaration, defs, call_sites, code_stats,
+                );
+            }
+            SqlModuleKind::View => {
+                parse_view(batch, file_id, &batch_text, declaration, defs, code_stats);
+            }
+        }
+        return;
+    }
+
+    let search_upper = search_text.to_uppercase();
+    if let Some(matched) = CREATE_NON_MODULE_RE.find(&search_text) {
+        let after_keyword = &batch_text[matched.end()..];
+        let keyword = extract_keyword_from_match(&search_upper[matched.start()..matched.end()]);
 
         match keyword.as_str() {
-            "PROCEDURE" | "PROC" => {
-                parse_procedure_or_function(
-                    batch, file_id, &batch_text, DefinitionKind::StoredProcedure,
-                    defs, call_sites, code_stats,
-                );
-            }
-            "FUNCTION" => {
-                parse_procedure_or_function(
-                    batch, file_id, &batch_text, DefinitionKind::SqlFunction,
-                    defs, call_sites, code_stats,
-                );
-            }
             "TABLE" => {
                 parse_table(batch, file_id, &batch_text, after_keyword, defs, code_stats);
-            }
-            "VIEW" => {
-                parse_view(batch, file_id, &batch_text, defs, code_stats);
             }
             "TYPE" => {
                 parse_type(batch, file_id, &batch_text, defs, code_stats);
@@ -220,17 +284,11 @@ fn parse_batch(
     }
 }
 
-/// Extract the DDL keyword (PROCEDURE, TABLE, etc.) from the matched CREATE text.
+/// Extract the TABLE, TYPE, or INDEX keyword from non-module CREATE text.
 fn extract_keyword_from_match(matched_upper: &str) -> String {
-    // The keyword is the last word before trailing whitespace
-    let keywords = ["PROCEDURE", "PROC", "FUNCTION", "TABLE", "VIEW", "TYPE", "INDEX"];
-    for kw in &keywords {
-        if matched_upper.contains(kw) {
-            // Return the most specific match
-            if *kw == "PROC" && matched_upper.contains("PROCEDURE") {
-                continue;
-            }
-            return kw.to_string();
+    for keyword in ["TABLE", "TYPE", "INDEX"] {
+        if matched_upper.contains(keyword) {
+            return keyword.to_string();
         }
     }
     String::new()
@@ -715,14 +773,20 @@ fn is_sql_identifier_char(ch: char) -> bool {
 
 fn first_signature_line(
     batch_text: &str,
-    create_start: usize,
+    declaration_start: usize,
+    declaration_name_end: usize,
     kind: DefinitionKind,
 ) -> String {
-    let line = batch_text[create_start..]
-        .lines()
-        .next()
-        .map(str::trim)
-        .unwrap_or("");
+    let declaration_text = &batch_text[declaration_start..];
+    let first_line_end = declaration_text.find('\n').unwrap_or(declaration_text.len());
+    if declaration_name_end > declaration_start + first_line_end {
+        return batch_text[declaration_start..declaration_name_end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+
+    let line = declaration_text[..first_line_end].trim();
     let boundary_line = mask_sql_comments_and_literals_preserve_offsets(line);
 
     let end = match find_signature_body_boundary(&boundary_line, kind) {
@@ -736,24 +800,18 @@ fn parse_procedure_or_function(
     batch: &Batch,
     file_id: u32,
     batch_text: &str,
-    kind: DefinitionKind,
+    declaration: SqlModuleDeclaration,
     defs: &mut Vec<DefinitionEntry>,
     call_sites: &mut Vec<(usize, Vec<CallSite>)>,
     code_stats: &mut Vec<(usize, CodeStats)>,
 ) {
-    let kw = if kind == DefinitionKind::StoredProcedure { "PROC(?:EDURE)?" } else { "FUNCTION" };
-    let re = Regex::new(&format!(
-        r"(?i)CREATE\s+(?:OR\s+ALTER\s+)?{}\s+",
-        kw
-    )).unwrap();
-
-    let search_text = mask_sql_comments_and_literals_preserve_offsets(batch_text);
-    let anchor_text = mask_sql_delimited_identifiers_preserve_offsets(&search_text);
-    let create_match = match re.find(&anchor_text) {
-        Some(matched) => matched,
-        None => return,
+    let kind = match declaration.kind {
+        SqlModuleKind::Procedure => DefinitionKind::StoredProcedure,
+        SqlModuleKind::Function => DefinitionKind::SqlFunction,
+        SqlModuleKind::View => return,
     };
-    let identifier = match scan_sql_multipart_identifier(&search_text, create_match.end()) {
+    let search_text = mask_sql_comments_and_literals_preserve_offsets(batch_text);
+    let identifier = match scan_sql_multipart_identifier(&search_text, declaration.name_start) {
         Some(identifier) => identifier,
         None => return,
     };
@@ -761,7 +819,12 @@ fn parse_procedure_or_function(
 
     if name.is_empty() { return; }
 
-    let mut sig = first_signature_line(batch_text, create_match.start(), kind);
+    let mut sig = first_signature_line(
+        batch_text,
+        declaration.start,
+        identifier.end,
+        kind,
+    );
 
     let params = extract_signature_params(batch_text, identifier.end, kind);
 
@@ -957,16 +1020,15 @@ fn parse_view(
     batch: &Batch,
     file_id: u32,
     batch_text: &str,
+    declaration: SqlModuleDeclaration,
     defs: &mut Vec<DefinitionEntry>,
     code_stats: &mut Vec<(usize, CodeStats)>,
 ) {
+    if declaration.kind != SqlModuleKind::View {
+        return;
+    }
     let search_text = mask_sql_comments_and_literals_preserve_offsets(batch_text);
-    let anchor_text = mask_sql_delimited_identifiers_preserve_offsets(&search_text);
-    let anchor = match CREATE_VIEW_RE.find(&anchor_text) {
-        Some(anchor) => anchor,
-        None => return,
-    };
-    let identifier = match scan_sql_multipart_identifier(&search_text, anchor.end()) {
+    let identifier = match scan_sql_multipart_identifier(&search_text, declaration.name_start) {
         Some(identifier) => identifier,
         None => return,
     };
@@ -974,7 +1036,11 @@ fn parse_view(
 
     if name.is_empty() { return; }
 
-    let sig = format!("CREATE VIEW {}", canonical_sql_multipart_identifier(&identifier));
+    let sig = format!(
+        "{} VIEW {}",
+        declaration.verb.as_sql(),
+        canonical_sql_multipart_identifier(&identifier)
+    );
 
     let line_start = (batch.start_line_offset + 1) as u32;
     let line_end = (batch.start_line_offset + batch.lines.len()) as u32;
@@ -1157,9 +1223,12 @@ fn extract_call_sites_from_body(
         }
     }
 
-    let declaration_ranges: Vec<_> = CREATE_FUNCTION_DECL_RE
-        .find_iter(&anchor_body)
-        .filter_map(|anchor| scan_sql_multipart_identifier(&masked_body, anchor.end()))
+    let declaration_ranges: Vec<_> = find_sql_module_declaration(&anchor_body)
+        .into_iter()
+        .filter(|declaration| declaration.kind == SqlModuleKind::Function)
+        .filter_map(|declaration| {
+            scan_sql_multipart_identifier(&masked_body, declaration.name_start)
+        })
         .map(|identifier| identifier.start..identifier.end)
         .collect();
 

@@ -2475,6 +2475,31 @@ BEGIN
     EXEC [ops].[Shared Name]
 END
 GO
+ALTER PROCEDURE [dbo].[Alter Target]
+AS
+BEGIN
+    SELECT 7
+END
+GO
+ALTER PROC [dbo].[Alter Caller]
+AS
+BEGIN
+    EXEC [dbo].[Alter Target]
+END
+GO
+ALTER FUNCTION [dbo].[Alter Function](@Id INT)
+RETURNS INT
+AS
+BEGIN
+    RETURN @Id + 1
+END
+GO
+ALTER PROCEDURE [dbo].[Uses Alter Function]
+AS
+BEGIN
+    SELECT [dbo].[Alter Function](1)
+END
+GO
 CREATE PROCEDURE [dbo].[usp_WR_Leaf]
 AS
 BEGIN
@@ -2569,6 +2594,8 @@ END
         ("Odd Four", "dbo", "Calls Four"),
         ("Shared Name", "sales", "Sales Caller"),
         ("Shared Name", "ops", "Ops Caller"),
+        ("Alter Target", "dbo", "Alter Caller"),
+        ("Alter Function", "dbo", "Uses Alter Function"),
     ] {
         let mut quoted_caller_builder = CallerTreeBuilder {
             ctx: &caller_ctx,
@@ -2596,6 +2623,8 @@ END
         ("Calls Four", "dbo", "Odd Four"),
         ("Sales Caller", "sales", "Shared Name"),
         ("Ops Caller", "ops", "Shared Name"),
+        ("Alter Caller", "dbo", "Alter Target"),
+        ("Uses Alter Function", "dbo", "Alter Function"),
     ] {
         let mut quoted_callee_builder = CalleeTreeBuilder {
             ctx: &caller_ctx,
