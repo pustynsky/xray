@@ -735,6 +735,43 @@ fn content_bytes(content: &str, line_ending: &str) -> Vec<u8> {
     }
 }
 
+// Test-only injection point for simulating a filesystem mutation between the initial
+// snapshot and write validation. The hook is thread-local, one-shot, and guard-cleaned.
+#[cfg(test)]
+std::thread_local! {
+    static BEFORE_WRITE_VALIDATION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+struct BeforeWriteValidationHookGuard;
+
+#[cfg(test)]
+impl Drop for BeforeWriteValidationHookGuard {
+    fn drop(&mut self) {
+        BEFORE_WRITE_VALIDATION_HOOK.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_before_write_validation_hook(
+    hook: impl FnOnce() + 'static,
+) -> BeforeWriteValidationHookGuard {
+    BEFORE_WRITE_VALIDATION_HOOK.with(|slot| {
+        assert!(slot.replace(Some(Box::new(hook))).is_none());
+    });
+    BeforeWriteValidationHookGuard
+}
+
+#[cfg(test)]
+fn run_before_write_validation_hook() {
+    let hook = BEFORE_WRITE_VALIDATION_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
 
 #[derive(Debug)]
 struct FileMetadataSnapshot {
@@ -1028,6 +1065,7 @@ struct PreparedEditTarget {
     logical_path: PathBuf,
     write_path: PathBuf,
     normalized_content: String,
+    source_bytes: Vec<u8>,
     line_ending: &'static str,
     file_existed: bool,
     symlink_followed: bool,
@@ -1271,6 +1309,7 @@ fn read_and_validate_file(
             write_path: logical_path.clone(),
             logical_path,
             normalized_content: String::new(),
+            source_bytes: Vec::new(),
             line_ending: "\n",
             file_existed: false,
             symlink_followed: false,
@@ -1344,6 +1383,7 @@ fn read_and_validate_file(
         hard_link_count,
         metadata: Some(metadata_snapshot),
         source_hash: Some(hash_bytes(&raw_bytes)),
+        source_bytes: raw_bytes,
     })
 }
 
@@ -1552,14 +1592,10 @@ fn stage_file_with_endings(
 ) -> Result<(), String> {
     use std::io::Write;
 
-    let output = if line_ending == "\r\n" {
-        content.replace('\n', "\r\n")
-    } else {
-        content.to_string()
-    };
+    let output = content_bytes(content, line_ending);
     let staged = (|| -> std::io::Result<()> {
         let mut file = std::fs::File::create(path)?;
-        file.write_all(output.as_bytes())?;
+        file.write_all(&output)?;
         file.sync_all()?;
         Ok(())
     })();
@@ -1876,11 +1912,7 @@ fn write_file_with_endings(
 /// (rare: concurrent writer, antivirus truncation, filesystem quirk) is surfaced rather
 /// than silently hidden under a misleading "applied: N" response.
 fn verify_written_file(resolved: &Path, expected_lf_content: &str, line_ending: &str) -> Result<(), String> {
-    let expected_bytes = if line_ending == "\r\n" {
-        expected_lf_content.replace('\n', "\r\n").into_bytes()
-    } else {
-        expected_lf_content.as_bytes().to_vec()
-    };
+    let expected_bytes = content_bytes(expected_lf_content, line_ending);
     let actual = std::fs::read(resolved)
         .map_err(|e| format!("Post-write verification: cannot re-read file: {}", e))?;
     if actual == expected_bytes {
@@ -2114,19 +2146,29 @@ fn handle_single_file_edit(
         Ok(result) => result,
         Err(error) => return ToolCallResult::error(error),
     };
+    let output_bytes = content_bytes(&edit_result.modified_content, target.line_ending);
+    // Missing files still require creation, even when their final bytes are empty.
+    let content_unchanged =
+        target.file_existed && output_bytes.as_slice() == target.source_bytes.as_slice();
 
     // Materialize parent directories only after the edit is valid in memory.
     if !dry_run {
-        if let Err(error) = validate_source_unchanged(&target)
-            .and_then(|_| create_missing_target_parent(&target))
-        {
+        #[cfg(test)]
+        run_before_write_validation_hook();
+        if let Err(error) = validate_source_unchanged(&target) {
             return ToolCallResult::error(error);
         }
-        refresh_missing_target_key(&mut target);
+        if !content_unchanged {
+            if let Err(error) = create_missing_target_parent(&target) {
+                return ToolCallResult::error(error);
+            }
+            refresh_missing_target_key(&mut target);
+        }
     }
 
     // Write file (unless dryRun)
     if !dry_run
+        && !content_unchanged
         && let Err(error) = write_file_with_endings(
             &target,
             &edit_result.modified_content,
@@ -2137,6 +2179,7 @@ fn handle_single_file_edit(
 
     // Post-write verification: re-read the physical target and confirm its bytes.
     if !dry_run
+        && !content_unchanged
         && let Err(error) = verify_written_file(
             &target.write_path,
             &edit_result.modified_content,
@@ -2146,10 +2189,7 @@ fn handle_single_file_edit(
         return ToolCallResult::error(error);
     }
 
-    let result_hash = hash_bytes(&content_bytes(
-        &edit_result.modified_content,
-        target.line_ending,
-    ));
+    let result_hash = hash_bytes(&output_bytes);
 
     // Build response
     let mut response = json!({
@@ -2220,7 +2260,7 @@ fn handle_single_file_edit(
     if target.symlink_followed {
         response["symlinkFollowed"] = json!(true);
     }
-    if !dry_run && target.hard_link_broken() {
+    if !dry_run && !content_unchanged && target.hard_link_broken() {
         response["hardLinkBroken"] = json!(true);
     }
 
@@ -2230,10 +2270,20 @@ fn handle_single_file_edit(
         "searchTimeMs": (edit_elapsed_ms * 100.0).round() / 100.0,
     });
 
+    if !dry_run && content_unchanged {
+        response["writeStatus"] = json!("unchanged");
+        response["contentIndexUpdated"] = json!(false);
+        response["defIndexUpdated"] = json!(false);
+        response["fileListInvalidated"] = json!(false);
+        response["reindexStatus"] = json!("skipped");
+        response["reindexSkipReason"] = json!("contentUnchanged");
+        response["skippedReason"] = json!("contentUnchanged");
+    }
+
     // ── Synchronous reindex (only on real writes, never on dryRun) ──
     // Eliminates the 500ms FS-watcher debounce window so a follow-up xray_grep
     // or xray_definitions sees the new content immediately.
-    if !dry_run {
+    if !dry_run && !content_unchanged {
         // ── Disambiguate write vs reindex outcome (2026-05-06) ──
         // Historical response had only `skippedReason` next to `applied`/`diff`,
         // which read as "the EDIT was skipped" — the most common cognitive
@@ -2413,7 +2463,7 @@ fn handle_multi_file_edit(
     }
 
     // Phase 2: Apply edits to all (in memory)
-    let mut edit_results: Vec<(&str, PreparedEditTarget, EditResult)> =
+    let mut edit_results: Vec<(&str, PreparedEditTarget, EditResult, bool)> =
         Vec::with_capacity(file_data.len());
     for (path_str, target) in file_data {
         match apply_edits_to_content(
@@ -2424,32 +2474,49 @@ fn handle_multi_file_edit(
             expected_line_count,
             target.file_existed,
         ) {
-            Ok(result) => edit_results.push((path_str, target, result)),
+            Ok(result) => {
+                let output_bytes = content_bytes(&result.modified_content, target.line_ending);
+                let content_unchanged = target.file_existed
+                    && output_bytes.as_slice() == target.source_bytes.as_slice();
+                edit_results.push((path_str, target, result, content_unchanged));
+            }
             Err(error) => return ToolCallResult::error(format!("File '{}': {}", path_str, error)),
         }
     }
 
     // Phase 3: Write all (only if !dry_run) — atomic multi-file via temp+rename
     if !dry_run {
+        #[cfg(test)]
+        run_before_write_validation_hook();
         // Validate the whole batch before creating any parent directories.
         if let Err(error) = validate_targets_unchanged(
-            edit_results.iter().map(|(path, target, _)| (*path, target)),
+            edit_results.iter().map(|(path, target, _, _)| (*path, target)),
         ) {
             return ToolCallResult::error(error);
         }
-        for (_, target, _) in &edit_results {
+        for (_, target, _, content_unchanged) in &edit_results {
+            if *content_unchanged {
+                continue;
+            }
             if let Err(error) = create_missing_target_parent(target) {
                 return ToolCallResult::error(error);
             }
         }
-        for (_, target, _) in &mut edit_results {
-            refresh_missing_target_key(target);
+        for (_, target, _, content_unchanged) in &mut edit_results {
+            if !*content_unchanged {
+                refresh_missing_target_key(target);
+            }
         }
 
         // Phase 3a: Write to temp files (validates I/O before touching originals)
         let mut temp_files: Vec<(usize, &str, PathBuf, PathBuf)> =
             Vec::with_capacity(edit_results.len());
-        for (edit_index, (path_str, target, result)) in edit_results.iter().enumerate() {
+        for (edit_index, (path_str, target, result, content_unchanged)) in
+            edit_results.iter().enumerate()
+        {
+            if *content_unchanged {
+                continue;
+            }
             let temp = temp_path_for(&target.write_path);
             if let Err(e) = stage_file_with_endings(
                 &temp,
@@ -2468,7 +2535,7 @@ fn handle_multi_file_edit(
 
         // Detect conflicts across the whole batch before the first commit.
         if let Err(error) = validate_targets_unchanged(
-            edit_results.iter().map(|(path, target, _)| (*path, target)),
+            edit_results.iter().map(|(path, target, _, _)| (*path, target)),
         ) {
             for (_, _, _, temp_path) in &temp_files {
                 remove_file_best_effort(temp_path);
@@ -2505,7 +2572,10 @@ fn handle_multi_file_edit(
         // Phase 3c-pre: Post-write verification across the whole batch.
         // A failure here means an on-disk file diverged from the diff we are about
         // to return — surface it before the response goes out.
-        for (path_str, target, result) in &edit_results {
+        for (path_str, target, result, content_unchanged) in &edit_results {
+            if *content_unchanged {
+                continue;
+            }
             if let Err(e) = verify_written_file(
                 &target.write_path,
                 &result.modified_content,
@@ -2533,7 +2603,11 @@ fn handle_multi_file_edit(
     let mut definition_eligible_paths: Vec<PathBuf> = Vec::new();
     let mut any_file_created_content_eligible = false;
     if !dry_run {
-        for (_, target, _) in &edit_results {
+        for (_, target, _, content_unchanged) in &edit_results {
+            if *content_unchanged {
+                per_file_scope.push(SyncReindexScope::Skip("contentUnchanged"));
+                continue;
+            }
             let mut scope = classify_for_sync_reindex(
                 &canonical_root,
                 &server_extensions,
@@ -2602,7 +2676,9 @@ fn handle_multi_file_edit(
     // Phase 4: Build response with per-file results
     let mut total_applied: usize = 0;
     let mut results_array = Vec::new();
-    for (i, (path_str, target, result)) in edit_results.iter().enumerate() {
+    for (i, (path_str, target, result, content_unchanged)) in
+        edit_results.iter().enumerate()
+    {
         total_applied += result.applied;
         let result_hash = hash_bytes(&content_bytes(
             &result.modified_content,
@@ -2662,18 +2738,19 @@ fn handle_multi_file_edit(
         if target.symlink_followed {
             file_result["symlinkFollowed"] = json!(true);
         }
-        if !dry_run && target.hard_link_broken() {
+        if !dry_run && !*content_unchanged && target.hard_link_broken() {
             file_result["hardLinkBroken"] = json!(true);
         }
-        // Per-file sync-reindex outcome.
-        if !dry_run {
-            // See single-file path: writeStatus + reindexStatus disambiguate the
-            // "edit committed" vs "index update skipped" outcomes that
-            // historically both threaded through `skippedReason`. By Phase 4
-            // every file in `edit_results` has already been renamed onto its
-            // target path (Phase 3b), so `writeStatus = "committed"` holds
-            // unconditionally here — mid-batch rename failures return earlier
-            // with an explicit error and never reach this builder.
+        // Per-file write and sync-reindex outcome.
+        if !dry_run && *content_unchanged {
+            file_result["writeStatus"] = json!("unchanged");
+            file_result["contentIndexUpdated"] = json!(false);
+            file_result["defIndexUpdated"] = json!(false);
+            file_result["fileListInvalidated"] = json!(false);
+            file_result["reindexStatus"] = json!("skipped");
+            file_result["reindexSkipReason"] = json!("contentUnchanged");
+            file_result["skippedReason"] = json!("contentUnchanged");
+        } else if !dry_run {
             file_result["writeStatus"] = json!("committed");
             match per_file_scope[i] {
                 SyncReindexScope::Skip(reason) => {

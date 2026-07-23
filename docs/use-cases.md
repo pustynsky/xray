@@ -326,6 +326,10 @@ Total: <15 milliseconds
 → writeStatus=committed, reindexStatus=completed,
   reindexElapsedMs="0.42", editResults=[{idx:0, matchCount:34}]
 
+// Byte-identical non-dryRun result:
+→ writeStatus=unchanged, reindexStatus=skipped,
+  reindexSkipReason=contentUnchanged; no write or index rebuild
+
 // Step 3: verify — index is ALREADY refreshed, no debounce wait
 {"terms": ["LegacyName"], "countOnly": true}
 → 0 files, 0 occurrences ✓

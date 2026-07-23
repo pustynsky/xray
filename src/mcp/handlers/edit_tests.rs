@@ -827,6 +827,220 @@ fn test_mode_b_no_changes_when_same_text() {
 }
 
 #[test]
+fn test_byte_identical_edit_rejects_concurrent_modification() {
+    let (tmp, filename, path) = create_temp_file("same\n");
+    let ctx = make_ctx(tmp.path());
+    let path_for_hook = path.clone();
+    let _hook_guard = set_before_write_validation_hook(move || {
+        std::fs::write(path_for_hook, b"outside\n").unwrap();
+    });
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "same", "replace": "same" }]
+    }));
+
+    assert!(result.is_error, "concurrent no-op edit must fail");
+    assert!(result.content[0].text.contains("Concurrent modification"));
+    assert_eq!(std::fs::read(&path).unwrap(), b"outside\n");
+    let leaked_staging_files: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".xray_tmp") || name.contains(".xray_backup"))
+        .collect();
+    assert!(leaked_staging_files.is_empty(), "staging artifacts leaked: {leaked_staging_files:?}");
+}
+
+#[cfg(windows)]
+#[test]
+fn test_byte_identical_edit_preserves_windows_identity_and_skips_reindex() {
+    let (tmp, filename, path) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+    let metadata_before = std::fs::metadata(&path).unwrap();
+    let created_before = metadata_before.created().unwrap();
+    let modified_before = metadata_before.modified().unwrap();
+    let attributes_before = get_windows_file_attributes(&path).unwrap();
+    let (_, identity_before) = windows_file_identity(&std::fs::File::open(&path).unwrap()).unwrap();
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "hello", "replace": "hello" }]
+    }));
+
+    assert!(!result.is_error, "no-op edit should succeed: {}", result.content[0].text);
+    let metadata_after = std::fs::metadata(&path).unwrap();
+    let (_, identity_after) = windows_file_identity(&std::fs::File::open(&path).unwrap()).unwrap();
+    assert_eq!(identity_after, identity_before, "byte-identical edit replaced the file");
+    assert_eq!(metadata_after.created().unwrap(), created_before);
+    assert_eq!(metadata_after.modified().unwrap(), modified_before);
+    assert_eq!(get_windows_file_attributes(&path).unwrap(), attributes_before);
+    assert_eq!(std::fs::read(&path).unwrap(), b"hello world\n");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(parsed["applied"], 1);
+    assert_eq!(parsed["editResults"][0]["matchCount"], 1);
+    assert_eq!(parsed["sourceHash"], parsed["resultHash"]);
+    assert_eq!(parsed["writeStatus"], "unchanged");
+    assert_eq!(parsed["reindexStatus"], "skipped");
+    assert_eq!(parsed["reindexSkipReason"], "contentUnchanged");
+    assert_eq!(parsed["contentIndexUpdated"], false);
+    assert_eq!(parsed["defIndexUpdated"], false);
+    assert_eq!(parsed["fileListInvalidated"], false);
+}
+
+#[test]
+fn test_empty_content_still_creates_a_missing_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("empty.txt");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "empty.txt",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "" }]
+    }));
+
+    assert!(!result.is_error, "empty file creation failed: {}", result.content[0].text);
+    assert!(path.is_file());
+    assert_eq!(std::fs::read(&path).unwrap(), b"");
+    let parsed: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(parsed["writeStatus"], "committed");
+    assert_eq!(parsed["fileCreated"], true);
+}
+
+#[test]
+fn test_byte_identical_mode_a_preserves_exact_line_endings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    for (name, bytes) in [
+        ("same-lf.txt", b"alpha\n".as_slice()),
+        ("same-crlf.txt", b"alpha\r\n".as_slice()),
+        ("same-no-final-newline.txt", b"alpha".as_slice()),
+    ] {
+        let path = tmp.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": name,
+            "operations": [{ "startLine": 1, "endLine": 1, "content": "alpha" }]
+        }));
+
+        assert!(!result.is_error, "Mode A no-op failed for {name}: {}", result.content[0].text);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "bytes changed for {name}");
+        let parsed: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(parsed["writeStatus"], "unchanged", "unexpected status for {name}");
+        assert_eq!(parsed["reindexSkipReason"], "contentUnchanged");
+    }
+}
+
+#[test]
+fn test_multi_file_byte_identical_edit_rejects_concurrent_modification() {
+    let tmp = tempfile::tempdir().unwrap();
+    let first_path = tmp.path().join("first.txt");
+    let second_path = tmp.path().join("second.txt");
+    std::fs::write(&first_path, b"same\n").unwrap();
+    std::fs::write(&second_path, b"same\n").unwrap();
+    let second_path_for_hook = second_path.clone();
+    let _hook_guard = set_before_write_validation_hook(move || {
+        std::fs::write(second_path_for_hook, b"outside\n").unwrap();
+    });
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["first.txt", "second.txt"],
+        "edits": [{ "search": "same", "replace": "same" }]
+    }));
+
+    assert!(result.is_error, "concurrent no-op batch must fail");
+    assert!(result.content[0].text.contains("Concurrent modification"));
+    assert_eq!(std::fs::read(&first_path).unwrap(), b"same\n");
+    assert_eq!(std::fs::read(&second_path).unwrap(), b"outside\n");
+    let leaked_staging_files: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".xray_tmp") || name.contains(".xray_backup"))
+        .collect();
+    assert!(leaked_staging_files.is_empty(), "staging artifacts leaked: {leaked_staging_files:?}");
+}
+
+#[test]
+fn test_multi_file_all_unchanged_skips_batch_reindex() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("first.txt"), b"same\n").unwrap();
+    std::fs::write(tmp.path().join("second.txt"), b"same\n").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["first.txt", "second.txt"],
+        "edits": [{ "search": "same", "replace": "same" }]
+    }));
+
+    assert!(!result.is_error, "all-no-op batch failed: {}", result.content[0].text);
+    let parsed: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(parsed["summary"].get("reindexElapsedMs").is_none());
+    for file_result in parsed["results"].as_array().unwrap() {
+        assert_eq!(file_result["writeStatus"], "unchanged");
+        assert_eq!(file_result["reindexStatus"], "skipped");
+        assert_eq!(file_result["reindexSkipReason"], "contentUnchanged");
+    }
+    assert_eq!(std::fs::read(tmp.path().join("first.txt")).unwrap(), b"same\n");
+    assert_eq!(std::fs::read(tmp.path().join("second.txt")).unwrap(), b"same\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn test_multi_file_edit_stages_only_changed_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let unchanged_path = tmp.path().join("unchanged.txt");
+    let changed_path = tmp.path().join("changed.txt");
+    std::fs::write(&unchanged_path, b"hello\n").unwrap();
+    std::fs::write(&changed_path, b"world\n").unwrap();
+    let unchanged_metadata = std::fs::metadata(&unchanged_path).unwrap();
+    let unchanged_created = unchanged_metadata.created().unwrap();
+    let unchanged_modified = unchanged_metadata.modified().unwrap();
+    let (_, unchanged_identity) =
+        windows_file_identity(&std::fs::File::open(&unchanged_path).unwrap()).unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["unchanged.txt", "changed.txt"],
+        "edits": [
+            { "search": "hello", "replace": "hello", "skipIfNotFound": true },
+            { "search": "world", "replace": "changed", "skipIfNotFound": true }
+        ]
+    }));
+
+    assert!(!result.is_error, "mixed batch failed: {}", result.content[0].text);
+    let (_, unchanged_identity_after) =
+        windows_file_identity(&std::fs::File::open(&unchanged_path).unwrap()).unwrap();
+    let unchanged_metadata_after = std::fs::metadata(&unchanged_path).unwrap();
+    assert_eq!(unchanged_identity_after, unchanged_identity);
+    assert_eq!(unchanged_metadata_after.created().unwrap(), unchanged_created);
+    assert_eq!(unchanged_metadata_after.modified().unwrap(), unchanged_modified);
+    assert_eq!(std::fs::read(&unchanged_path).unwrap(), b"hello\n");
+    assert_eq!(std::fs::read(&changed_path).unwrap(), b"changed\n");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(parsed["results"][0]["writeStatus"], "unchanged");
+    assert_eq!(parsed["results"][0]["reindexStatus"], "skipped");
+    assert_eq!(parsed["results"][0]["reindexSkipReason"], "contentUnchanged");
+    assert_eq!(parsed["results"][0]["contentIndexUpdated"], false);
+    assert_eq!(parsed["results"][0]["defIndexUpdated"], false);
+    assert_eq!(parsed["results"][0]["fileListInvalidated"], false);
+    assert_eq!(parsed["results"][1]["writeStatus"], "committed");
+
+    let leaked_staging_files: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".xray_tmp") || name.contains(".xray_backup"))
+        .collect();
+    assert!(leaked_staging_files.is_empty(), "staging artifacts leaked: {leaked_staging_files:?}");
+}
+
+#[test]
 fn test_mode_b_multiline_search_replace() {
     let (tmp, filename, path) = create_temp_file("start\nold_line1\nold_line2\nend\n");
     let ctx = make_ctx(tmp.path());
