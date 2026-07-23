@@ -628,6 +628,199 @@ public sealed class Caller {
     }
 }
 
+#[test]
+fn test_xray_callers_down_respects_resolve_interfaces_policy() {
+    fn tree_contains(nodes: &[Value], class_name: &str, method_name: &str) -> bool {
+        nodes.iter().any(|node| {
+            (node["class"] == class_name && node["method"] == method_name)
+                || node["callees"]
+                    .as_array()
+                    .is_some_and(|children| tree_contains(children, class_name, method_name))
+        })
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let source_file = root.join("ResolveInterfacesDown.cs");
+    std::fs::write(
+        &source_file,
+        r#"public interface IDispatch {
+    void Ping();
+}
+public sealed class DispatchImpl : IDispatch {
+    public void Ping() { PingTarget(); }
+    private void PingTarget() { }
+}
+public sealed class DispatchCaller {
+    public void Call(IDispatch dispatch) { dispatch.Ping(); }
+}
+public sealed class ImplementationCaller {
+    public void Call(DispatchImpl dispatch) { dispatch.Ping(); }
+}
+public sealed class DispatchRoot {
+    public void Start(DispatchCaller caller, IDispatch dispatch) { caller.Call(dispatch); }
+}
+public class BaseDispatch {
+    public virtual void Route() { }
+}
+public sealed class DerivedDispatch : BaseDispatch {
+    public override void Route() { RouteTarget(); }
+    private void RouteTarget() { }
+}
+public sealed class ConcreteCaller {
+    public void Call(BaseDispatch dispatch) { dispatch.Route(); }
+}
+"#,
+    )
+    .unwrap();
+
+    let mut definition_index = DefinitionIndex {
+        root: root.to_string_lossy().to_string(),
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    crate::definitions::update_file_definitions(&mut definition_index, &source_file);
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let context = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(definition_index))),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(
+            root.to_string_lossy().to_string(),
+        ))),
+        server_ext: "cs".to_string(),
+        ..Default::default()
+    };
+
+    let query = |class_name: &str,
+                 method_name: &str,
+                 resolve_interfaces: bool,
+                 max_total_nodes: usize| {
+        let result = dispatch_tool(
+            &context,
+            "xray_callers",
+            &json!({
+                "method": [method_name],
+                "class": class_name,
+                "direction": "down",
+                "depth": 3,
+                "resolveInterfaces": resolve_interfaces,
+                "maxCallersPerLevel": 10,
+                "maxTotalNodes": max_total_nodes
+            }),
+        );
+        assert!(!result.is_error, "{}", result.content[0].text);
+        serde_json::from_str::<Value>(&result.content[0].text).unwrap()
+    };
+
+    let direct_only = query("DispatchCaller", "Call", false, 1);
+    assert_eq!(direct_only["query"]["resolveInterfaces"], false, "{direct_only:#}");
+    let direct_tree = direct_only["callTree"].as_array().unwrap();
+    assert_eq!(direct_tree.len(), 1, "{direct_only:#}");
+    assert_eq!(direct_tree[0]["class"], "IDispatch", "{direct_only:#}");
+    assert_eq!(direct_tree[0]["method"], "Ping", "{direct_only:#}");
+    assert!(direct_tree[0].get("callees").is_none(), "{direct_only:#}");
+    assert_eq!(direct_only["resultStatus"]["status"], "complete", "{direct_only:#}");
+    assert_eq!(direct_only["resultStatus"]["total"]["nodes"], 1, "{direct_only:#}");
+    assert_eq!(direct_only["resultStatus"]["omitted"]["nodes"], 0, "{direct_only:#}");
+
+    let expanded = query("DispatchCaller", "Call", true, 20);
+    assert_eq!(expanded["query"]["resolveInterfaces"], true, "{expanded:#}");
+    let expanded_tree = expanded["callTree"].as_array().unwrap();
+    let implementation = expanded_tree
+        .iter()
+        .find(|node| node["class"] == "DispatchImpl" && node["method"] == "Ping")
+        .unwrap_or_else(|| panic!("implementation missing: {expanded:#}"));
+    assert!(
+        implementation["callees"]
+            .as_array()
+            .is_some_and(|nodes| nodes.iter().any(|node| node["method"] == "PingTarget")),
+        "{expanded:#}"
+    );
+
+    let mid_tree_direct = query("DispatchRoot", "Start", false, 20);
+    let mid_tree_direct_nodes = mid_tree_direct["callTree"].as_array().unwrap();
+    assert!(tree_contains(mid_tree_direct_nodes, "IDispatch", "Ping"), "{mid_tree_direct:#}");
+    assert!(
+        !tree_contains(mid_tree_direct_nodes, "DispatchImpl", "Ping"),
+        "{mid_tree_direct:#}"
+    );
+    assert!(
+        !tree_contains(mid_tree_direct_nodes, "DispatchImpl", "PingTarget"),
+        "{mid_tree_direct:#}"
+    );
+
+    let mid_tree_expanded = query("DispatchRoot", "Start", true, 20);
+    let mid_tree_expanded_nodes = mid_tree_expanded["callTree"].as_array().unwrap();
+    assert!(
+        tree_contains(mid_tree_expanded_nodes, "DispatchImpl", "PingTarget"),
+        "{mid_tree_expanded:#}"
+    );
+
+    let concrete_direct = query("ConcreteCaller", "Call", false, 20);
+    let concrete_expanded = query("ConcreteCaller", "Call", true, 20);
+    assert_eq!(
+        concrete_direct["callTree"], concrete_expanded["callTree"],
+        "concrete inheritance must not depend on resolveInterfaces"
+    );
+
+    let batch_result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["Call", "Missing"],
+            "class": "DispatchCaller",
+            "direction": "down",
+            "depth": 3,
+            "resolveInterfaces": false,
+            "maxCallersPerLevel": 10,
+            "maxTotalNodes": 20
+        }),
+    );
+    assert!(!batch_result.is_error, "{}", batch_result.content[0].text);
+    let batch_output: Value = serde_json::from_str(&batch_result.content[0].text).unwrap();
+    assert_eq!(batch_output["query"]["resolveInterfaces"], false, "{batch_output:#}");
+
+    let query_up = |resolve_interfaces| {
+        let result = dispatch_tool(
+            &context,
+            "xray_callers",
+            &json!({
+                "method": ["Ping"],
+                "class": "IDispatch",
+                "direction": "up",
+                "depth": 2,
+                "resolveInterfaces": resolve_interfaces,
+                "maxCallersPerLevel": 10,
+                "maxTotalNodes": 20
+            }),
+        );
+        assert!(!result.is_error, "{}", result.content[0].text);
+        serde_json::from_str::<Value>(&result.content[0].text).unwrap()
+    };
+
+    let up_direct = query_up(false);
+    assert_eq!(up_direct["query"]["resolveInterfaces"], false, "{up_direct:#}");
+    let up_direct_nodes = up_direct["callTree"].as_array().unwrap();
+    assert!(tree_contains(up_direct_nodes, "DispatchCaller", "Call"), "{up_direct:#}");
+    assert!(
+        !tree_contains(up_direct_nodes, "ImplementationCaller", "Call"),
+        "{up_direct:#}"
+    );
+
+    let up_expanded = query_up(true);
+    assert_eq!(up_expanded["query"]["resolveInterfaces"], true, "{up_expanded:#}");
+    let up_expanded_nodes = up_expanded["callTree"].as_array().unwrap();
+    assert!(tree_contains(up_expanded_nodes, "DispatchCaller", "Call"), "{up_expanded:#}");
+    assert!(
+        tree_contains(up_expanded_nodes, "ImplementationCaller", "Call"),
+        "{up_expanded:#}"
+    );
+}
 
 #[test]
 fn test_xray_callers_direct_receiver_types() {

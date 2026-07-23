@@ -467,7 +467,7 @@ fn test_prefilter_does_not_expand_by_base_types() {
     let impact_truncated = AtomicBool::new(false);
 
     let caller_ctx = CallerTreeContext {
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
     let mut builder = CallerTreeBuilder {
@@ -583,7 +583,7 @@ fn test_callee_tree_depth2_no_cross_class_pollution() {
     let caller_ctx = CallerTreeContext {
         content_index: &empty_ci,
         ext_filter: "ts",
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         ext_filter_list: super::utils::prepare_ext_filter("ts"),
         ..CallerTreeContext::test_default(&empty_ci, &def_idx, &limits, &node_count, &impact_truncated)
     };
@@ -1640,7 +1640,7 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
     let impact_truncated = AtomicBool::new(false);
 
     let caller_ctx = CallerTreeContext {
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
     let mut builder = CallerTreeBuilder {
@@ -2042,7 +2042,7 @@ fn test_sql_callee_tree_exec_dependencies() {
     let caller_ctx = CallerTreeContext {
         content_index: &empty_ci,
         ext_filter: "sql",
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         ext_filter_list: super::utils::prepare_ext_filter("sql"),
         ..CallerTreeContext::test_default(&empty_ci, &def_idx, &limits, &node_count, &impact_truncated)
     };
@@ -2159,7 +2159,7 @@ fn test_sql_caller_tree_who_calls_sp() {
 
     let caller_ctx = CallerTreeContext {
         ext_filter: "sql",
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         ext_filter_list: super::utils::prepare_ext_filter("sql"),
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
@@ -2250,7 +2250,7 @@ fn test_sql_function_definition_is_not_reported_as_unscoped_self_caller() {
     let impact_truncated = AtomicBool::new(false);
     let caller_ctx = CallerTreeContext {
         ext_filter: "sql",
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         ext_filter_list: super::utils::prepare_ext_filter("sql"),
         ..CallerTreeContext::test_default(
             &content_index,
@@ -2437,7 +2437,7 @@ END
     let impact_truncated = AtomicBool::new(false);
     let caller_ctx = CallerTreeContext {
         ext_filter: "sql",
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         ext_filter_list: super::utils::prepare_ext_filter("sql"),
         ..CallerTreeContext::test_default(
             &content_index,
@@ -3060,7 +3060,7 @@ fn test_impact_analysis_finds_test_methods() {
     let node_count = AtomicUsize::new(0);
     let impact_truncated = AtomicBool::new(false);
     let caller_ctx = CallerTreeContext {
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         impact_analysis: true,
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
@@ -3105,7 +3105,7 @@ fn test_impact_analysis_finds_test_methods() {
     let production_node_count = AtomicUsize::new(0);
     let production_impact_truncated = AtomicBool::new(false);
     let production_ctx = CallerTreeContext {
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         impact_analysis: true,
         production_only: true,
         ..CallerTreeContext::test_default(
@@ -3232,7 +3232,7 @@ fn test_impact_analysis_non_test_method_recurses_normally() {
     let node_count = AtomicUsize::new(0);
     let impact_truncated = AtomicBool::new(false);
     let caller_ctx = CallerTreeContext {
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         impact_analysis: true,
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
@@ -4025,7 +4025,7 @@ fn test_per_level_truncation_reports_dropped_count() {
     let node_count = AtomicUsize::new(0);
     let impact_truncated = AtomicBool::new(false);
     let caller_ctx = CallerTreeContext {
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
     let mut builder = CallerTreeBuilder {
@@ -4117,7 +4117,7 @@ fn test_per_level_truncation_not_set_when_under_limit() {
     let node_count = AtomicUsize::new(0);
     let impact_truncated = AtomicBool::new(false);
     let caller_ctx = CallerTreeContext {
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
     let mut builder = CallerTreeBuilder {
@@ -4163,9 +4163,8 @@ fn make_ctx_with_idx(def_idx: DefinitionIndex) -> super::HandlerContext {
 
 #[test]
 fn test_advisory_interface_vias_emitted_when_class_implements_interface() {
-    // DatabaseClient implements IDatabaseClient. Even with 0 direct callers,
-    // the interface-vias advisory must surface so the agent re-runs without
-    // `class=` or with the interface name.
+    // DatabaseClient implements IDatabaseClient. The interface-vias advisory is
+    // useful only when implementation expansion was explicitly disabled.
     let definitions = vec![
         DefinitionEntry {
             file_id: 0, name: "IDatabaseClient".to_string(),
@@ -4194,10 +4193,33 @@ fn test_advisory_interface_vias_emitted_when_class_implements_interface() {
         .or_default().push(2);
 
     let ctx = make_ctx_with_idx(def_idx);
+
+    let expanded = handle_xray_callers(&ctx, &serde_json::json!({
+        "method": ["UpsertMappingAsync"],
+        "class": "DatabaseClient",
+        "depth": 1,
+        "resolveInterfaces": true
+    }));
+    assert!(!expanded.is_error, "handler should not error: {:?}", expanded.content[0].text);
+    let expanded_value: serde_json::Value =
+        serde_json::from_str(&expanded.content[0].text).unwrap();
+    let expanded_advisories = expanded_value["advisories"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        expanded_advisories
+            .iter()
+            .filter_map(|value| value.as_str())
+            .all(|advisory| !advisory.contains("IDatabaseClient")),
+        "expanded mode must not claim interface callsites are excluded: {expanded_value:#}"
+    );
+
     let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": ["UpsertMappingAsync"],
         "class": "DatabaseClient",
-        "depth": 1
+        "depth": 1,
+        "resolveInterfaces": false
     }));
     assert!(!result.is_error, "handler should not error: {:?}", result.content[0].text);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -4211,6 +4233,8 @@ fn test_advisory_interface_vias_emitted_when_class_implements_interface() {
         "advisory should name the interface; got: {combined}");
     assert!(combined.contains("class=IDatabaseClient"),
         "advisory should suggest re-running with the interface; got: {combined}");
+    assert!(combined.contains("resolveInterfaces=true"),
+        "advisory should explain how to enable expansion; got: {combined}");
 }
 
 #[test]
@@ -4853,7 +4877,7 @@ fn test_impact_analysis_cap_sets_truncation_flag_when_collection_capped() {
     let node_count = AtomicUsize::new(0);
     let impact_truncated = AtomicBool::new(false);
     let caller_ctx = CallerTreeContext {
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         impact_analysis: true,
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
@@ -4898,7 +4922,7 @@ fn test_impact_analysis_bounded_collection_starves_late_test_callers() {
     let node_count = AtomicUsize::new(0);
     let impact_truncated = AtomicBool::new(false);
     let caller_ctx = CallerTreeContext {
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         impact_analysis: true,
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
@@ -4953,7 +4977,7 @@ fn test_impact_analysis_with_class_filter_avoids_starvation() {
     let node_count = AtomicUsize::new(0);
     let impact_truncated = AtomicBool::new(false);
     let caller_ctx = CallerTreeContext {
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         impact_analysis: true,
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
@@ -5129,7 +5153,7 @@ fn test_mid_tree_iface_expansion_finds_caller_through_sibling_impl() {
     let node_count = AtomicUsize::new(0);
     let impact_truncated = AtomicBool::new(false);
     let caller_ctx = CallerTreeContext {
-        resolve_interfaces: true,
+        resolution_policy: ResolutionPolicy::ExpandInterfaceImplementations,
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
     let mut builder = CallerTreeBuilder {
@@ -5169,7 +5193,7 @@ fn test_mid_tree_iface_expansion_finds_caller_through_sibling_impl() {
     let node_count2 = AtomicUsize::new(0);
     let impact_truncated2 = AtomicBool::new(false);
     let caller_ctx_off = CallerTreeContext {
-        resolve_interfaces: false,
+        resolution_policy: ResolutionPolicy::DirectOnly,
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count2, &impact_truncated2)
     };
     let mut builder_off = CallerTreeBuilder {
@@ -5203,7 +5227,7 @@ fn test_mid_tree_iface_expansion_finds_caller_through_sibling_impl() {
     let node_count3 = AtomicUsize::new(0);
     let impact_truncated3 = AtomicBool::new(false);
     let caller_ctx_d1 = CallerTreeContext {
-        resolve_interfaces: true,
+        resolution_policy: ResolutionPolicy::ExpandInterfaceImplementations,
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count3, &impact_truncated3)
     };
     let mut builder_d1 = CallerTreeBuilder {
@@ -5359,7 +5383,7 @@ fn test_root_iface_expansion_honors_visible_depth_budget() {
     let node_count = AtomicUsize::new(0);
     let impact_truncated = AtomicBool::new(false);
     let caller_ctx = CallerTreeContext {
-        resolve_interfaces: true,
+        resolution_policy: ResolutionPolicy::ExpandInterfaceImplementations,
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
     let mut builder = CallerTreeBuilder {

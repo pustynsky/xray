@@ -536,6 +536,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
                 "depth": max_depth,
                 "templateNavigation": true,
                 "productionOnly": production_only,
+                "resolveInterfaces": resolve_interfaces,
             },
             "summary": summary
         });
@@ -567,7 +568,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         content_index: &content_index,
         def_idx: &def_idx,
         ext_filter: &ext_filter,
-        resolve_interfaces,
+        resolution_policy: ResolutionPolicy::from(resolve_interfaces),
         limits: &limits,
         node_count: &node_count,
         include_body,
@@ -669,6 +670,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
                 "maxCallersPerLevel": max_callers_per_level,
                 "maxTotalNodes": max_total_nodes,
                 "productionOnly": production_only,
+                "resolveInterfaces": resolve_interfaces,
             },
             "summary": summary
         });
@@ -724,7 +726,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         // Skip when either truncation signal fired.
         let result_truncated = truncated || builder.per_level_dropped > 0;
         let mut advisories: Vec<String> = Vec::new();
-        if let Some(h) = interface_vias_caveat(&method_name, class_filter.as_deref(), &def_idx) {
+        if !resolve_interfaces
+            && let Some(h) = interface_vias_caveat(&method_name, class_filter.as_deref(), &def_idx)
+        {
             advisories.push(h);
         }
         if !result_truncated
@@ -823,6 +827,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
                 "maxCallersPerLevel": max_callers_per_level,
                 "maxTotalNodes": max_total_nodes,
                 "productionOnly": production_only,
+                "resolveInterfaces": resolve_interfaces,
             },
             "summary": summary
         });
@@ -984,7 +989,7 @@ fn handle_multi_method_callers(
             content_index: &content_index,
             def_idx: &def_idx,
             ext_filter: &ext_filter,
-            resolve_interfaces,
+            resolution_policy: ResolutionPolicy::from(resolve_interfaces),
             limits: &limits,
             node_count: &node_count,
             include_body,
@@ -1084,7 +1089,9 @@ fn handle_multi_method_callers(
             // capped (per-level or total-nodes). See single-method handler for rationale.
             let method_result_truncated = method_truncated || method_dropped > 0;
             let mut advisories: Vec<String> = Vec::new();
-            if let Some(h) = interface_vias_caveat(method_name, class_filter, &def_idx) {
+            if !resolve_interfaces
+                && let Some(h) = interface_vias_caveat(method_name, class_filter, &def_idx)
+            {
                 advisories.push(h);
             }
             if !method_result_truncated
@@ -1217,6 +1224,7 @@ fn handle_multi_method_callers(
             "maxCallersPerLevel": max_callers_per_level,
             "maxTotalNodes": max_total_nodes,
             "productionOnly": production_only,
+            "resolveInterfaces": resolve_interfaces,
         },
         "summary": summary,
     });
@@ -1533,6 +1541,28 @@ struct CallerLimits {
     max_total_nodes: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolutionPolicy {
+    DirectOnly,
+    ExpandInterfaceImplementations,
+}
+
+impl ResolutionPolicy {
+    fn expands_interface_implementations(self) -> bool {
+        matches!(self, Self::ExpandInterfaceImplementations)
+    }
+}
+
+impl From<bool> for ResolutionPolicy {
+    fn from(resolve_interfaces: bool) -> Self {
+        if resolve_interfaces {
+            Self::ExpandInterfaceImplementations
+        } else {
+            Self::DirectOnly
+        }
+    }
+}
+
 
 fn try_reserve_graph_node(
     node_count: &AtomicUsize,
@@ -1559,7 +1589,7 @@ struct CallerTreeContext<'a> {
     content_index: &'a ContentIndex,
     def_idx: &'a DefinitionIndex,
     ext_filter: &'a str,
-    resolve_interfaces: bool,
+    resolution_policy: ResolutionPolicy,
     limits: &'a CallerLimits,
     node_count: &'a AtomicUsize,
     include_body: bool,
@@ -1603,7 +1633,7 @@ impl CallerTreeContext<'_> {
             content_index,
             def_idx,
             ext_filter: "cs",
-            resolve_interfaces: true,
+            resolution_policy: ResolutionPolicy::ExpandInterfaceImplementations,
             limits,
             node_count,
             include_body: false,
@@ -1941,7 +1971,27 @@ fn collect_substring_file_ids(
 ///
 /// Returns false if:
 /// - The call-site has a receiver_type that does NOT match target_class
+#[cfg(test)]
 fn verify_call_site_target(
+    def_idx: &DefinitionIndex,
+    caller_di: u32,
+    call_line: u32,
+    method_name: &str,
+    target_class: Option<&str>,
+    extension_methods_lower: Option<&HashMap<String, Vec<String>>>,
+) -> bool {
+    verify_call_site_target_with_policy(
+        def_idx,
+        caller_di,
+        call_line,
+        method_name,
+        target_class,
+        extension_methods_lower,
+        ResolutionPolicy::ExpandInterfaceImplementations,
+    )
+}
+
+fn verify_call_site_target_with_policy(
     def_idx: &DefinitionIndex,
     caller_di: u32,
     call_line: u32,
@@ -1954,6 +2004,7 @@ fn verify_call_site_target(
     // `Some(&context.extension_methods_lower)`; unit tests pass `None`
     // to keep their fixtures one-liners.
     extension_methods_lower: Option<&HashMap<String, Vec<String>>>,
+    policy: ResolutionPolicy,
 ) -> bool {
     // Get call sites for the caller method from the definition index
     let call_sites = match def_idx.method_calls.get(&caller_di) {
@@ -1982,6 +2033,7 @@ fn verify_call_site_target(
     };
 
     let target_lower = target_class.to_lowercase();
+    let target_is_interface = is_interface_type(def_idx, &target_lower);
     // Also prepare interface variant: "IFoo" for "Foo"
     let target_interface = format!("i{}", target_lower);
 
@@ -2047,6 +2099,13 @@ fn verify_call_site_target(
                 if rt_lower == target_lower {
                     return true;
                 }
+                // DirectOnly excludes interface↔implementation matching but preserves
+                // ordinary concrete inheritance checks below.
+                if !policy.expands_interface_implementations()
+                    && target_is_interface != is_interface_type(def_idx, &rt_lower)
+                {
+                    continue;
+                }
                 // Interface match: receiver is IFoo, target is Foo
                 if rt_lower == target_interface {
                     return true;
@@ -2083,6 +2142,9 @@ fn verify_call_site_target(
                     let cp_lower = cp.to_lowercase();
                     if cp_lower == target_lower || cp_lower == target_interface {
                         return true;
+                    }
+                    if !policy.expands_interface_implementations() && target_is_interface {
+                        continue;
                     }
                     // Check if caller's class inherits from target
                     let caller_inherits = def_idx
@@ -2433,13 +2495,14 @@ impl CallerTreeBuilder<'_> {
                     .is_some_and(|extension| extension.eq_ignore_ascii_case("sql"));
                 let requires_call_site_validation = parent_class.is_some() || is_sql;
                 if requires_call_site_validation
-                    && !verify_call_site_target(
+                    && !verify_call_site_target_with_policy(
                         self.ctx.def_idx,
                         caller_di,
                         line,
                         &method_lower,
                         parent_class,
                         Some(&self.ctx.extension_methods_lower),
+                        self.ctx.resolution_policy,
                     )
                 {
                     continue;
@@ -2693,7 +2756,7 @@ impl CallerTreeBuilder<'_> {
         // `name_index[method_lower]` even when the caller's class implements
         // no interface declaring that method. Dedup via `visited` so the same
         // (class, method) pair is not re-expanded across multiple branches.
-        if self.ctx.resolve_interfaces {
+        if self.ctx.resolution_policy.expands_interface_implementations() {
             let should_expand = if current_depth == 0 {
                 true
             } else if let Some(pc) = parent_class {
@@ -2940,7 +3003,12 @@ impl CalleeTreeBuilder<'_> {
                 // Resolve this call site to actual definitions
                 let caller_parent = def_idx.definitions.get(method_di as usize)
                     .and_then(|d| d.parent.as_deref());
-                let resolved = resolve_call_site(call, def_idx, caller_parent);
+                let resolved = resolve_call_site_with_policy(
+                    call,
+                    def_idx,
+                    caller_parent,
+                    self.ctx.resolution_policy,
+                );
 
                 for callee_di in resolved {
                     let callee_def = match def_idx.definitions.get(callee_di as usize) {
@@ -3103,6 +3171,22 @@ fn find_implementations_of_interface(
     impls
 }
 
+fn is_interface_type(def_idx: &DefinitionIndex, type_name_lower: &str) -> bool {
+    let base_name = type_name_lower.split('<').next().unwrap_or(type_name_lower);
+    def_idx
+        .name_index
+        .get(base_name)
+        .is_some_and(|indices| {
+            indices.iter().any(|&di| {
+                def_idx
+                    .definitions
+                    .get(di as usize)
+                    .is_some_and(|definition| definition.kind == DefinitionKind::Interface)
+            })
+        })
+}
+
+
 /// Check if a class (by lowercased name) has generic parameters in its signature.
 /// Returns true if ANY class definition with that name has `<` in its signature.
 fn is_class_generic(def_idx: &DefinitionIndex, class_name_lower: &str) -> bool {
@@ -3123,7 +3207,25 @@ fn is_class_generic(def_idx: &DefinitionIndex, class_name_lower: &str) -> bool {
 /// Uses receiver_type to disambiguate when available. When receiver is unknown,
 /// scopes to the caller's own class if `caller_parent` is provided, otherwise
 /// falls back to accepting all matching methods.
-pub(crate) fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex, caller_parent: Option<&str>) -> Vec<u32> {
+pub(crate) fn resolve_call_site(
+    call: &CallSite,
+    def_idx: &DefinitionIndex,
+    caller_parent: Option<&str>,
+) -> Vec<u32> {
+    resolve_call_site_with_policy(
+        call,
+        def_idx,
+        caller_parent,
+        ResolutionPolicy::ExpandInterfaceImplementations,
+    )
+}
+
+fn resolve_call_site_with_policy(
+    call: &CallSite,
+    def_idx: &DefinitionIndex,
+    caller_parent: Option<&str>,
+    policy: ResolutionPolicy,
+) -> Vec<u32> {
     let name_lower = call.method_name.to_lowercase();
     let candidates = match def_idx.name_index.get(&name_lower) {
         Some(c) => c,
@@ -3168,7 +3270,13 @@ pub(crate) fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex, call
                     continue;
                 }
 
-                // Interface match: receiver is an interface, parent implements it
+                // Interface match: receiver is an interface, parent implements it.
+                // DirectOnly retains the interface declaration but excludes implementors.
+                if !policy.expands_interface_implementations()
+                    && is_interface_type(def_idx, &recv_lower)
+                {
+                    continue;
+                }
                 // Check if parent's class definition has recv_type in base_types
                 if let Some(parent_defs) = def_idx.name_index.get(&parent_lower) {
                     for &pi in parent_defs {

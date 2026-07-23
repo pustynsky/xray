@@ -187,8 +187,9 @@ pub(crate) fn interface_vias_caveat(
             "Filtered by concrete class `{cls}`. Class implements interface(s) declaring \
              `{method_name}`: {interface_list}. If `{method_name}` is invoked through a \
              DI-injected interface field (e.g. `{cls}` is registered as `{suggested}` in \
-             DI), those callsites are excluded by the `class=` filter. Re-run without \
-             `class=` or with `class={suggested}` to include interface-receiver callsites."
+             DI), `resolveInterfaces=false` excludes those callsites from this concrete-class \
+             query. Re-run with `resolveInterfaces=true`, without `class=`, or with \
+             `class={suggested}` to include interface-receiver callsites."
         ));
     }
 
@@ -214,7 +215,7 @@ pub(crate) fn interface_vias_caveat(
          in the index: {candidates}. Across all of them, base types include interface(s) \
          declaring `{method_name}`: {interface_list} — some may not apply to the type you \
          targeted. AST resolution cannot disambiguate from the short name alone. To narrow, \
-         re-run `xray_callers method={method_name}` with the interface that matches your DI \
+         re-run with `resolveInterfaces=true`, use the interface that matches your DI \
          registration, or drop `class=` to include all callsites."
     ))
 }
@@ -681,6 +682,10 @@ mod tests {
         assert!(
             hint.contains("some may not apply"),
             "hint must caveat that union spans unrelated types, got: {hint}"
+        );
+        assert!(
+            hint.contains("resolveInterfaces=true"),
+            "hint must explain how to enable implementation expansion, got: {hint}"
         );
         assert!(
             !hint.contains("class=IFoo") && !hint.contains("class=IBar"),
