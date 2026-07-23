@@ -298,6 +298,95 @@ END
         "EXEC receiver_type should be schema 'Sales'");
 }
 
+#[test]
+fn test_sql_call_sites_ignore_comments_and_literals_preserve_lines() {
+    let source = r#"CREATE PROCEDURE [dbo].[MaskingProbe]
+AS
+BEGIN
+    DECLARE @sql NVARCHAR(MAX) = N'EXEC [dbo].[StringExec]';
+    SELECT N'FROM [dbo].[StringFrom] JOIN [dbo].[StringJoin]';
+    SELECT N'it''s UPDATE [dbo].[EscapedUpdate]';
+    /* EXEC [dbo].[BlockExec];
+       DELETE FROM [dbo].[BlockDelete]; */
+    -- INSERT INTO [dbo].[LineInsert]
+    EXEC [dbo].[RealExec]; SELECT N'EXEC [dbo].[InlineStringExec]'; -- EXEC [dbo].[InlineCommentExec]
+    SELECT * FROM [dbo].[RealTable] r /* JOIN [dbo].[InlineCommentJoin] */
+    INSERT INTO [dbo].[RealInsert] DEFAULT VALUES
+    UPDATE [dbo].[RealUpdate] SET [Value] = 1
+    DELETE FROM [dbo].[RealDelete]
+END
+"#;
+    let (_, call_sites, _) = parse_sql_definitions(source, 0);
+    let calls = &call_sites[0].1;
+
+    for false_positive in [
+        "StringExec",
+        "StringFrom",
+        "StringJoin",
+        "EscapedUpdate",
+        "BlockExec",
+        "BlockDelete",
+        "LineInsert",
+        "InlineStringExec",
+        "InlineCommentExec",
+        "InlineCommentJoin",
+    ] {
+        assert!(
+            calls.iter().all(|call| call.method_name != false_positive),
+            "non-code SQL produced call site {false_positive}: {calls:#?}"
+        );
+    }
+
+    for (method_name, expected_line) in [
+        ("RealExec", 10),
+        ("RealTable", 11),
+        ("RealInsert", 12),
+        ("RealUpdate", 13),
+        ("RealDelete", 14),
+    ] {
+        let call = calls
+            .iter()
+            .find(|call| call.method_name == method_name)
+            .unwrap_or_else(|| panic!("missing real call {method_name}: {calls:#?}"));
+        assert_eq!(call.line, expected_line, "wrong line for {method_name}");
+        assert_eq!(call.receiver_type.as_deref(), Some("dbo"));
+    }
+}
+
+#[test]
+fn test_sql_call_sites_masking_preserves_crlf_unicode_and_literal_comment_markers() {
+    let source = concat!(
+        "CREATE PROCEDURE [dbo].[CrlfMaskingProbe]\r\n",
+        "AS\r\n",
+        "BEGIN\r\n",
+        "    SELECT N'/* EXEC [dbo].[LiteralExec] */ -- JOIN [dbo].[LiteralJoin]';\r\n",
+        "    -- комментарий DELETE FROM [dbo].[UnicodeLineDelete]\r\n",
+        "    /* блок 🚀 FROM [dbo].[UnicodeBlockFrom] */\r\n",
+        "    EXEC [dbo].[RealAfterUnicode];\r\n",
+        "END\r\n",
+    );
+    let (_, call_sites, _) = parse_sql_definitions(source, 0);
+    let calls = &call_sites[0].1;
+
+    for false_positive in [
+        "LiteralExec",
+        "LiteralJoin",
+        "UnicodeLineDelete",
+        "UnicodeBlockFrom",
+    ] {
+        assert!(
+            calls.iter().all(|call| call.method_name != false_positive),
+            "non-code CRLF/Unicode SQL produced {false_positive}: {calls:#?}"
+        );
+    }
+
+    let real_call = calls
+        .iter()
+        .find(|call| call.method_name == "RealAfterUnicode")
+        .unwrap_or_else(|| panic!("missing real call after Unicode masking: {calls:#?}"));
+    assert_eq!(real_call.line, 7);
+    assert_eq!(real_call.receiver_type.as_deref(), Some("dbo"));
+}
 
 #[test]
 fn test_sql_call_sites_include_scalar_function_invocation_without_definition_self_edge() {
