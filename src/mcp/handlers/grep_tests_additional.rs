@@ -13,7 +13,14 @@ fn test_auto_switch_no_special_chars_returns_none() {
     let params = make_params_default();
     let raw_terms = vec!["hello".to_string(), "world".to_string()];
     let terms = vec!["hello".to_string(), "world".to_string()];
-    let result = auto_switch_to_phrase_if_needed(&ctx, &index, &terms, &raw_terms, &params);
+    let result = auto_switch_to_phrase_if_needed(
+        &ctx,
+        &index,
+        &terms,
+        &raw_terms,
+        &params,
+        &resolve_grep_file_scope(&index, &params),
+    );
     assert!(result.is_none(), "Should return None when no terms contain spaces or punctuation");
 }
 
@@ -24,7 +31,14 @@ fn test_auto_switch_with_spaces_returns_some() {
     let params = make_params_default();
     let raw_terms = vec!["create procedure".to_string()];
     let terms = vec!["CREATE PROCEDURE".to_string()];
-    let result = auto_switch_to_phrase_if_needed(&ctx, &index, &terms, &raw_terms, &params);
+    let result = auto_switch_to_phrase_if_needed(
+        &ctx,
+        &index,
+        &terms,
+        &raw_terms,
+        &params,
+        &resolve_grep_file_scope(&index, &params),
+    );
     assert!(result.is_some(), "Should return Some when terms contain spaces");
 }
 
@@ -35,7 +49,14 @@ fn test_auto_switch_with_punctuation_returns_some() {
     let params = make_params_default();
     let raw_terms = vec!["#[cfg(test)]".to_string()];
     let terms = vec!["#[cfg(test)]".to_string()];
-    let result = auto_switch_to_phrase_if_needed(&ctx, &index, &terms, &raw_terms, &params);
+    let result = auto_switch_to_phrase_if_needed(
+        &ctx,
+        &index,
+        &terms,
+        &raw_terms,
+        &params,
+        &resolve_grep_file_scope(&index, &params),
+    );
     assert!(result.is_some(), "Should return Some when terms contain punctuation like #[cfg(test)]");
 }
 
@@ -46,7 +67,14 @@ fn test_auto_switch_with_angle_brackets_returns_some() {
     let params = make_params_default();
     let raw_terms = vec!["<summary>".to_string()];
     let terms = vec!["<summary>".to_string()];
-    let result = auto_switch_to_phrase_if_needed(&ctx, &index, &terms, &raw_terms, &params);
+    let result = auto_switch_to_phrase_if_needed(
+        &ctx,
+        &index,
+        &terms,
+        &raw_terms,
+        &params,
+        &resolve_grep_file_scope(&index, &params),
+    );
     assert!(result.is_some(), "Should return Some when terms contain angle brackets");
 }
 
@@ -57,7 +85,14 @@ fn test_auto_switch_underscore_only_returns_none() {
     let params = make_params_default();
     let raw_terms = vec!["my_variable".to_string()];
     let terms = vec!["my_variable".to_string()];
-    let result = auto_switch_to_phrase_if_needed(&ctx, &index, &terms, &raw_terms, &params);
+    let result = auto_switch_to_phrase_if_needed(
+        &ctx,
+        &index,
+        &terms,
+        &raw_terms,
+        &params,
+        &resolve_grep_file_scope(&index, &params),
+    );
     assert!(result.is_none(), "Should NOT auto-switch for underscores (they are valid in tokens)");
 }
 
@@ -111,7 +146,8 @@ fn test_score_token_postings_basic() {
     let mut file_matched_terms = HashMap::new();
 
     score_token_postings(
-        &["userservice".to_string()], 0, &index, &params, 1.0,
+        &["userservice".to_string()], 0, &index,
+        &resolve_grep_file_scope(&index, &params), 1.0,
         &mut tokens_with_hits, &mut file_scores, &mut file_matched_terms,
     );
 
@@ -143,7 +179,8 @@ fn test_score_token_postings_filters_applied() {
     let mut file_matched_terms = HashMap::new();
 
     score_token_postings(
-        &["token".to_string()], 0, &index, &params, 2.0,
+        &["token".to_string()], 0, &index,
+        &resolve_grep_file_scope(&index, &params), 2.0,
         &mut tokens_with_hits, &mut file_scores, &mut file_matched_terms,
     );
 
@@ -172,11 +209,13 @@ fn test_score_token_postings_multi_term_tracking() {
     let mut file_matched_terms = HashMap::new();
 
     score_token_postings(
-        &["term_a".to_string()], 0, &index, &params, 1.0,
+        &["term_a".to_string()], 0, &index,
+        &resolve_grep_file_scope(&index, &params), 1.0,
         &mut tokens_with_hits, &mut file_scores, &mut file_matched_terms,
     );
     score_token_postings(
-        &["term_b".to_string()], 1, &index, &params, 1.0,
+        &["term_b".to_string()], 1, &index,
+        &resolve_grep_file_scope(&index, &params), 1.0,
         &mut tokens_with_hits, &mut file_scores, &mut file_matched_terms,
     );
 
@@ -296,7 +335,12 @@ fn test_score_normal_token_search_with_ext_filter() {
         ..make_params_default()
     };
     let terms = vec!["hello".to_string()];
-    let scores = score_normal_token_search(&terms, &index, &params);
+    let scores = score_normal_token_search(
+        &terms,
+        &index,
+        &params,
+        &resolve_grep_file_scope(&index, &params),
+    );
     assert_eq!(scores.len(), 1, "Only .cs file should pass filter");
     assert!(scores.contains_key(&0));
 }
@@ -774,7 +818,12 @@ fn test_tfidf_zero_file_token_count_no_division_by_zero() {
         ..make_params_default()
     };
     // Should not panic or produce NaN — the guard converts 0 to 1.0
-    let results = score_normal_token_search(&["hello".to_string()], &index, &params);
+    let results = score_normal_token_search(
+        &["hello".to_string()],
+        &index,
+        &params,
+        &resolve_grep_file_scope(&index, &params),
+    );
     assert_eq!(results.len(), 1, "Should find one file");
     let entry = results.values().next().unwrap();
     assert!(entry.tf_idf.is_finite(), "TF-IDF should be finite, not NaN/Inf");
@@ -1330,6 +1379,10 @@ fn test_invert_partition_contract_forward_and_invert_partition_scope() {
             "{} resultStatus.safeForExhaustiveClaims", label);
         assert!(status["reasons"].as_array().unwrap().is_empty(),
             "{} resultStatus.reasons must be empty: {:?}", label, status["reasons"]);
+        assert_eq!(out["summary"]["scope"]["requested"], json!(true));
+        assert_eq!(out["summary"]["scope"]["strategy"], json!("linearScan"));
+        assert_eq!(out["summary"]["scope"]["indexFiles"], json!(scope.len()));
+        assert_eq!(out["summary"]["scope"]["matchedFiles"], json!(scope.len()));
     }
     // totalFilesInScope is invert-only; reflects the post-filter universe.
     assert_eq!(inverted["summary"]["totalFilesInScope"], json!(scope.len()));

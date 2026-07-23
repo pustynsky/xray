@@ -211,6 +211,20 @@ fn line_regex_file_filter_scopes_search() {
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1, "file=guide.md should restrict to one file");
+    let scan = &output["summary"]["lineRegexScan"];
+    assert_eq!(scan["schemaVersion"], 2);
+    assert_eq!(scan["filesConsidered"], 3);
+    assert_eq!(scan["scopeFiles"], 1);
+    assert_eq!(scan["scheduledFiles"], 1);
+    assert_eq!(scan["filesVisited"], 1);
+    assert_eq!(scan["filesSkippedByScope"], 2);
+    assert_eq!(scan["filesSkippedByPrefilter"], 0);
+    assert_eq!(output["execution"]["filesScanned"], 1);
+    assert_eq!(output["execution"]["filesConsidered"], 3);
+    assert_eq!(output["summary"]["scope"]["requested"], true);
+    assert_eq!(output["summary"]["scope"]["strategy"], "linearScan");
+    assert_eq!(output["summary"]["scope"]["indexFiles"], 3);
+    assert_eq!(output["summary"]["scope"]["matchedFiles"], 1);
     cleanup_tmp(&tmp);
 }
 

@@ -34,6 +34,74 @@ fn make_params<'a>(
     }
 }
 
+#[test]
+fn test_resolve_grep_file_scope_exact_map_miss_uses_canonical_path_key() {
+    let index = ContentIndex {
+        files: vec![
+            "C:/workspace/unrelated/Target.cs".to_string(),
+            "C:/Users/runneradmin/project/Target.cs".to_string(),
+            "C:/workspace/other/File.cs".to_string(),
+        ],
+        path_to_id: Some(HashMap::new()),
+        ..ContentIndex::default()
+    };
+    let no_dir = None;
+    let logical_path = Some("C:\\Users\\RUNNER~1\\project\\Target.cs".to_string());
+    let canonical_path = Some("C:/Users/runneradmin/project/Target.cs".to_string());
+    let params = GrepSearchParams {
+        exact_file_path: &logical_path,
+        exact_file_path_canonical: &canonical_path,
+        ..make_params(&no_dir, &[], &[], &[])
+    };
+
+    let scope = resolve_grep_file_scope(&index, &params);
+
+    assert_eq!(scope.iter_ids().collect::<Vec<_>>(), vec![1]);
+    assert_eq!(scope.strategy().as_str(), "linearScan");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_grep_file_scope_exact_map_miss_is_case_sensitive_on_unix() {
+    let index = ContentIndex {
+        files: vec![
+            "/workspace/src/Main.rs".to_string(),
+            "/workspace/src/main.rs".to_string(),
+        ],
+        path_to_id: None,
+        ..ContentIndex::default()
+    };
+    let no_dir = None;
+    let logical_path = Some("/workspace/src/main.rs".to_string());
+    let no_canonical_path = None;
+    let params = GrepSearchParams {
+        exact_file_path: &logical_path,
+        exact_file_path_canonical: &no_canonical_path,
+        ..make_params(&no_dir, &[], &[], &[])
+    };
+
+    let scope = resolve_grep_file_scope(&index, &params);
+
+    assert_eq!(scope.iter_ids().collect::<Vec<_>>(), vec![1]);
+}
+
+#[test]
+fn test_line_regex_scan_plan_schedules_one_of_ten_thousand_files() {
+    let files: Vec<String> = (0..10_000)
+        .map(|file_id| format!("src/file_{file_id}.rs"))
+        .collect();
+    let scope = ResolvedFileScope::resolve(&files, true, None, |path| {
+        path.ends_with("file_9999.rs")
+    });
+
+    let plan = LineRegexScanPlan::build(&scope, None);
+
+    assert_eq!(scope.len(), 1);
+    assert_eq!(plan.scope_files, 1);
+    assert_eq!(plan.scheduled_file_ids, vec![9_999]);
+    assert_eq!(line_regex_scan_worker_threads(plan.scheduled_file_ids.len()), 1);
+}
+
 // ─── passes_file_filters tests ──────────────────────────────────
 
 #[test]
@@ -449,7 +517,12 @@ fn test_score_normal_token_search_basic() {
 
     let params = make_params(&None, &[], &[], &[]);
     let terms = vec!["hello".to_string()];
-    let scores = score_normal_token_search(&terms, &index, &params);
+    let scores = score_normal_token_search(
+        &terms,
+        &index,
+        &params,
+        &resolve_grep_file_scope(&index, &params),
+    );
     assert_eq!(scores.len(), 2);
     assert!(scores.contains_key(&0));
     assert!(scores.contains_key(&1));
@@ -462,7 +535,12 @@ fn test_score_normal_token_search_no_match() {
     let index = ContentIndex::default();
     let params = make_params(&None, &[], &[], &[]);
     let terms = vec!["nonexistent".to_string()];
-    let scores = score_normal_token_search(&terms, &index, &params);
+    let scores = score_normal_token_search(
+        &terms,
+        &index,
+        &params,
+        &resolve_grep_file_scope(&index, &params),
+    );
     assert!(scores.is_empty());
 }
 
@@ -662,7 +740,10 @@ fn sample_line_regex_scan(
         read_duration: std::time::Duration::from_millis(read_ms),
         whole_file_precheck_duration: std::time::Duration::from_millis(whole_file_precheck_ms),
         line_eval_duration: std::time::Duration::from_millis(line_eval_ms),
-        files_visited: 60_000,
+        files_considered: 60_000,
+        scope_files: 60_000,
+        scheduled_files: 100,
+        files_visited: 100,
         files_skipped_by_prefilter: 59_900,
         files_read: 100,
         ..LineRegexScanTelemetry::default()
@@ -685,6 +766,18 @@ fn test_line_regex_scan_summary_separates_wall_scaled_and_sum_timings() {
     assert_eq!(summary["wholeFilePrecheckSumMs"], json!(40));
     assert_eq!(summary["lineEvalMs"], json!(40));
     assert_eq!(summary["lineEvalSumMs"], json!(80));
+    assert_eq!(summary["schemaVersion"], json!(2));
+    assert_eq!(summary["filesConsidered"], json!(60_000));
+    assert_eq!(summary["scopeFiles"], json!(60_000));
+    assert_eq!(summary["scheduledFiles"], json!(100));
+    assert_eq!(summary["filesVisited"], json!(100));
+    assert_eq!(
+        summary["filesConsidered"].as_u64(),
+        summary["filesSkippedByScope"].as_u64()
+            .zip(summary["filesSkippedByPrefilter"].as_u64())
+            .zip(summary["filesVisited"].as_u64())
+            .map(|((scope, prefilter), visited)| scope + prefilter + visited),
+    );
 }
 
 #[test]
@@ -704,39 +797,7 @@ fn test_line_regex_file_scan_single_file_match() {
         .crlf(true)
         .build()
         .unwrap()];
-    let empty_filters: Vec<String> = Vec::new();
-    let no_path: Option<String> = None;
-    let params = GrepSearchParams {
-        ext_filter: &empty_filters,
-        show_lines: false,
-        context_lines: 0,
-        max_results: 0,
-        mode_and: false,
-        count_only: false,
-        search_start: Instant::now(),
-        dir_filter: &no_path,
-        file_filter: &empty_filters,
-        exact_file_path: &no_path,
-        exact_file_path_canonical: &no_path,
-        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
-        exclude_lower: Vec::new(),
-        dir_auto_converted_note: None,
-        auto_balance: true,
-        max_occurrences_per_term: None,
-        lock_wait_ms: 0.0,
-        trigram_stale: false,
-        requested_mode: "substring",
-        files_only: false,
-        invert_cap: 0,
-    };
-
-    let output = scan_line_regex_file(
-        0,
-        &file_path_string,
-        None,
-        &compiled,
-        &params,
-    );
+    let output = scan_line_regex_file(&file_path_string, &compiled);
 
     assert_eq!(output.path.as_deref(), Some(file_path_string.as_str()));
     assert_eq!(output.counters.files_visited, 1);
@@ -837,6 +898,8 @@ fn test_line_regex_perf_hint_prefilter_used_uses_measured_file_read_phase() {
     ).unwrap();
     assert!(hint.contains("literal-trigram prefilter narrowed"),
         "prefilter-on hint should acknowledge the prefilter ran; got: {}", hint);
+    assert!(hint.contains("100 candidate files"),
+        "schema v2 hint should report scheduled files; got: {}", hint);
     assert!(hint.contains("file reads dominate"),
         "hint should report the measured file-read bottleneck; got: {}", hint);
     assert!(!hint.contains("per-line regex evaluation is the dominant phase"),
