@@ -878,7 +878,11 @@ fn parse_procedure_or_function(
     });
 
     // Extract call sites from SP/function body
-    let calls = extract_call_sites_from_body(batch_text, batch, &name);
+    let calls = extract_call_sites_from_body(
+        batch_text,
+        batch,
+        defs[def_idx].parent.as_deref(),
+    );
     if !calls.is_empty() {
         call_sites.push((def_idx, calls));
     }
@@ -1166,29 +1170,42 @@ fn parse_index(
 fn extract_call_sites_from_body(
     body_text: &str,
     batch: &Batch,
-    _current_name: &str,
+    current_parent: Option<&str>,
 ) -> Vec<CallSite> {
     let mut calls: Vec<CallSite> = Vec::new();
-    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let mut seen: HashSet<(CallSiteKind, String, String)> = HashSet::new();
+    let mut anchored_call_target_starts = HashSet::new();
 
     // Temporary table/variable names to skip
     let skip_names: HashSet<&str> = ["#", "@", "INSERTED", "DELETED", "sys", "INFORMATION_SCHEMA"]
         .iter().copied().collect();
 
-    let all_regexes: Vec<&Regex> = vec![&EXEC_RE, &FROM_RE, &JOIN_RE, &INSERT_RE, &UPDATE_RE, &DELETE_RE];
+    let call_patterns = [
+        (&*EXEC_RE, CallSiteKind::SqlExecute),
+        (&*FROM_RE, CallSiteKind::SqlRelation),
+        (&*JOIN_RE, CallSiteKind::SqlRelation),
+        (&*INSERT_RE, CallSiteKind::SqlRelation),
+        (&*UPDATE_RE, CallSiteKind::SqlRelation),
+        (&*DELETE_RE, CallSiteKind::SqlRelation),
+    ];
     let masked_body = mask_sql_comments_and_literals_preserve_offsets(body_text);
     let anchor_body = mask_sql_delimited_identifiers_preserve_offsets(&masked_body);
-    let mut anchors: Vec<_> = all_regexes
+    let mut anchors: Vec<_> = call_patterns
         .iter()
-        .flat_map(|regex| regex.find_iter(&anchor_body).map(|anchor| (anchor.start(), anchor.end())))
+        .flat_map(|(regex, call_kind)| {
+            regex.find_iter(&anchor_body).map(move |anchor| {
+                (anchor.start(), anchor.end(), *call_kind)
+            })
+        })
         .collect();
-    anchors.sort_unstable();
+    anchors.sort_unstable_by_key(|(start, _, _)| *start);
 
-    for (anchor_start, anchor_end) in anchors {
+    for (anchor_start, anchor_end, call_kind) in anchors {
         let identifier = match scan_sql_multipart_identifier(&masked_body, anchor_end) {
             Some(identifier) => identifier,
             None => continue,
         };
+        anchored_call_target_starts.insert(identifier.start);
         let (receiver_type, method_name) = sql_identifier_parts(&identifier);
 
         if method_name.is_empty() { continue; }
@@ -1206,6 +1223,7 @@ fn extract_call_sites_from_body(
         }
 
         let key = (
+            call_kind,
             receiver_type.clone().unwrap_or_default().to_lowercase(),
             method_name.to_lowercase(),
         );
@@ -1218,6 +1236,7 @@ fn extract_call_sites_from_body(
                 method_name,
                 receiver_type,
                 line: (batch.start_line_offset + line_offset + 1) as u32,
+                call_kind,
                 receiver_is_generic: false,
             });
         }
@@ -1233,9 +1252,10 @@ fn extract_call_sites_from_body(
         .collect();
 
     for identifier in scan_sql_function_call_candidates(&masked_body) {
-        if declaration_ranges
-            .iter()
-            .any(|range| range.contains(&identifier.start))
+        if anchored_call_target_starts.contains(&identifier.start)
+            || declaration_ranges
+                .iter()
+                .any(|range| range.contains(&identifier.start))
         {
             continue;
         }
@@ -1245,20 +1265,31 @@ fn extract_call_sites_from_body(
             Some(schema) => schema,
             None => continue,
         };
-        if skip_names.contains(schema.as_str()) || skip_names.contains(method_name.as_str()) {
-            continue;
-        }
-        let method_name_lower = method_name.to_ascii_lowercase();
-        // Until typed scalar call sites land (D12), keep this conservative: broad
-        // schema.name(...) matching would misclassify XML/spatial member calls.
-        let has_explicit_function_name = identifier.last_segment_delimited
-            || method_name_lower.starts_with("fn_")
-            || method_name_lower.starts_with("ufn_");
-        if !has_explicit_function_name {
+        if schema.starts_with('@')
+            || schema.starts_with('#')
+            || skip_names.contains(schema.as_str())
+            || skip_names.contains(method_name.as_str())
+        {
             continue;
         }
 
-        let key = (schema.to_lowercase(), method_name.to_lowercase());
+        let method_name_lower = method_name.to_ascii_lowercase();
+        let explicitly_function_shaped = identifier.last_segment_delimited
+            || method_name_lower.starts_with("fn_")
+            || method_name_lower.starts_with("ufn_");
+        let is_same_schema = current_parent
+            .is_some_and(|parent| parent.eq_ignore_ascii_case(&schema));
+        // Unquoted two-part calls overlap with XML/spatial member syntax. Same-schema
+        // resolution is safe; cross-schema calls need quoting or a function prefix.
+        if !explicitly_function_shaped && !is_same_schema {
+            continue;
+        }
+
+        let key = (
+            CallSiteKind::SqlScalarFunction,
+            schema.to_lowercase(),
+            method_name.to_lowercase(),
+        );
         if seen.insert(key) {
             let line_offset = masked_body[..identifier.start]
                 .bytes()
@@ -1268,6 +1299,7 @@ fn extract_call_sites_from_body(
                 method_name,
                 receiver_type: Some(schema),
                 line: (batch.start_line_offset + line_offset + 1) as u32,
+                call_kind: CallSiteKind::SqlScalarFunction,
                 receiver_is_generic: false,
             });
         }

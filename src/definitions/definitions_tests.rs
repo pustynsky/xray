@@ -457,8 +457,8 @@ fn test_compact_remaps_method_calls_and_code_stats() {
         path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("file0.cs"), 0); m.insert(PathBuf::from("file1.cs"), 1); m },
         method_calls: {
             let mut m = HashMap::new();
-            m.insert(0, vec![CallSite { method_name: "Helper".to_string(), receiver_type: None, line: 3, receiver_is_generic: false }]);
-            m.insert(1, vec![CallSite { method_name: "DoWork".to_string(), receiver_type: Some("IService".to_string()), line: 5, receiver_is_generic: false }]);
+            m.insert(0, vec![CallSite { method_name: "Helper".to_string(), receiver_type: None, line: 3, call_kind: Default::default(), receiver_is_generic: false }]);
+            m.insert(1, vec![CallSite { method_name: "DoWork".to_string(), receiver_type: Some("IService".to_string()), line: 5, call_kind: Default::default(), receiver_is_generic: false }]);
             m
         },
         code_stats: {
@@ -767,8 +767,8 @@ fn test_index_file_defs_maps_call_sites() {
 
     let calls = vec![
         (0, vec![
-            CallSite { method_name: "DoWork".to_string(), receiver_type: Some("IService".to_string()), line: 3, receiver_is_generic: false },
-            CallSite { method_name: "Log".to_string(), receiver_type: None, line: 5, receiver_is_generic: false },
+            CallSite { method_name: "DoWork".to_string(), receiver_type: Some("IService".to_string()), line: 3, call_kind: Default::default(), receiver_is_generic: false },
+            CallSite { method_name: "Log".to_string(), receiver_type: None, line: 5, call_kind: Default::default(), receiver_is_generic: false },
         ]),
     ];
 
@@ -910,7 +910,7 @@ fn test_index_file_defs_skips_empty_call_site_vecs() {
     // MethodA has empty call vec, MethodB has one call
     let calls = vec![
         (0, vec![]), // empty — should NOT be inserted
-        (1, vec![CallSite { method_name: "DoWork".to_string(), receiver_type: None, line: 15, receiver_is_generic: false }]),
+        (1, vec![CallSite { method_name: "DoWork".to_string(), receiver_type: None, line: 15, call_kind: Default::default(), receiver_is_generic: false }]),
     ];
 
     let call_sites_added = index_file_defs(&mut index, 0, defs, calls, vec![]);
@@ -1304,6 +1304,7 @@ fn test_apply_parsed_result_with_call_sites_and_code_stats() {
                 method_name: "DoWork".to_string(),
                 receiver_type: Some("IWorker".to_string()),
                 line: 10,
+                call_kind: Default::default(),
                 receiver_is_generic: false,
             }]),
         ],

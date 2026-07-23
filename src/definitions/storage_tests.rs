@@ -213,7 +213,7 @@ fn test_def_index_format_version_mismatch_returns_err() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_string_lossy().to_string();
     let mut idx = crate::definitions::DefinitionIndex::default();
-    idx.format_version = 999; // wrong version
+    idx.format_version = crate::definitions::DEFINITION_INDEX_VERSION - 1;
     idx.root = root.clone();
     idx.extensions = vec!["rs".to_string()];
 

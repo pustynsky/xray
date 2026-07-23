@@ -208,7 +208,8 @@ fn make_ts_ctx_with_defs() -> HandlerContext {
         method_name: "getUser".to_string(),
         receiver_type: Some("UserService".to_string()),
         line: 20,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             }]);
 
     let def_index = DefinitionIndex {
@@ -982,7 +983,8 @@ fn test_ts_xray_callers_inject_support() {
         method_name: "getUser".to_string(),
         receiver_type: Some("UserService".to_string()),
         line: 12,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             }]);
 
     let def_index = DefinitionIndex {
@@ -1228,13 +1230,15 @@ fn test_mixed_cs_ts_callers_ext_filter() {
         method_name: "getUser".to_string(),
         receiver_type: Some("CsService".to_string()),
         line: 5,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             }]);
     method_calls.insert(3, vec![CallSite {
         method_name: "getUser".to_string(),
         receiver_type: Some("CsService".to_string()),
         line: 10,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             }]);
 
     let def_index = DefinitionIndex {
@@ -1724,12 +1728,14 @@ fn test_ts_direction_down_with_typed_local_variable() {
             method_name: "getProcessor".to_string(),
             receiver_type: Some("Orchestrator".to_string()),
             line: 9,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
         CallSite {
             method_name: "transform".to_string(),
             receiver_type: Some("DataProcessor".to_string()),
             line: 10,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);

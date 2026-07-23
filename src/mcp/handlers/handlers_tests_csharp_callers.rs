@@ -165,7 +165,8 @@ fn test_xray_callers_field_prefix_m_underscore() {
         method_name: "SubmitAsync".to_string(),
         receiver_type: Some("OrderProcessor".to_string()),
         line: 30,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             }]);
 
     let def_index = DefinitionIndex {
@@ -269,7 +270,8 @@ fn test_xray_callers_field_prefix_underscore() {
         method_name: "GetUserAsync".to_string(),
         receiver_type: Some("UserService".to_string()),
         line: 15,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             }]);
 
     let def_index = DefinitionIndex {
@@ -397,7 +399,8 @@ fn test_resolve_call_site_with_class_scope() {
         method_name: "Execute".to_string(),
         receiver_type: Some("ServiceA".to_string()),
         line: 5,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             };
     let resolved_a = resolve_call_site(&call_a, &def_index, None);
     assert_eq!(resolved_a.len(), 1);
@@ -407,7 +410,8 @@ fn test_resolve_call_site_with_class_scope() {
         method_name: "Execute".to_string(),
         receiver_type: Some("ServiceB".to_string()),
         line: 10,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             };
     let resolved_b = resolve_call_site(&call_b, &def_index, None);
     assert_eq!(resolved_b.len(), 1);
@@ -417,7 +421,8 @@ fn test_resolve_call_site_with_class_scope() {
         method_name: "Execute".to_string(),
         receiver_type: None,
         line: 15,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             };
     let resolved_none = resolve_call_site(&call_no_recv, &def_index, None);
     assert!(resolved_none.is_empty());
@@ -426,7 +431,8 @@ fn test_resolve_call_site_with_class_scope() {
         method_name: "Execute".to_string(),
         receiver_type: Some("IService".to_string()),
         line: 20,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             };
     let resolved_iface = resolve_call_site(&call_iface, &def_index, None);
     assert!(!resolved_iface.is_empty());
@@ -459,8 +465,8 @@ fn test_xray_callers_down_class_filter() {
     }
 
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
-    method_calls.insert(1, vec![CallSite { method_name: "ShouldIssueVectorSearch".to_string(), receiver_type: None, line: 780, receiver_is_generic: false }]);
-    method_calls.insert(4, vec![CallSite { method_name: "TraceInformation".to_string(), receiver_type: None, line: 333, receiver_is_generic: false }]);
+    method_calls.insert(1, vec![CallSite { method_name: "ShouldIssueVectorSearch".to_string(), receiver_type: None, line: 780, call_kind: Default::default(), receiver_is_generic: false }]);
+    method_calls.insert(4, vec![CallSite { method_name: "TraceInformation".to_string(), receiver_type: None, line: 333, call_kind: Default::default(), receiver_is_generic: false }]);
 
     let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
     path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\IndexSearchService.cs")), 0);
@@ -1662,13 +1668,15 @@ fn test_xray_callers_cycle_detection_down() {
         method_name: "MethodB".to_string(),
         receiver_type: Some("ClassB".to_string()),
         line: 20,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             }]);
     method_calls.insert(3, vec![CallSite {
         method_name: "MethodA".to_string(),
         receiver_type: Some("ClassA".to_string()),
         line: 20,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             }]);
 
     let def_index = DefinitionIndex {
@@ -1811,14 +1819,16 @@ fn test_xray_callers_cycle_detection() {
         method_name: "MethodA".to_string(),
         receiver_type: Some("ServiceA".to_string()),
         line: 20,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             }]);
     // MethodA (di=1) calls MethodB at line 20
     method_calls.insert(1, vec![CallSite {
         method_name: "MethodB".to_string(),
         receiver_type: Some("ServiceB".to_string()),
         line: 20,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             }]);
 
     let def_index = DefinitionIndex {
@@ -1963,14 +1973,16 @@ fn test_xray_callers_ext_filter_comma_split() {
         method_name: "ProcessData".to_string(),
         receiver_type: Some("DataService".to_string()),
         line: 15,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             }]);
     // RunScript (di=5) calls ProcessData at line 10
     method_calls.insert(5, vec![CallSite {
         method_name: "ProcessData".to_string(),
         receiver_type: Some("DataService".to_string()),
         line: 10,
-                receiver_is_generic: false,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
             }]);
 
     let def_index = DefinitionIndex {
@@ -2116,12 +2128,14 @@ fn test_xray_callers_overloads_not_collapsed_up() {
         method_name: "Validate".to_string(),
         receiver_type: Some("Validator".to_string()),
         line: 25,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     }]);
     method_calls.insert(4, vec![CallSite {
         method_name: "Validate".to_string(),
         receiver_type: Some("Validator".to_string()),
         line: 45,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     }]);
 
@@ -2224,12 +2238,14 @@ fn test_xray_callers_overloads_not_collapsed_down() {
             method_name: "Execute".to_string(),
             receiver_type: Some("Executor".to_string()),
             line: 15,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
         CallSite {
             method_name: "Execute".to_string(),
             receiver_type: Some("Executor".to_string()),
             line: 20,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -2447,6 +2463,7 @@ fn test_xray_callers_same_name_different_receiver_interface_resolution() {
         method_name: "Execute".to_string(),
         receiver_type: Some("IServiceB".to_string()),
         line: 20,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     }]);
 
@@ -2662,6 +2679,7 @@ fn make_callers_body_ctx() -> (HandlerContext, std::path::PathBuf) {
         method_name: "SubmitOrder".to_string(),
         receiver_type: Some("OrderService".to_string()),
         line: 7,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     }]);
 
@@ -2878,6 +2896,7 @@ fn test_xray_callers_include_body_nonexistent_file() {
         method_name: "DoWork".to_string(),
         receiver_type: Some("Worker".to_string()),
         line: 15,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     }]);
 

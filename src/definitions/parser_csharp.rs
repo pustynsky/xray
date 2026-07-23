@@ -616,7 +616,7 @@ fn extract_invocation(
     match expr.kind() {
         "identifier" => {
             let method_name = node_text(expr, source).to_string();
-            Some(CallSite { method_name, receiver_type: None, line, receiver_is_generic: false })
+            Some(CallSite { method_name, receiver_type: None, line, call_kind: Default::default(), receiver_is_generic: false })
         }
         "member_access_expression" => {
             extract_member_access_call(expr, source, class_name, field_types, base_types, line)
@@ -629,7 +629,7 @@ fn extract_invocation(
                 .or_else(|| expr.child(0));
             let method_name = name_node.map(|n| node_text(n, source)).unwrap_or("");
             if !method_name.is_empty() {
-                Some(CallSite { method_name: method_name.to_string(), receiver_type: None, line, receiver_is_generic: false })
+                Some(CallSite { method_name: method_name.to_string(), receiver_type: None, line, call_kind: Default::default(), receiver_is_generic: false })
             } else {
                 None
             }
@@ -653,7 +653,7 @@ fn extract_member_access_call(
         .or_else(|| node.child(0))?;
     let receiver_type = resolve_receiver_type(receiver_node, source, class_name, field_types, base_types);
 
-    Some(CallSite { method_name, receiver_type, line, receiver_is_generic: false })
+    Some(CallSite { method_name, receiver_type, line, call_kind: Default::default(), receiver_is_generic: false })
 }
 
 fn extract_conditional_access_call(
@@ -682,7 +682,7 @@ fn extract_conditional_access_call(
 
     let receiver_type = resolve_receiver_type(receiver_node, source, class_name, field_types, base_types);
 
-    Some(CallSite { method_name, receiver_type, line, receiver_is_generic: false })
+    Some(CallSite { method_name, receiver_type, line, call_kind: Default::default(), receiver_is_generic: false })
 }
 
 /// Extract the method name from a name node, handling `generic_name` by stripping
@@ -718,6 +718,7 @@ fn extract_object_creation(
         method_name: type_name.to_string(),
         receiver_type: Some(type_name.to_string()),
         line: node.start_position().row as u32 + 1,
+        call_kind: Default::default(),
         receiver_is_generic: is_generic,
     })
 }

@@ -686,7 +686,7 @@ fn extract_rust_call(
         // Simple function call: my_function(args)
         "identifier" => {
             let method_name = node_text(func, source).to_string();
-            Some(CallSite { method_name, receiver_type: None, line, receiver_is_generic: false })
+            Some(CallSite { method_name, receiver_type: None, line, call_kind: Default::default(), receiver_is_generic: false })
         }
         // Method call: receiver.method(args) — tree-sitter-rust uses field_expression
         "field_expression" => {
@@ -703,7 +703,7 @@ fn extract_rust_call(
             match inner_func.kind() {
                 "identifier" => {
                     let method_name = node_text(inner_func, source).to_string();
-                    Some(CallSite { method_name, receiver_type: None, line, receiver_is_generic: false })
+                    Some(CallSite { method_name, receiver_type: None, line, call_kind: Default::default(), receiver_is_generic: false })
                 }
                 "scoped_identifier" => {
                     extract_rust_scoped_call(inner_func, source, line)
@@ -736,7 +736,7 @@ fn extract_rust_field_expression_call(
     let method_name = node_text(field_node, source).to_string();
     let receiver_type = resolve_rust_receiver(value_node, source, parent_name, field_types);
 
-    Some(CallSite { method_name, receiver_type, line, receiver_is_generic: false })
+    Some(CallSite { method_name, receiver_type, line, call_kind: Default::default(), receiver_is_generic: false })
 }
 
 fn extract_rust_scoped_call(
@@ -760,7 +760,7 @@ fn extract_rust_scoped_call(
         None
     };
 
-    Some(CallSite { method_name, receiver_type, line, receiver_is_generic: false })
+    Some(CallSite { method_name, receiver_type, line, call_kind: Default::default(), receiver_is_generic: false })
 }
 
 fn resolve_rust_receiver(
