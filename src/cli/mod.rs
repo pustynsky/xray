@@ -22,6 +22,9 @@ use crate::{
     SearchError, DEFAULT_MIN_TOKEN_LEN,
 };
 use crate::definitions;
+use crate::mcp::handlers::token_regex::{
+    expand_regex_terms_preserving_duplicates as expand_shared_regex_terms,
+};
 
 // ─── CLI ─────────────────────────────────────────────────────────────
 
@@ -682,19 +685,19 @@ fn expand_regex_terms(
     raw_terms: &[String],
     index_keys: &HashMap<String, Vec<crate::Posting>>,
 ) -> Result<Vec<String>, SearchError> {
-    let mut expanded = Vec::new();
-    for pat in raw_terms {
-        match Regex::new(&format!("(?i)^{}$", pat)) {
-            Ok(re) => {
-                let matching: Vec<String> = index_keys.keys().filter(|k| re.is_match(k)).cloned().collect();
-                if matching.is_empty() { eprintln!("Warning: regex '{}' matched 0 tokens", pat); }
-                else { eprintln!("Regex '{}' matched {} tokens", pat, matching.len()); }
-                expanded.extend(matching);
-            }
-            Err(e) => return Err(SearchError::InvalidRegex { pattern: pat.clone(), source: e }),
+    let expansion = expand_shared_regex_terms(raw_terms, index_keys)
+        .map_err(|error| SearchError::InvalidRegex {
+            pattern: error.pattern,
+            source: error.source,
+        })?;
+    for (pattern, match_count) in raw_terms.iter().zip(&expansion.pattern_match_counts) {
+        if *match_count == 0 {
+            eprintln!("Warning: regex '{}' matched 0 tokens", pattern);
+        } else {
+            eprintln!("Regex '{}' matched {} tokens", pattern, match_count);
         }
     }
-    Ok(expanded)
+    Ok(expansion.expanded_tokens)
 }
 
 /// Expand raw comma-separated search terms based on search mode (substring/regex/exact).

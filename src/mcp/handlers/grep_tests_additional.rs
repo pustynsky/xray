@@ -335,7 +335,7 @@ fn test_score_normal_token_search_with_ext_filter() {
         ..make_params_default()
     };
     let terms = vec!["hello".to_string()];
-    let scores = score_normal_token_search(
+    let (scores, _) = score_normal_token_search(
         &terms,
         &index,
         &params,
@@ -818,7 +818,7 @@ fn test_tfidf_zero_file_token_count_no_division_by_zero() {
         ..make_params_default()
     };
     // Should not panic or produce NaN — the guard converts 0 to 1.0
-    let results = score_normal_token_search(
+    let (results, _) = score_normal_token_search(
         &["hello".to_string()],
         &index,
         &params,
@@ -915,6 +915,144 @@ fn make_grep_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&str>, 
     HandlerContextBuilder::new()
         .with_content_index(content_index)
         .build()
+}
+
+#[test]
+fn test_token_regex_count_only_broad_pattern_has_bounded_query_metadata() {
+    const TOKEN_COUNT: usize = 20_000;
+    let tokens: Vec<String> = (0..TOKEN_COUNT)
+        .map(|token_id| format!("token_{token_id:05}"))
+        .collect();
+    let postings = tokens.iter()
+        .map(|token| (token.as_str(), 0, vec![1]))
+        .collect();
+    let ctx = make_grep_ctx(postings, vec!["C:/test/target.rs"], vec!["rs"]);
+
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": [".*"],
+        "regex": true,
+        "countOnly": true,
+        "maxResults": 3,
+    }));
+
+    assert!(!result.is_error, "broad token regex failed: {}", result.content[0].text);
+    let response_text = &result.content[0].text;
+    assert!(response_text.len() < super::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        "countOnly token-regex response must stay bounded, got {} bytes",
+        response_text.len());
+    let output: Value = serde_json::from_str(response_text).unwrap();
+    let summary = &output["summary"];
+    let expansion = &summary["regexExpansion"];
+    assert_eq!(summary["termsSearched"], json!([".*"]));
+    assert_eq!(expansion["patterns"], json!(1));
+    assert_eq!(expansion["tokensExamined"], json!(TOKEN_COUNT));
+    assert_eq!(expansion["matchedTokenCount"], json!(TOKEN_COUNT));
+    assert_eq!(expansion["postingListsVisited"], json!(TOKEN_COUNT));
+    assert_eq!(expansion["postingsChecked"], json!(TOKEN_COUNT));
+    assert_eq!(expansion["postingsInScope"], json!(TOKEN_COUNT));
+    assert!(expansion.get("matchedTokenPreview").is_none());
+    assert!(expansion.get("previewTruncated").is_none());
+}
+
+#[test]
+fn test_token_regex_preview_is_capped_and_independent_of_max_results() {
+    const TOKEN_COUNT: usize = 25;
+    let tokens: Vec<String> = (0..TOKEN_COUNT)
+        .map(|token_id| format!("token_{token_id:02}"))
+        .collect();
+    let postings = tokens.iter().enumerate()
+        .map(|(token_id, token)| (token.as_str(), (token_id % 2) as u32, vec![1]))
+        .collect();
+    let ctx = make_grep_ctx(
+        postings,
+        vec!["C:/test/A.rs", "C:/test/B.rs"],
+        vec!["rs"],
+    );
+    let run = |max_results: usize| -> Value {
+        let result = handle_xray_grep(&ctx, &json!({
+            "terms": ["ToKeN_.*"],
+            "regex": true,
+            "maxResults": max_results,
+        }));
+        assert!(!result.is_error, "token regex failed: {}", result.content[0].text);
+        serde_json::from_str(&result.content[0].text).unwrap()
+    };
+
+    let unlimited = run(0);
+    let capped = run(1);
+    assert_eq!(unlimited["files"].as_array().unwrap().len(), 2);
+    assert_eq!(capped["files"].as_array().unwrap().len(), 1);
+    assert_eq!(unlimited["summary"]["termsSearched"], json!(["ToKeN_.*"]));
+    assert_eq!(
+        unlimited["summary"]["regexExpansion"],
+        capped["summary"]["regexExpansion"],
+    );
+    let expansion = &unlimited["summary"]["regexExpansion"];
+    let preview = expansion["matchedTokenPreview"].as_array().unwrap();
+    assert_eq!(expansion["matchedTokenCount"], json!(TOKEN_COUNT));
+    assert_eq!(preview.len(), TOKEN_REGEX_PREVIEW_MAX);
+    assert_eq!(expansion["previewTruncated"], json!(5));
+    assert_eq!(preview.first(), Some(&json!("token_00")));
+    assert_eq!(preview.last(), Some(&json!("token_19")));
+}
+
+#[test]
+fn test_token_regex_posting_counters_distinguish_global_and_scoped_work() {
+    let ctx = make_grep_ctx(
+        vec![
+            ("tokenone", 0, vec![1]),
+            ("tokenone", 1, vec![1]),
+            ("tokentwo", 1, vec![2]),
+        ],
+        vec!["C:/test/A.rs", "C:/test/B.rs"],
+        vec!["rs"],
+    );
+
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["token.*"],
+        "regex": true,
+        "countOnly": true,
+        "file": ["A.rs"],
+    }));
+
+    assert!(!result.is_error, "scoped token regex failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let expansion = &output["summary"]["regexExpansion"];
+    assert_eq!(expansion["postingListsVisited"], json!(2));
+    assert_eq!(expansion["postingsChecked"], json!(3));
+    assert_eq!(expansion["postingsInScope"], json!(1));
+    assert_eq!(output["summary"]["totalFiles"], json!(1));
+}
+
+#[test]
+fn test_token_regex_and_preserves_expanded_token_count_semantics() {
+    let ctx = make_grep_ctx(
+        vec![
+            ("alphaone", 0, vec![1]),
+            ("alphatwo", 0, vec![2]),
+            ("alphabeta", 1, vec![1]),
+            ("alphaone", 2, vec![1]),
+            ("onlybeta", 2, vec![2]),
+        ],
+        vec!["C:/test/A.rs", "C:/test/B.rs", "C:/test/C.rs"],
+        vec!["rs"],
+    );
+
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["alpha.*", ".*beta"],
+        "regex": true,
+        "mode": "and",
+        "filesOnly": true,
+    }));
+
+    assert!(!result.is_error, "token regex AND failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let paths: HashSet<&str> = output["files"].as_array().unwrap().iter()
+        .filter_map(|file| file["path"].as_str())
+        .collect();
+    assert_eq!(paths, HashSet::from(["C:/test/A.rs", "C:/test/C.rs"]));
+    assert!(!paths.contains("C:/test/B.rs"),
+        "one token matching both patterns is deduplicated and counts once");
 }
 
 #[test]
