@@ -185,6 +185,15 @@ pub struct CodeStats {
 }
 
 /// A call site found in a method/constructor body via AST analysis.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CallSiteKind {
+    #[default]
+    Unknown,
+    SqlExecute,
+    SqlRelation,
+    SqlScalarFunction,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CallSite {
     /// Name of the method being called, e.g., "GetUser"
@@ -194,6 +203,9 @@ pub struct CallSite {
     pub receiver_type: Option<String>,
     /// Line number where the call occurs (1-based)
     pub line: u32,
+    /// Parser-known invocation category used to constrain target resolution.
+    #[serde(default)]
+    pub call_kind: CallSiteKind,
     /// Whether the receiver type at the call site had generic parameters,
     /// e.g., `new List<int>()` → true, `new List()` → false.
     /// Used to filter out name collisions with non-generic classes.
@@ -220,7 +232,7 @@ pub struct CallSite {
 
 /// Format version for DefinitionIndex. Bump when changing the struct layout.
 /// Loading an index with a different version triggers a rebuild.
-pub const DEFINITION_INDEX_VERSION: u32 = 5;
+pub const DEFINITION_INDEX_VERSION: u32 = 6;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(Default)]

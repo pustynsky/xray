@@ -463,6 +463,10 @@ END
     let validate = calls.iter().find(|c| c.method_name == "usp_ValidateOrder").unwrap();
     assert_eq!(validate.receiver_type.as_deref(), Some("Sales"),
         "EXEC receiver_type should be schema 'Sales'");
+    assert!(
+        calls.iter().all(|call| call.call_kind == CallSiteKind::SqlExecute),
+        "EXEC calls must be typed as SQL execute: {calls:#?}"
+    );
 }
 
 #[test]
@@ -868,6 +872,45 @@ END
 
 
 #[test]
+fn test_sql_scalar_function_call_without_naming_prefix_is_emitted() {
+    let source = r#"
+CREATE FUNCTION [dbo].[ComputeTotal](@Id INT)
+RETURNS INT
+AS
+BEGIN
+    RETURN @Id + 1
+END
+GO
+CREATE PROCEDURE [dbo].[BuildReport]
+AS
+BEGIN
+    SELECT dbo.ComputeTotal(1)
+END
+"#;
+
+    let (defs, call_sites, _) = parse_sql_definitions(source, 0);
+    let caller_index = defs
+        .iter()
+        .position(|definition| definition.name == "BuildReport")
+        .expect("BuildReport definition");
+    let calls = call_sites
+        .iter()
+        .find(|(definition_index, _)| *definition_index == caller_index)
+        .map(|(_, calls)| calls)
+        .expect("BuildReport call sites");
+
+    let call = calls
+        .iter()
+        .find(|call| {
+            call.method_name == "ComputeTotal"
+                && call.receiver_type.as_deref() == Some("dbo")
+        })
+        .unwrap_or_else(|| panic!("ordinary schema-qualified UDF call missing: {calls:#?}"));
+    assert_eq!(call.call_kind, CallSiteKind::SqlScalarFunction);
+}
+
+
+#[test]
 fn test_sql_scalar_function_calls_ignore_non_code_and_keep_real_recursion() {
     let source = r#"
 CREATE FUNCTION [dbo].[ufn_Recurse](@Id INT)
@@ -923,6 +966,10 @@ END
         "Expected JOIN call to Customers, got: {:?}", call_names);
     assert!(call_names.contains(&"Warehouses"),
         "Expected JOIN call to Warehouses, got: {:?}", call_names);
+    assert!(
+        calls.iter().all(|call| call.call_kind == CallSiteKind::SqlRelation),
+        "FROM/JOIN calls must be typed as SQL relations: {calls:#?}"
+    );
 }
 
 // ─── Test 12: Call sites — INSERT INTO / UPDATE ────────────────────

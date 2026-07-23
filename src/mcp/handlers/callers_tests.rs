@@ -1,5 +1,7 @@
 use super::*;
-use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionKind};
+use crate::definitions::{
+    CallSite, CallSiteKind, DefinitionEntry, DefinitionIndex, DefinitionKind,
+};
 use std::collections::HashMap;
 
 
@@ -93,6 +95,7 @@ fn test_verify_call_site_target_direct_match() {
             method_name: "validate".to_string(),
             receiver_type: Some("OrderValidator".to_string()),
             line: 25,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -122,6 +125,7 @@ fn test_verify_call_site_target_different_receiver() {
             method_name: "resolve".to_string(),
             receiver_type: Some("Path".to_string()),
             line: 25,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -150,6 +154,7 @@ fn test_verify_call_site_target_no_receiver_same_class() {
             method_name: "validate".to_string(),
             receiver_type: None,
             line: 55,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -179,6 +184,7 @@ fn test_verify_call_site_target_no_receiver_different_class() {
             method_name: "validate".to_string(),
             receiver_type: None,
             line: 25,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -204,6 +210,7 @@ fn test_verify_call_site_target_no_target_class() {
             method_name: "validate".to_string(),
             receiver_type: Some("SomeRandomClass".to_string()),
             line: 25,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -252,6 +259,7 @@ fn test_verify_call_site_target_interface_match() {
             method_name: "validate".to_string(),
             receiver_type: Some("IOrderValidator".to_string()),
             line: 25,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -280,6 +288,7 @@ fn test_verify_call_site_target_comment_line_not_real_call() {
             method_name: "endsWith".to_string(),
             receiver_type: Some("String".to_string()),
             line: 10,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -375,6 +384,7 @@ fn test_prefilter_does_not_expand_by_base_types() {
             method_name: "Dispose".to_string(),
             receiver_type: Some("ResourceManager".to_string()),
             line: 15,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -527,6 +537,7 @@ fn test_resolve_call_site_scopes_by_caller_parent() {
         method_name: "doWork".to_string(),
         receiver_type: None,
         line: 10,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     };
 
@@ -566,11 +577,11 @@ fn test_callee_tree_depth2_no_cross_class_pollution() {
 
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
     method_calls.insert(1, vec![
-        CallSite { method_name: "run".to_string(), receiver_type: Some("Helper".to_string()), line: 10, receiver_is_generic: false },
-        CallSite { method_name: "internalWork".to_string(), receiver_type: None, line: 15, receiver_is_generic: false },
+        CallSite { method_name: "run".to_string(), receiver_type: Some("Helper".to_string()), line: 10, call_kind: Default::default(), receiver_is_generic: false },
+        CallSite { method_name: "internalWork".to_string(), receiver_type: None, line: 15, call_kind: Default::default(), receiver_is_generic: false },
     ]);
     method_calls.insert(4, vec![
-        CallSite { method_name: "helperStep".to_string(), receiver_type: None, line: 12, receiver_is_generic: false },
+        CallSite { method_name: "helperStep".to_string(), receiver_type: None, line: 12, call_kind: Default::default(), receiver_is_generic: false },
     ]);
 
     let def_idx = make_def_index(definitions, method_calls);
@@ -644,6 +655,7 @@ fn test_resolve_call_site_generic_arity_mismatch() {
         method_name: "DataList".to_string(),
         receiver_type: Some("DataList".to_string()),
         line: 252,
+        call_kind: Default::default(),
         receiver_is_generic: true, // <-- the key: call site had generics
     };
 
@@ -657,6 +669,7 @@ fn test_resolve_call_site_generic_arity_mismatch() {
         method_name: "DataList".to_string(),
         receiver_type: Some("DataList".to_string()),
         line: 300,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     };
 
@@ -690,6 +703,7 @@ fn test_builtin_promise_resolve_not_matched() {
             method_name: "resolve".to_string(),
             receiver_type: Some("Promise".to_string()),
             line: 10,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -701,6 +715,7 @@ fn test_builtin_promise_resolve_not_matched() {
         method_name: "resolve".to_string(),
         receiver_type: Some("Promise".to_string()),
         line: 10,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     };
 
@@ -729,6 +744,7 @@ fn test_builtin_array_map_not_matched() {
             method_name: "map".to_string(),
             receiver_type: Some("Array".to_string()),
             line: 10,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -739,6 +755,7 @@ fn test_builtin_array_map_not_matched() {
         method_name: "map".to_string(),
         receiver_type: Some("Array".to_string()),
         line: 10,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     };
 
@@ -766,6 +783,7 @@ fn test_non_builtin_type_still_matches() {
             method_name: "process".to_string(),
             receiver_type: Some("MyService".to_string()),
             line: 10,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -776,6 +794,7 @@ fn test_non_builtin_type_still_matches() {
         method_name: "process".to_string(),
         receiver_type: Some("MyService".to_string()),
         line: 10,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     };
 
@@ -872,6 +891,7 @@ fn test_verify_call_site_target_fuzzy_interface_match() {
             method_name: "getData".to_string(),
             receiver_type: Some("IDataModelService".to_string()),
             line: 25,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -903,6 +923,7 @@ fn test_fuzzy_di_no_false_positive() {
             method_name: "run".to_string(),
             receiver_type: Some("IService".to_string()),
             line: 25,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -938,6 +959,7 @@ fn test_verify_fuzzy_di_without_base_types() {
             method_name: "getData".to_string(),
             receiver_type: Some("IDataModelService".to_string()),
             line: 25,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -968,6 +990,7 @@ fn test_verify_reverse_fuzzy_di_without_base_types() {
             method_name: "getData".to_string(),
             receiver_type: Some("DataModelWebService".to_string()),
             line: 25,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -1022,6 +1045,7 @@ fn test_verify_call_site_target_extension_method() {
             method_name: "IsValidClrValue".to_string(),
             receiver_type: Some("TokenType".to_string()),
             line: 15,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -1054,6 +1078,7 @@ fn test_verify_call_site_target_extension_method_no_match_without_map() {
             method_name: "IsValidClrValue".to_string(),
             receiver_type: Some("TokenType".to_string()),
             line: 15,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -1088,6 +1113,7 @@ fn test_verify_call_site_target_generic_method_call() {
             method_name: "SearchAsync".to_string(),
             receiver_type: Some("ISearchService".to_string()),
             line: 20,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -1546,15 +1572,15 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
     // ClassB.Handle calls ClassA.Process at line 20
     method_calls.insert(3, vec![
-        CallSite { method_name: "Process".to_string(), receiver_type: Some("ClassA".to_string()), line: 20, receiver_is_generic: false },
+        CallSite { method_name: "Process".to_string(), receiver_type: Some("ClassA".to_string()), line: 20, call_kind: Default::default(), receiver_is_generic: false },
     ]);
     // ClassC.Run calls ClassB.Handle at line 15
     method_calls.insert(5, vec![
-        CallSite { method_name: "Handle".to_string(), receiver_type: Some("ClassB".to_string()), line: 15, receiver_is_generic: false },
+        CallSite { method_name: "Handle".to_string(), receiver_type: Some("ClassB".to_string()), line: 15, call_kind: Default::default(), receiver_is_generic: false },
     ]);
     // ClassE.Execute calls ClassD.Handle at line 15
     method_calls.insert(9, vec![
-        CallSite { method_name: "Handle".to_string(), receiver_type: Some("ClassD".to_string()), line: 15, receiver_is_generic: false },
+        CallSite { method_name: "Handle".to_string(), receiver_type: Some("ClassD".to_string()), line: 15, call_kind: Default::default(), receiver_is_generic: false },
     ]);
 
     // Build def index
@@ -1779,6 +1805,7 @@ fn test_xray_callers_no_hint_when_results_found() {
             method_name: "process".to_string(),
             receiver_type: Some("OrderService".to_string()),
             line: 10,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -1847,6 +1874,7 @@ fn test_resolve_call_site_via_base_types() {
         method_name: "getData".to_string(),
         receiver_type: Some("IDataModelService".to_string()),
         line: 5,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     };
 
@@ -1924,6 +1952,7 @@ fn test_resolve_call_site_sql_exec() {
         method_name: "usp_ValidateOrder".to_string(),
         receiver_type: Some("Sales".to_string()),
         line: 10,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     };
 
@@ -1937,7 +1966,7 @@ fn test_resolve_call_site_sql_exec() {
 
 #[test]
 fn test_resolve_call_site_sql_table_excluded() {
-    // SP calls FROM [dbo].[Orders] — Table kind is NOT in the resolve filter
+    // SP calls FROM [dbo].[Orders] — relation call sites never resolve to routines
     let definitions = vec![
         sp_def(0, "usp_GetOrders", Some("dbo"), 1, 30),    // idx 0
         table_def(1, "Orders", Some("dbo"), 1, 10),         // idx 1
@@ -1948,6 +1977,7 @@ fn test_resolve_call_site_sql_table_excluded() {
         method_name: "Orders".to_string(),
         receiver_type: Some("dbo".to_string()),
         line: 5,
+        call_kind: CallSiteKind::SqlRelation,
         receiver_is_generic: false,
     };
 
@@ -1993,9 +2023,9 @@ fn test_sql_callee_tree_exec_dependencies() {
 
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
     method_calls.insert(0, vec![
-        CallSite { method_name: "usp_ValidateOrder".to_string(), receiver_type: Some("Sales".to_string()), line: 10, receiver_is_generic: false },
-        CallSite { method_name: "usp_ReserveStock".to_string(), receiver_type: Some("dbo".to_string()), line: 20, receiver_is_generic: false },
-        CallSite { method_name: "Orders".to_string(), receiver_type: Some("dbo".to_string()), line: 15, receiver_is_generic: false },
+        CallSite { method_name: "usp_ValidateOrder".to_string(), receiver_type: Some("Sales".to_string()), line: 10, call_kind: Default::default(), receiver_is_generic: false },
+        CallSite { method_name: "usp_ReserveStock".to_string(), receiver_type: Some("dbo".to_string()), line: 20, call_kind: Default::default(), receiver_is_generic: false },
+        CallSite { method_name: "Orders".to_string(), receiver_type: Some("dbo".to_string()), line: 15, call_kind: Default::default(), receiver_is_generic: false },
     ]);
 
     // Build DefinitionIndex with proper .sql files
@@ -2091,6 +2121,7 @@ fn test_sql_caller_tree_who_calls_sp() {
             method_name: "usp_ValidateOrder".to_string(),
             receiver_type: Some("Sales".to_string()),
             line: 20,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -2500,6 +2531,19 @@ BEGIN
     SELECT [dbo].[Alter Function](1)
 END
 GO
+CREATE FUNCTION [dbo].[ComputeTotal](@Id INT)
+RETURNS INT
+AS
+BEGIN
+    RETURN @Id + 1
+END
+GO
+CREATE PROCEDURE [dbo].[Uses ComputeTotal]
+AS
+BEGIN
+    SELECT dbo.ComputeTotal(1)
+END
+GO
 CREATE PROCEDURE [dbo].[usp_WR_Leaf]
 AS
 BEGIN
@@ -2596,6 +2640,7 @@ END
         ("Shared Name", "ops", "Ops Caller"),
         ("Alter Target", "dbo", "Alter Caller"),
         ("Alter Function", "dbo", "Uses Alter Function"),
+        ("ComputeTotal", "dbo", "Uses ComputeTotal"),
     ] {
         let mut quoted_caller_builder = CallerTreeBuilder {
             ctx: &caller_ctx,
@@ -2625,6 +2670,7 @@ END
         ("Ops Caller", "ops", "Shared Name"),
         ("Alter Caller", "dbo", "Alter Target"),
         ("Uses Alter Function", "dbo", "Alter Function"),
+        ("Uses ComputeTotal", "dbo", "ComputeTotal"),
     ] {
         let mut quoted_callee_builder = CalleeTreeBuilder {
             ctx: &caller_ctx,
@@ -2729,24 +2775,44 @@ END
 
 #[test]
 fn test_resolve_call_site_sql_function() {
-    // SP calls a SQL function fn_CalculateTotal
     let definitions = vec![
-        sp_def(0, "usp_GetReport", Some("dbo"), 1, 30),           // idx 0
-        sqlfn_def(1, "fn_CalculateTotal", Some("dbo"), 1, 15),    // idx 1
+        sp_def(0, "ComputeTotal", Some("dbo"), 1, 10),
+        sqlfn_def(1, "ComputeTotal", Some("dbo"), 1, 15),
+        sqlfn_def(2, "ComputeTotal", Some("sales"), 1, 15),
     ];
     let def_idx = make_def_index(definitions, HashMap::new());
 
-    let call = CallSite {
-        method_name: "fn_CalculateTotal".to_string(),
+    let scalar_call = CallSite {
+        method_name: "ComputeTotal".to_string(),
         receiver_type: Some("dbo".to_string()),
         line: 10,
+        call_kind: CallSiteKind::SqlScalarFunction,
         receiver_is_generic: false,
     };
+    assert_eq!(
+        resolve_call_site(&scalar_call, &def_idx, Some("dbo")),
+        vec![1],
+        "scalar call must resolve only to the same-schema SQL function"
+    );
 
-    let resolved = resolve_call_site(&call, &def_idx, Some("dbo"));
-    assert_eq!(resolved.len(), 1, "Should resolve SQL function call");
-    assert_eq!(def_idx.definitions[resolved[0] as usize].name, "fn_CalculateTotal");
-    assert_eq!(def_idx.definitions[resolved[0] as usize].kind, DefinitionKind::SqlFunction);
+    let execute_call = CallSite {
+        call_kind: CallSiteKind::SqlExecute,
+        ..scalar_call.clone()
+    };
+    assert_eq!(
+        resolve_call_site(&execute_call, &def_idx, Some("dbo")),
+        vec![0],
+        "EXEC must resolve only to the stored procedure"
+    );
+
+    let relation_call = CallSite {
+        call_kind: CallSiteKind::SqlRelation,
+        ..scalar_call
+    };
+    assert!(
+        resolve_call_site(&relation_call, &def_idx, Some("dbo")).is_empty(),
+        "relation references must not become routine edges"
+    );
 }
 
 // ─── SQL Test 7: Cross-schema EXEC resolution ──
@@ -2766,6 +2832,7 @@ fn test_resolve_call_site_sql_cross_schema() {
         method_name: "usp_ValidateOrder".to_string(),
         receiver_type: Some("Sales".to_string()),
         line: 10,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     };
     let resolved = resolve_call_site(&call_sales, &def_idx, Some("dbo"));
@@ -2777,6 +2844,7 @@ fn test_resolve_call_site_sql_cross_schema() {
         method_name: "usp_ValidateOrder".to_string(),
         receiver_type: Some("Inventory".to_string()),
         line: 15,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     };
     let resolved_inv = resolve_call_site(&call_inv, &def_idx, Some("dbo"));
@@ -2856,6 +2924,7 @@ fn test_collect_sql_call_site_postings_remaps_file_ids_and_skips_tombstones() {
         method_name: "Odd Name".to_string(),
         receiver_type: Some("dbo".to_string()),
         line,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     };
     let mut def_idx = make_def_index(
@@ -3018,6 +3087,7 @@ fn test_resolve_call_site_sql_no_schema() {
         method_name: "usp_Cleanup".to_string(),
         receiver_type: None,
         line: 10,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     };
 
@@ -3237,7 +3307,7 @@ fn test_impact_analysis_finds_test_methods() {
 
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
     method_calls.insert(3, vec![
-        CallSite { method_name: "process".to_string(), receiver_type: Some("OrderService".to_string()), line: 20, receiver_is_generic: false },
+        CallSite { method_name: "process".to_string(), receiver_type: Some("OrderService".to_string()), line: 20, call_kind: Default::default(), receiver_is_generic: false },
     ]);
 
     let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
@@ -3398,10 +3468,10 @@ fn test_impact_analysis_non_test_method_recurses_normally() {
 
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
     method_calls.insert(3, vec![
-        CallSite { method_name: "process".to_string(), receiver_type: Some("OrderService".to_string()), line: 20, receiver_is_generic: false },
+        CallSite { method_name: "process".to_string(), receiver_type: Some("OrderService".to_string()), line: 20, call_kind: Default::default(), receiver_is_generic: false },
     ]);
     method_calls.insert(5, vec![
-        CallSite { method_name: "handle".to_string(), receiver_type: Some("Controller".to_string()), line: 20, receiver_is_generic: false },
+        CallSite { method_name: "handle".to_string(), receiver_type: Some("Controller".to_string()), line: 20, call_kind: Default::default(), receiver_is_generic: false },
     ]);
 
     let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
@@ -3883,6 +3953,7 @@ fn test_include_grep_references_finds_extra_files() {
             method_name: "ProcessOrder".to_string(),
             receiver_type: Some("OrderService".to_string()),
             line: 10,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -3958,6 +4029,7 @@ fn test_grep_references_excludes_definition_file() {
             method_name: "ProcessOrder".to_string(),
             receiver_type: Some("OrderService".to_string()),
             line: 10,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -4134,6 +4206,7 @@ fn test_callers_hint_not_shown_when_results_exist() {
             method_name: "process".to_string(),
             receiver_type: Some("OrderService".to_string()),
             line: 10,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         },
     ]);
@@ -4544,6 +4617,7 @@ fn test_advisory_low_count_emitted_for_few_callers() {
         method_name: "process".to_string(),
         receiver_type: Some("OrderService".to_string()),
         line: 20,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     }]);
 
@@ -4678,6 +4752,7 @@ fn build_callers_fixture_with_n_callers(num_callers: usize) -> super::HandlerCon
             method_name: "process".to_string(),
             receiver_type: Some("OrderService".to_string()),
             line: 20,
+            call_kind: Default::default(),
             receiver_is_generic: false,
         }]);
     }
@@ -4751,9 +4826,9 @@ fn build_down_limit_fixture() -> super::HandlerContext {
     ];
     let mut method_calls = HashMap::new();
     method_calls.insert(1, vec![
-        CallSite { method_name: "alpha".to_string(), receiver_type: Some("Alpha".to_string()), line: 7, receiver_is_generic: false },
-        CallSite { method_name: "beta".to_string(), receiver_type: Some("Beta".to_string()), line: 8, receiver_is_generic: false },
-        CallSite { method_name: "gamma".to_string(), receiver_type: Some("Gamma".to_string()), line: 9, receiver_is_generic: false },
+        CallSite { method_name: "alpha".to_string(), receiver_type: Some("Alpha".to_string()), line: 7, call_kind: Default::default(), receiver_is_generic: false },
+        CallSite { method_name: "beta".to_string(), receiver_type: Some("Beta".to_string()), line: 8, call_kind: Default::default(), receiver_is_generic: false },
+        CallSite { method_name: "gamma".to_string(), receiver_type: Some("Gamma".to_string()), line: 9, call_kind: Default::default(), receiver_is_generic: false },
     ]);
     let def_idx = make_def_index(definitions, method_calls);
 
@@ -5007,6 +5082,7 @@ fn build_impact_starvation_fixture(prod_count: usize, test_count: usize)
         method_name: "Process".to_string(),
         receiver_type: Some("ClassA".to_string()),
         line: 5,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     };
 
@@ -5309,12 +5385,14 @@ fn test_mid_tree_iface_expansion_finds_caller_through_sibling_impl() {
         method_name: "Foo".to_string(),
         receiver_type: Some("Worker".to_string()),
         line: 55,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     }]);
     method_calls.insert(9, vec![CallSite {
         method_name: "Mid".to_string(),
         receiver_type: Some("Impl2".to_string()),
         line: 65,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     }]);
 
@@ -5552,12 +5630,14 @@ fn test_root_iface_expansion_honors_visible_depth_budget() {
         method_name: "Method".to_string(),
         receiver_type: Some("ConcreteImpl2".to_string()),
         line: 55,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     }]);
     method_calls.insert(9, vec![CallSite {
         method_name: "Run".to_string(),
         receiver_type: Some("Caller".to_string()),
         line: 55,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     }]);
 

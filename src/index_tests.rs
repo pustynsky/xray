@@ -806,7 +806,7 @@ fn test_estimate_definition_index_memory_nonempty() {
 
     let mut method_calls = std::collections::HashMap::new();
     method_calls.insert(1u32, vec![
-        CallSite { method_name: "Save".to_string(), receiver_type: Some("DbContext".to_string()), line: 10, receiver_is_generic: false },
+        CallSite { method_name: "Save".to_string(), receiver_type: Some("DbContext".to_string()), line: 10, call_kind: Default::default(), receiver_is_generic: false },
     ]);
 
     let idx = crate::definitions::DefinitionIndex {
@@ -916,7 +916,7 @@ fn test_definition_index_shrink_maps_preserves_data() {
 
     let mut method_calls = std::collections::HashMap::new();
     method_calls.insert(0u32, vec![
-        CallSite { method_name: "Save".to_string(), receiver_type: Some("DbContext".to_string()), line: 10, receiver_is_generic: false },
+        CallSite { method_name: "Save".to_string(), receiver_type: Some("DbContext".to_string()), line: 10, call_kind: Default::default(), receiver_is_generic: false },
     ]);
 
     let mut idx = crate::definitions::DefinitionIndex {

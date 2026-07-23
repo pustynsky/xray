@@ -1425,6 +1425,7 @@ fn extract_ts_call(
                 method_name,
                 receiver_type: None,
                 line,
+                call_kind: Default::default(),
                 receiver_is_generic: false,
             })
         }
@@ -1454,6 +1455,7 @@ fn extract_ts_member_call(
         method_name,
         receiver_type,
         line,
+        call_kind: Default::default(),
         receiver_is_generic: false,
     })
 }
@@ -1657,6 +1659,7 @@ fn extract_ts_new_expression(node: tree_sitter::Node, source: &str) -> Option<Ca
         method_name: type_name.to_string(),
         receiver_type: Some(type_name.to_string()),
         line: node.start_position().row as u32 + 1,
+        call_kind: Default::default(),
         receiver_is_generic: is_generic,
     })
 }

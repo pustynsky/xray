@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use crate::mcp::protocol::ToolCallResult;
 use crate::ContentIndex;
-use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionKind};
+use crate::definitions::{CallSite, CallSiteKind, DefinitionEntry, DefinitionIndex, DefinitionKind};
 use code_xray::generate_trigrams;
 
 use super::HandlerContext;
@@ -3313,9 +3313,20 @@ fn resolve_call_site_with_policy(
             None => continue,
         };
 
-        // Only match methods, constructors, functions, stored procedures, and SQL functions
-        if def.kind != DefinitionKind::Method && def.kind != DefinitionKind::Constructor && def.kind != DefinitionKind::Function
-            && def.kind != DefinitionKind::StoredProcedure && def.kind != DefinitionKind::SqlFunction {
+        let kind_matches = match call.call_kind {
+            CallSiteKind::Unknown => matches!(
+                def.kind,
+                DefinitionKind::Method
+                    | DefinitionKind::Constructor
+                    | DefinitionKind::Function
+                    | DefinitionKind::StoredProcedure
+                    | DefinitionKind::SqlFunction
+            ),
+            CallSiteKind::SqlExecute => def.kind == DefinitionKind::StoredProcedure,
+            CallSiteKind::SqlScalarFunction => def.kind == DefinitionKind::SqlFunction,
+            CallSiteKind::SqlRelation => false,
+        };
+        if !kind_matches {
             continue;
         }
 
