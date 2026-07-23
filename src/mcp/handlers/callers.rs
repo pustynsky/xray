@@ -2298,6 +2298,65 @@ fn is_sql_routine_query(
         })
 }
 
+fn collect_sql_call_site_postings(
+    ctx: &CallerTreeContext<'_>,
+    method_name: &str,
+) -> Vec<crate::Posting> {
+    let content_file_ids: HashMap<_, _> = ctx.content_index.files
+        .iter()
+        .enumerate()
+        .map(|(file_id, path)| {
+            (crate::path_identity_key(std::path::Path::new(path)), file_id as u32)
+        })
+        .collect();
+    let mut lines_by_file: HashMap<u32, Vec<u32>> = HashMap::new();
+    let active_definition_indices: HashSet<_> = ctx.def_idx.file_index
+        .values()
+        .flatten()
+        .copied()
+        .collect();
+
+    for (&caller_index, calls) in &ctx.def_idx.method_calls {
+        if !active_definition_indices.contains(&caller_index) {
+            continue;
+        }
+        let caller = match ctx.def_idx.definitions.get(caller_index as usize) {
+            Some(caller) => caller,
+            None => continue,
+        };
+        let definition_path = match ctx.def_idx.files.get(caller.file_id as usize) {
+            Some(path) if std::path::Path::new(path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("sql")) => path,
+            _ => continue,
+        };
+        let content_file_id = match content_file_ids
+            .get(&crate::path_identity_key(std::path::Path::new(definition_path)))
+        {
+            Some(file_id) => *file_id,
+            None => continue,
+        };
+
+        for call in calls {
+            if call.method_name.eq_ignore_ascii_case(method_name) {
+                lines_by_file.entry(content_file_id).or_default().push(call.line);
+            }
+        }
+    }
+
+    let mut postings: Vec<_> = lines_by_file
+        .into_iter()
+        .map(|(file_id, mut lines)| {
+            lines.sort_unstable();
+            lines.dedup();
+            crate::Posting { file_id, lines }
+        })
+        .collect();
+    postings.sort_unstable_by_key(|posting| posting.file_id);
+    postings
+}
+
 /// Collect all (file_id, line_start) pairs for method definitions matching `method_lower`.
 /// These represent definition sites that should be excluded from caller results
 /// (a method's own definition line is not a call site).
@@ -2413,8 +2472,16 @@ impl CallerTreeBuilder<'_> {
             return Vec::new();
         }
 
+        let fallback_postings;
         let postings = match self.ctx.content_index.index.get(&method_lower) {
-            Some(p) => p,
+            Some(postings) => postings.as_slice(),
+            None if is_sql_routine_query(self.ctx.def_idx, &method_lower, parent_class) => {
+                fallback_postings = collect_sql_call_site_postings(self.ctx, &method_lower);
+                if fallback_postings.is_empty() {
+                    return Vec::new();
+                }
+                fallback_postings.as_slice()
+            }
             None => return Vec::new(),
         };
 

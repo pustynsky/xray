@@ -2427,6 +2427,54 @@ BEGIN
     SELECT 1
 END
 GO
+CREATE PROCEDURE [dbo].[Odd Three]
+AS
+BEGIN
+    SELECT 3
+END
+GO
+CREATE PROCEDURE [dbo].[Odd Four]
+AS
+BEGIN
+    SELECT 4
+END
+GO
+CREATE PROCEDURE [dbo].[Calls Three]
+AS
+BEGIN
+    EXEC [dbo].[Odd Three]
+END
+GO
+CREATE PROCEDURE [dbo].[Calls Four]
+AS
+BEGIN
+    EXEC [dbo].[Odd Four]
+END
+GO
+CREATE PROCEDURE [sales].[Shared Name]
+AS
+BEGIN
+    SELECT 5
+END
+GO
+CREATE PROCEDURE [ops].[Shared Name]
+AS
+BEGIN
+    SELECT 6
+END
+GO
+CREATE PROCEDURE [sales].[Sales Caller]
+AS
+BEGIN
+    EXEC [sales].[Shared Name]
+END
+GO
+CREATE PROCEDURE [ops].[Ops Caller]
+AS
+BEGIN
+    EXEC [ops].[Shared Name]
+END
+GO
 CREATE PROCEDURE [dbo].[usp_WR_Leaf]
 AS
 BEGIN
@@ -2515,6 +2563,57 @@ END
         "comments/literals must not create reverse SQL edges: {target_callers:?}"
     );
     assert_eq!(target_callers[0]["method"], "RealCaller");
+
+    for (target, parent, expected_caller) in [
+        ("Odd Three", "dbo", "Calls Three"),
+        ("Odd Four", "dbo", "Calls Four"),
+        ("Shared Name", "sales", "Sales Caller"),
+        ("Shared Name", "ops", "Ops Caller"),
+    ] {
+        let mut quoted_caller_builder = CallerTreeBuilder {
+            ctx: &caller_ctx,
+            max_depth: 3,
+            visited: HashSet::new(),
+            file_cache: HashMap::new(),
+            total_body_lines_emitted: 0,
+            root_accounted_callers: HashSet::new(),
+            total_limit_hit: false,
+            tests_found: Vec::new(),
+            per_level_dropped: 0,
+            interface_lookup_cache: HashMap::new(),
+        };
+        let quoted_callers = quoted_caller_builder.build(target, Some(parent), 0, &[]);
+        assert_eq!(
+            quoted_callers.len(),
+            1,
+            "quoted SQL target {target} must have one caller: {quoted_callers:?}"
+        );
+        assert_eq!(quoted_callers[0]["method"], expected_caller);
+    }
+
+    for (caller, parent, expected_target) in [
+        ("Calls Three", "dbo", "Odd Three"),
+        ("Calls Four", "dbo", "Odd Four"),
+        ("Sales Caller", "sales", "Shared Name"),
+        ("Ops Caller", "ops", "Shared Name"),
+    ] {
+        let mut quoted_callee_builder = CalleeTreeBuilder {
+            ctx: &caller_ctx,
+            max_depth: 3,
+            visited: HashSet::new(),
+            file_cache: HashMap::new(),
+            total_body_lines_emitted: 0,
+            total_limit_hit: false,
+            per_level_dropped: 0,
+        };
+        let quoted_callees = quoted_callee_builder.build(caller, Some(parent), 0);
+        assert_eq!(
+            quoted_callees.len(),
+            1,
+            "quoted SQL caller {caller} must have one target: {quoted_callees:?}"
+        );
+        assert_eq!(quoted_callees[0]["method"], expected_target);
+    }
 
     let mut recursive_caller_builder = CallerTreeBuilder {
         ctx: &caller_ctx,
@@ -2715,6 +2814,64 @@ fn test_find_target_line_class_filter_no_match() {
 }
 
 // ─── collect_definition_locations tests ──────────────────────────
+
+#[test]
+fn test_collect_sql_call_site_postings_remaps_file_ids_and_skips_tombstones() {
+    let definitions = vec![
+        method_def(0, "CallerA", "dbo", 1, 20),
+        method_def(1, "CallerB", "dbo", 1, 30),
+        method_def(0, "StaleCaller", "dbo", 40, 60),
+        method_def(2, "NonSqlCaller", "Example", 1, 70),
+    ];
+    let target_call = |line| CallSite {
+        method_name: "Odd Name".to_string(),
+        receiver_type: Some("dbo".to_string()),
+        line,
+        receiver_is_generic: false,
+    };
+    let mut def_idx = make_def_index(
+        definitions,
+        HashMap::from([
+            (0, vec![target_call(10)]),
+            (1, vec![target_call(20)]),
+            (2, vec![target_call(50)]),
+            (3, vec![target_call(60)]),
+        ]),
+    );
+    def_idx.files = vec![
+        "src/a.sql".to_string(),
+        "src/b.sql".to_string(),
+        "src/non_sql.cs".to_string(),
+    ];
+    def_idx.file_index.get_mut(&0).unwrap().retain(|definition_index| *definition_index != 2);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: vec![
+            "src/b.sql".to_string(),
+            "src/a.sql".to_string(),
+            "src/non_sql.cs".to_string(),
+        ],
+        extensions: vec!["sql".to_string(), "cs".to_string()],
+        file_token_counts: vec![0, 0, 0],
+        ..Default::default()
+    };
+    let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
+    let node_count = AtomicUsize::new(0);
+    let impact_truncated = AtomicBool::new(false);
+    let caller_ctx = CallerTreeContext::test_default(
+        &content_index,
+        &def_idx,
+        &limits,
+        &node_count,
+        &impact_truncated,
+    );
+
+    let postings = collect_sql_call_site_postings(&caller_ctx, "Odd Name");
+    assert_eq!(postings.len(), 2);
+    assert_eq!((postings[0].file_id, postings[0].lines.as_slice()), (0, [20].as_slice()));
+    assert_eq!((postings[1].file_id, postings[1].lines.as_slice()), (1, [10].as_slice()));
+}
 
 #[test]
 fn test_collect_definition_locations_single_method() {

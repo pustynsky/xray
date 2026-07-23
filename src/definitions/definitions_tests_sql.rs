@@ -389,6 +389,253 @@ fn test_sql_call_sites_masking_preserves_crlf_unicode_and_literal_comment_marker
 }
 
 #[test]
+fn test_sql_multiword_quoted_identifiers_remain_distinct() {
+    let source = r#"CREATE PROCEDURE [dbo].[Odd Three]
+AS
+BEGIN
+    SELECT 1
+END
+GO
+CREATE PROCEDURE [dbo].[Odd Four]
+AS
+BEGIN
+    SELECT 2
+END
+GO
+CREATE PROCEDURE [dbo].[Calls Three]
+AS
+BEGIN
+    EXEC [dbo].[Odd Three]
+END
+GO
+CREATE PROCEDURE [dbo].[Calls Four]
+AS
+BEGIN
+    EXEC [dbo].[Odd Four]
+END
+"#;
+    let (defs, call_sites, _) = parse_sql_definitions(source, 0);
+
+    let definition_names: Vec<_> = defs.iter().map(|definition| definition.name.as_str()).collect();
+    assert!(definition_names.contains(&"Odd Three"), "missing full identifier: {definition_names:?}");
+    assert!(definition_names.contains(&"Odd Four"), "missing full identifier: {definition_names:?}");
+
+    for (caller_name, expected_target) in [("Calls Three", "Odd Three"), ("Calls Four", "Odd Four")] {
+        let caller_index = defs
+            .iter()
+            .position(|definition| definition.name == caller_name)
+            .unwrap_or_else(|| panic!("missing caller {caller_name}: {definition_names:?}"));
+        let calls = call_sites
+            .iter()
+            .find(|(definition_index, _)| *definition_index == caller_index)
+            .map(|(_, calls)| calls)
+            .unwrap_or_else(|| panic!("missing calls for {caller_name}"));
+        assert_eq!(calls.len(), 1, "unexpected calls for {caller_name}: {calls:?}");
+        assert_eq!(calls[0].method_name, expected_target);
+        assert_eq!(calls[0].receiver_type.as_deref(), Some("dbo"));
+    }
+}
+
+#[test]
+fn test_sql_identifier_scanner_handles_escapes_unicode_and_multipart_names() {
+    let source = r#"CREATE PROCEDURE [db.with.dot].[схема].[Odd]]Name]
+AS
+BEGIN
+    SELECT 1
+END
+GO
+CREATE PROCEDURE "dbo"."Odd ""Quoted"""
+AS
+BEGIN
+    SELECT 2
+END
+GO
+CREATE PROCEDURE "dbo"."Odd -- Quoted"
+AS
+BEGIN
+    SELECT 3
+END
+GO
+CREATE PROCEDURE [Odd One]
+AS
+BEGIN
+    SELECT 4
+END
+GO
+CREATE PROCEDURE [Odd Two]
+AS
+BEGIN
+    SELECT 5
+END
+GO
+CREATE PROCEDURE [dbo].[Calls Escaped Names]
+AS
+BEGIN
+    EXEC [db.with.dot].[схема].[Odd]]Name];
+    EXEC "dbo"."Odd ""Quoted""";
+    EXEC "dbo"."Odd -- Quoted";
+    EXEC [server].[database].[dbo].[Four Part];
+    EXEC [a.b].[c].[Shared Target];
+    EXEC [a].[b.c].[Shared Target];
+END
+"#;
+    let (defs, call_sites, _) = parse_sql_definitions(source, 0);
+
+    let escaped = defs.iter().find(|definition| definition.name == "Odd]Name").unwrap();
+    assert_eq!(escaped.parent.as_deref(), Some("[db.with.dot].схема"));
+    let quoted = defs.iter().find(|definition| definition.name == "Odd \"Quoted\"").unwrap();
+    assert_eq!(quoted.parent.as_deref(), Some("dbo"));
+    let comment_marker = defs.iter().find(|definition| definition.name == "Odd -- Quoted").unwrap();
+    assert_eq!(comment_marker.parent.as_deref(), Some("dbo"));
+    for unqualified in ["Odd One", "Odd Two"] {
+        let definition = defs.iter().find(|definition| definition.name == unqualified).unwrap();
+        assert_eq!(definition.parent, None);
+    }
+
+    let caller_index = defs
+        .iter()
+        .position(|definition| definition.name == "Calls Escaped Names")
+        .unwrap();
+    let calls = call_sites
+        .iter()
+        .find(|(definition_index, _)| *definition_index == caller_index)
+        .map(|(_, calls)| calls)
+        .unwrap();
+    for (name, parent) in [
+        ("Odd]Name", "[db.with.dot].схема"),
+        ("Odd \"Quoted\"", "dbo"),
+        ("Odd -- Quoted", "dbo"),
+        ("Four Part", "server.database.dbo"),
+    ] {
+        let call = calls.iter().find(|call| call.method_name == name)
+            .unwrap_or_else(|| panic!("missing {parent}.{name}: {calls:#?}"));
+        assert_eq!(call.receiver_type.as_deref(), Some(parent));
+    }
+
+    let mut shared_parents: Vec<_> = calls.iter()
+        .filter(|call| call.method_name == "Shared Target")
+        .filter_map(|call| call.receiver_type.as_deref())
+        .collect();
+    shared_parents.sort_unstable();
+    assert_eq!(shared_parents, vec!["[a.b].c", "a.[b.c]"]);
+}
+
+#[test]
+fn test_sql_identifier_scanner_is_shared_by_ddl_and_call_site_extractors() {
+    let source = r#"CREATE TABLE [sales].[Order Items]
+(
+    [Id] INT NOT NULL
+)
+GO
+CREATE TABLE [sales].[Child Items]
+(
+    [Id] INT NOT NULL,
+    [References Noise] NVARCHAR(20),
+    [Label] NVARCHAR(100) DEFAULT N'REFERENCES [dbo].[Literal Noise]',
+    [ParentId] INT REFERENCES [sales].[Parent Items]([Id])
+)
+GO
+CREATE VIEW "reporting"."Order View"
+AS SELECT 1 AS [Value]
+GO
+CREATE TYPE [dbo].[Order Type] AS TABLE
+(
+    [Id] INT NOT NULL
+)
+GO
+CREATE INDEX [IX ON Order Items] ON [sales].[Order Items]([Id])
+GO
+CREATE PROCEDURE [dbo].[Call All Targets]
+AS
+BEGIN
+    EXEC [dbo].
+        [Exec Target];
+    SELECT * FROM [db.with.dot].[dbo].[From Target] f
+    JOIN "reporting"."Join Target" j ON 1 = 1;
+    INSERT INTO [dbo].[Insert Target] DEFAULT VALUES;
+    UPDATE [dbo].[Update Target] SET [Value] = 1;
+    DELETE FROM [dbo].[Delete Target];
+END
+"#;
+    let (defs, call_sites, _) = parse_sql_definitions(source, 0);
+
+    for (name, kind, parent) in [
+        ("Order Items", DefinitionKind::Table, Some("sales")),
+        ("Child Items", DefinitionKind::Table, Some("sales")),
+        ("Order View", DefinitionKind::View, Some("reporting")),
+        ("Order Type", DefinitionKind::UserDefinedType, Some("dbo")),
+        ("IX ON Order Items", DefinitionKind::SqlIndex, Some("Order Items")),
+    ] {
+        let definition = defs.iter()
+            .find(|definition| definition.name == name && definition.kind == kind)
+            .unwrap_or_else(|| panic!("missing {kind:?} {name}: {defs:#?}"));
+        assert_eq!(definition.parent.as_deref(), parent, "wrong parent for {name}");
+    }
+    let child = defs.iter().find(|definition| definition.name == "Child Items").unwrap();
+    assert_eq!(child.base_types, vec!["Parent Items"]);
+
+    let caller_index = defs
+        .iter()
+        .position(|definition| definition.name == "Call All Targets")
+        .unwrap();
+    let calls = call_sites
+        .iter()
+        .find(|(definition_index, _)| *definition_index == caller_index)
+        .map(|(_, calls)| calls)
+        .unwrap();
+    let mut call_names: Vec<_> = calls.iter().map(|call| call.method_name.as_str()).collect();
+    call_names.sort_unstable();
+    assert_eq!(
+        call_names,
+        vec!["Delete Target", "Exec Target", "From Target", "Insert Target", "Join Target", "Update Target"],
+        "quoted identifier contents must not become keyword anchors"
+    );
+    for (name, parent) in [
+        ("Exec Target", "dbo"),
+        ("From Target", "[db.with.dot].dbo"),
+        ("Join Target", "reporting"),
+        ("Insert Target", "dbo"),
+        ("Update Target", "dbo"),
+        ("Delete Target", "dbo"),
+    ] {
+        let call = calls.iter().find(|call| call.method_name == name)
+            .unwrap_or_else(|| panic!("missing {parent}.{name}: {calls:#?}"));
+        assert_eq!(call.receiver_type.as_deref(), Some(parent));
+    }
+}
+
+#[test]
+fn test_sql_scalar_function_call_uses_full_quoted_identifier() {
+    let source = r#"CREATE FUNCTION [dbo].[Odd Function](@Value INT)
+RETURNS INT
+AS
+BEGIN
+    RETURN @Value
+END
+GO
+CREATE PROCEDURE [dbo].[Uses Odd Function]
+AS
+BEGIN
+    SELECT [dbo].[Odd Function](1)
+END
+"#;
+    let (defs, call_sites, _) = parse_sql_definitions(source, 0);
+    let caller_index = defs
+        .iter()
+        .position(|definition| definition.name == "Uses Odd Function")
+        .unwrap();
+    let calls = call_sites
+        .iter()
+        .find(|(definition_index, _)| *definition_index == caller_index)
+        .map(|(_, calls)| calls)
+        .unwrap_or_else(|| panic!("missing scalar calls: {call_sites:#?}"));
+
+    let call = calls.iter().find(|call| call.method_name == "Odd Function")
+        .unwrap_or_else(|| panic!("missing multi-word scalar call: {calls:#?}"));
+    assert_eq!(call.receiver_type.as_deref(), Some("dbo"));
+}
+
+#[test]
 fn test_sql_call_sites_include_scalar_function_invocation_without_definition_self_edge() {
     let source = r#"
 CREATE FUNCTION [dbo].[ufn_WR_Value](@Id INT)
