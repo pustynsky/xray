@@ -3564,6 +3564,76 @@ mod audit_regression_tests {
 
     #[cfg(windows)]
     #[test]
+    fn test_base_file_with_ntfs_alternate_data_stream_is_rejected_without_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let target = root.join("base-with-stream.txt");
+        let stream = std::path::PathBuf::from(format!("{}:xraystream", target.display()));
+        let empty_target = root.join("base-with-empty-stream.txt");
+        let empty_stream =
+            std::path::PathBuf::from(format!("{}:emptystream", empty_target.display()));
+        let peer = root.join("peer.txt");
+        std::fs::write(&target, b"main\n").unwrap();
+        std::fs::write(&stream, b"stream\0payload").unwrap();
+        std::fs::write(&empty_target, b"main\n").unwrap();
+        std::fs::write(&empty_stream, b"").unwrap();
+        std::fs::write(&peer, b"main\n").unwrap();
+        let ctx = make_ctx(&root);
+
+        for request in [
+            json!({
+                "path": "base-with-stream.txt",
+                "edits": [{ "search": "main", "replace": "changed" }],
+            }),
+            json!({
+                "path": "base-with-stream.txt",
+                "dryRun": true,
+                "edits": [{ "search": "main", "replace": "changed" }],
+            }),
+            json!({
+                "path": "base-with-empty-stream.txt",
+                "edits": [{ "search": "main", "replace": "changed" }],
+            }),
+            json!({
+                "paths": ["peer.txt", "base-with-stream.txt"],
+                "dryRun": true,
+                "edits": [{ "search": "main", "replace": "changed" }],
+            }),
+            json!({
+                "paths": ["peer.txt", "base-with-stream.txt"],
+                "edits": [{ "search": "main", "replace": "changed" }],
+            }),
+        ] {
+            let result = handle_xray_edit(&ctx, &request);
+
+            assert!(result.is_error, "base file with ADS must be rejected");
+            assert!(
+                result.content[0]
+                    .text
+                    .contains("contains NTFS alternate data streams; editing is disabled to prevent data loss"),
+                "unexpected error: {}",
+                result.content[0].text
+            );
+            assert_eq!(std::fs::read(&target).unwrap(), b"main\n");
+            assert_eq!(std::fs::read(&stream).unwrap(), b"stream\0payload");
+            assert_eq!(std::fs::read(&empty_target).unwrap(), b"main\n");
+            assert_eq!(std::fs::read(&empty_stream).unwrap(), b"");
+            assert_eq!(std::fs::read(&peer).unwrap(), b"main\n");
+            let leaked_staging_files: Vec<_> = std::fs::read_dir(&root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.contains(".xray_tmp") || name.contains(".xray_backup"))
+                .collect();
+            assert!(
+                leaked_staging_files.is_empty(),
+                "failed ADS edit leaked staging files: {leaked_staging_files:?}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn test_single_edit_supports_windows_long_path_and_max_length_filename() {
         use std::os::windows::ffi::OsStrExt;
 

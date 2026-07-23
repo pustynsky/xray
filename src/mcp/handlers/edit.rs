@@ -805,6 +805,100 @@ fn windows_path(path: &Path) -> Result<Vec<u16>, String> {
 }
 
 #[cfg(windows)]
+fn validate_alternate_data_stream_safety(target: &PreparedEditTarget) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{
+        ERROR_HANDLE_EOF, ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard,
+        WIN32_FIND_STREAM_DATA,
+    };
+
+    if !target.file_existed {
+        return Ok(());
+    }
+
+    let path = &target.write_path;
+    let path_wide = windows_path(path)?;
+    // SAFETY: `WIN32_FIND_STREAM_DATA` is a plain Win32 output buffer, and zero is a valid
+    // initial state for every field before `FindFirstStreamW` populates it.
+    let mut stream_data: WIN32_FIND_STREAM_DATA = unsafe { std::mem::zeroed() };
+    // SAFETY: `path_wide` is NUL-terminated and `stream_data` remains valid for the call.
+    let find_handle = unsafe {
+        FindFirstStreamW(
+            path_wide.as_ptr(),
+            FindStreamInfoStandard,
+            (&mut stream_data as *mut WIN32_FIND_STREAM_DATA).cast(),
+            0,
+        )
+    };
+    if find_handle == INVALID_HANDLE_VALUE {
+        let error = std::io::Error::last_os_error();
+        // Microsoft documents EOF as "no streams" and INVALID_PARAMETER as a filesystem
+        // that does not support streams. Every other failure remains fail-closed.
+        if matches!(
+            error.raw_os_error(),
+            Some(code) if code == ERROR_HANDLE_EOF as i32
+                || code == ERROR_INVALID_PARAMETER as i32
+        ) {
+            return Ok(());
+        }
+        return Err(format!(
+            "cannot inspect NTFS alternate data streams for '{}'; editing is disabled to prevent data loss: {}",
+            path.display(),
+            error
+        ));
+    }
+
+    let result = loop {
+        let name_end = stream_data
+            .cStreamName
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(stream_data.cStreamName.len());
+        let stream_name = String::from_utf16_lossy(&stream_data.cStreamName[..name_end]);
+        if !stream_name.eq_ignore_ascii_case("::$DATA") {
+            break Err(format!(
+                "File '{}' contains NTFS alternate data streams; editing is disabled to prevent data loss",
+                path.display()
+            ));
+        }
+
+        // SAFETY: `find_handle` is open and `stream_data` remains valid for the call.
+        if unsafe {
+            FindNextStreamW(
+                find_handle,
+                (&mut stream_data as *mut WIN32_FIND_STREAM_DATA).cast(),
+            )
+        } != 0
+        {
+            continue;
+        }
+
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(ERROR_HANDLE_EOF as i32) {
+            break Ok(());
+        }
+        break Err(format!(
+            "cannot finish inspecting NTFS alternate data streams for '{}'; editing is disabled to prevent data loss: {}",
+            path.display(),
+            error
+        ));
+    };
+
+    // SAFETY: `find_handle` came from a successful `FindFirstStreamW` call.
+    let close_result = unsafe { FindClose(find_handle) };
+    if close_result == 0 && result.is_ok() {
+        return Err(format!(
+            "cannot close the NTFS stream enumeration handle for '{}'; editing is disabled to prevent data loss: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    result
+}
+
+#[cfg(windows)]
 fn get_windows_file_attributes(path: &Path) -> Result<u32, String> {
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileAttributesW,
@@ -1152,6 +1246,8 @@ fn read_and_validate_requested_file(
     ensure_git_internal_edit_allowed(&logical_path, path_str, allow_git_internals)?;
     let target = read_and_validate_file(server_dir, path_str, dry_run, allow_break_hard_links)?;
     ensure_git_internal_edit_allowed(&target.write_path, path_str, allow_git_internals)?;
+    #[cfg(windows)]
+    validate_alternate_data_stream_safety(&target)?;
     Ok(target)
 }
 
@@ -1722,6 +1818,8 @@ fn commit_new_file_no_clobber(target: &PreparedEditTarget, staged: &Path) -> Res
 
 fn commit_staged_file(target: &PreparedEditTarget, staged: &Path) -> Result<(), String> {
     validate_source_unchanged(target)?;
+    #[cfg(windows)]
+    validate_alternate_data_stream_safety(target)?;
     if target.file_existed {
         rename_replace(staged, &target.write_path, target.metadata.as_ref())
     } else {
@@ -2281,6 +2379,15 @@ fn handle_multi_file_edit(
         Ok(ps) => ps,
         Err(e) => return ToolCallResult::error(e),
     };
+
+    // Preserve the explicit-ADS path error for mixed batches before inspecting base files.
+    #[cfg(windows)]
+    for path_str in &path_strings {
+        let logical_path = resolve_path(&ctx.server_dir(), path_str);
+        if let Err(error) = reject_ntfs_alternate_data_stream(&logical_path, path_str) {
+            return ToolCallResult::error(format!("File '{}': {}", path_str, error));
+        }
+    }
 
     // Phase 1: Read all files and reject aliases of the same physical object.
     let mut file_data: Vec<(&str, PreparedEditTarget)> = Vec::with_capacity(path_strings.len());
