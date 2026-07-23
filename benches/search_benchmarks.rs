@@ -31,7 +31,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // Import from the code-xray crate
 use code_xray::{generate_trigrams, tokenize, ContentIndex, Posting, TrigramIndex};
@@ -45,8 +45,9 @@ use file_scope::{intersect_sorted_candidate_ids, ResolvedFileScope};
 #[path = "../src/mcp/handlers/token_regex.rs"]
 mod token_regex;
 use token_regex::{
-    compile_token_regex_patterns, expand_compiled_token_regex, RegexExpansion,
-    RegexExpansionDedup,
+    compile_token_regex_patterns, expand_compiled_token_regex,
+    expand_compiled_token_regex_for_scope, expand_compiled_token_regex_for_scope_with_threshold,
+    RegexExpansionDedup, TokenRegexStrategyOverride,
 };
 
 // ─── Shared parameter sets (BENCH-018) ───────────────────────────────
@@ -1179,6 +1180,201 @@ fn bench_definition_candidate_intersection(c: &mut Criterion) {
 }
 
 
+fn build_token_scope_strategy_index(
+    vocabulary_size: usize,
+    file_count: usize,
+    sharing: &str,
+) -> ContentIndex {
+    let files: Vec<String> = (0..file_count)
+        .map(|file_id| format!("src/file_{file_id:04}.rs"))
+        .collect();
+    let mut index = HashMap::with_capacity(vocabulary_size);
+    let mut file_token_counts = vec![0u32; file_count];
+    let hot_token_count = (vocabulary_size / 10).max(1);
+
+    for token_id in 0..vocabulary_size {
+        let fanout = match sharing {
+            "low" => 1,
+            "medium" => 4,
+            "hot" if token_id < hot_token_count => 100.min(file_count),
+            "hot" => 1,
+            _ => unreachable!("unknown sharing distribution"),
+        };
+        let mut postings = Vec::with_capacity(fanout);
+        for replica in 0..fanout {
+            let file_id = (token_id.wrapping_mul(31) + replica * 997) % file_count;
+            file_token_counts[file_id] = file_token_counts[file_id].saturating_add(1);
+            postings.push(Posting {
+                file_id: file_id as u32,
+                lines: vec![1],
+            });
+        }
+        index.insert(format!("token_{token_id:05}"), postings);
+    }
+
+    let total_tokens = file_token_counts.iter().map(|&count| u64::from(count)).sum();
+    let mut index = ContentIndex {
+        root: ".".to_string(),
+        files,
+        index,
+        total_tokens,
+        extensions: vec!["rs".to_string()],
+        file_token_counts,
+        ..Default::default()
+    };
+    index.rebuild_file_tokens();
+    index.file_tokens_authoritative = true;
+    index
+}
+
+fn token_scope_benchmark_scope(index: &ContentIndex, scope_shape: &str) -> ResolvedFileScope {
+    let file_count = index.files.len();
+    let selected_files = match scope_shape {
+        "k0" => 0,
+        "k1" => 1,
+        "k10" => 10.min(file_count),
+        "k1pct" => file_count.div_ceil(100),
+        "k10pct" => file_count.div_ceil(10),
+        "all" => return ResolvedFileScope::resolve(&index.files, false, None, |_| false),
+        _ => unreachable!("unknown scope shape"),
+    };
+    ResolvedFileScope::resolve(&index.files, true, None, |path| {
+        path.strip_prefix("src/file_")
+            .and_then(|suffix| suffix.strip_suffix(".rs"))
+            .and_then(|file_id| file_id.parse::<usize>().ok())
+            .is_some_and(|file_id| file_id < selected_files)
+    })
+}
+
+fn run_token_scope_strategy_iteration(
+    compiled: &token_regex::CompiledTokenRegex,
+    index: &ContentIndex,
+    scope: &ResolvedFileScope,
+    strategy: TokenRegexStrategyOverride,
+    threshold: Option<usize>,
+) {
+    let mut expansion = match threshold {
+        Some(threshold) => expand_compiled_token_regex_for_scope_with_threshold(
+            compiled,
+            index,
+            scope,
+            strategy,
+            threshold,
+        ),
+        None => expand_compiled_token_regex_for_scope(compiled, index, scope, strategy),
+    };
+    let posting_started = Instant::now();
+    let mut posting_lists_visited = 0usize;
+    let mut postings_checked = 0usize;
+    let mut postings_in_scope = 0usize;
+    for token in &expansion.expanded_tokens {
+        if let Some(postings) = index.index.get(token) {
+            posting_lists_visited = posting_lists_visited.saturating_add(1);
+            postings_checked = postings_checked.saturating_add(postings.len());
+            postings_in_scope = postings_in_scope.saturating_add(
+                postings.iter().filter(|posting| scope.contains(posting.file_id)).count(),
+            );
+        }
+    }
+    expansion.set_posting_score_duration(posting_started.elapsed());
+    black_box((
+        expansion.tokens_examined,
+        expansion.expanded_tokens.len(),
+        posting_lists_visited,
+        postings_checked,
+        postings_in_scope,
+        expansion.phase_durations(),
+    ));
+}
+
+fn bench_token_regex_scope_strategy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("token_regex_scope_strategy");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(1));
+    let scope_shapes = ["k0", "k1", "k10", "k1pct", "k10pct", "all"];
+    let selectivity_cases = [
+        ("selectivity0", "never_matches"),
+        ("selectivity1", "token_.*00$"),
+        ("selectivity50", "token_.*[02468]$"),
+        ("selectivity100", ".*"),
+    ];
+    let strategies = [
+        ("forced_global", TokenRegexStrategyOverride::ForceGlobal),
+        ("forced_scoped", TokenRegexStrategyOverride::ForceScoped),
+        ("planner_selected", TokenRegexStrategyOverride::Auto),
+    ];
+
+    for &vocabulary_size in BENCH_SIZES {
+        for sharing in ["low", "medium", "hot"] {
+            let index = build_token_scope_strategy_index(vocabulary_size, 1_000, sharing);
+            for scope_shape in scope_shapes {
+                let scope = token_scope_benchmark_scope(&index, scope_shape);
+                for (selectivity, pattern) in selectivity_cases {
+                    let compiled = compile_token_regex_patterns(&[pattern.to_string()]).unwrap();
+                    for (strategy_name, strategy) in strategies {
+                        let benchmark_name = format!(
+                            "{vocabulary_size}/{scope_shape}/{selectivity}/{strategy_name}/{sharing}",
+                        );
+                        group.bench_function(benchmark_name, |b| {
+                            b.iter(|| {
+                                run_token_scope_strategy_iteration(
+                                    black_box(&compiled),
+                                    black_box(&index),
+                                    black_box(&scope),
+                                    strategy,
+                                    None,
+                                );
+                            });
+                        });
+                    }
+                }
+            }
+        }
+    }
+    group.finish();
+}
+
+fn bench_token_regex_scope_threshold(c: &mut Criterion) {
+    let mut group = c.benchmark_group("token_regex_scope_threshold");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(1));
+
+    for &vocabulary_size in BENCH_SIZES {
+        for sharing in ["low", "medium", "hot"] {
+            let index = build_token_scope_strategy_index(vocabulary_size, 1_000, sharing);
+            for scope_shape in ["k1pct", "k10pct"] {
+                let scope = token_scope_benchmark_scope(&index, scope_shape);
+                for (selectivity, pattern) in [
+                    ("selectivity1", "token_.*00$"),
+                    ("selectivity100", ".*"),
+                ] {
+                    let compiled = compile_token_regex_patterns(&[pattern.to_string()]).unwrap();
+                    for threshold in [10usize, 25, 50] {
+                        let benchmark_name = format!(
+                            "{vocabulary_size}/{scope_shape}/{selectivity}/threshold{threshold}/{sharing}",
+                        );
+                        group.bench_function(benchmark_name, |b| {
+                            b.iter(|| {
+                                run_token_scope_strategy_iteration(
+                                    black_box(&compiled),
+                                    black_box(&index),
+                                    black_box(&scope),
+                                    TokenRegexStrategyOverride::Auto,
+                                    Some(threshold),
+                                );
+                            });
+                        });
+                    }
+                }
+            }
+        }
+    }
+    group.finish();
+}
+
+
 fn bench_token_regex_expand(c: &mut Criterion) {
     let mut group = c.benchmark_group("token_regex_expand");
 
@@ -1228,17 +1424,21 @@ fn bench_token_regex_empty_scope(c: &mut Criterion) {
 
     for &vocabulary_size in BENCH_SIZES {
         let index = build_token_vocabulary_index(vocabulary_size, 1_000);
+        let empty_scope = ResolvedFileScope::resolve(&index.files, true, None, |_| false);
         group.bench_function(BenchmarkId::new("patterns_1", vocabulary_size), |b| {
             b.iter(|| {
-                black_box(index.index.len());
                 let compiled = compile_token_regex_patterns(black_box(&patterns)).unwrap();
-                let expansion_started = Instant::now();
-                let plan_started = Instant::now();
-                let plan_duration = plan_started.elapsed();
-                let mut expansion = RegexExpansion::empty(&compiled);
-                expansion.set_plan_duration(plan_duration);
-                expansion.set_expansion_total_duration(expansion_started.elapsed());
-                black_box((expansion.patterns, expansion.tokens_examined));
+                let expansion = expand_compiled_token_regex_for_scope(
+                    &compiled,
+                    black_box(&index),
+                    black_box(&empty_scope),
+                    TokenRegexStrategyOverride::Auto,
+                );
+                black_box((
+                    expansion.patterns,
+                    expansion.tokens_examined,
+                    expansion.phase_durations(),
+                ));
             })
         });
     }
@@ -1292,6 +1492,8 @@ criterion_group!(
     bench_token_regex_expand,
     bench_token_regex_empty_scope,
     bench_token_regex_phase,
+    bench_token_regex_scope_strategy,
+    bench_token_regex_scope_threshold,
     bench_definition_candidate_intersection,
     bench_index_build,
     bench_serialization,

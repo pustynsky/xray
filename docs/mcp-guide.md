@@ -297,9 +297,15 @@ Token-regex requests (`regex: true`, `substring: false`) keep the raw user patte
 | absent or `1` | implicit global | Entire global token vocabulary |
 | `2` | `none` | Empty execution universe; no vocabulary or postings were scanned |
 | `2` | `globalVocabulary` | Entire global token vocabulary, matching v1 semantics |
-| `2` | `resolvedFiles` (reserved for PR 5; not emitted by PR 4) | Unique tokens in the resolved execution file scope |
+| `2` | `resolvedFiles` | Unique tokens in the resolved execution file scope |
 
-Schema v2 reserves `resolvedFiles` for scoped expansion in PR 5; PR 4 does not emit it. Do not infer a global matched-token total from v2 counters unless `accountingScope` is `globalVocabulary`.
+PR 5 emits `resolvedFiles` when the planner selects scoped file-token expansion. Do not infer a global matched-token total from v2 counters unless `accountingScope` is `globalVocabulary`; `globalMatchedTokenCountKnown=false` is explicit for scoped expansion.
+
+For ordinary result entries, the numerator of `termsMatched` remains result semantics. Its denominator follows the selected execution universe: global matching tokens for `globalVocabulary`, scoped matching tokens for `resolvedFiles`. The denominator can therefore differ between forced global and scoped strategies when matching tokens exist only outside the resolved scope. This avoids a global vocabulary regex scan performed solely to reproduce legacy accounting; paths, occurrences, scores, ranking, and the `termsMatched` numerator remain strategy-independent.
+
+The planner uses scoped expansion only for an authoritative, complete reverse map and a filtered scope whose summed token references are below the measured 50% global-vocabulary threshold. Unscoped/all, unavailable, rebuild-pending, inconsistent, and wider scopes retain `globalVocabulary` fallback. Criterion selected 50% after comparing 10%/25%/50% at 1k/10k/50k vocabularies with low/medium/hot sharing; this threshold is internal policy, not a response contract.
+
+`tokensExamined` counts regex-match evaluations, so a request with multiple patterns can report approximately `patterns * scopeUniqueTokens` (or `patterns * globalUniqueTokens`). Use `scopeUniqueTokens` or `globalUniqueTokens` for token-universe cardinality; do not treat `tokensExamined` as the number of unique tokens.
 
 A valid regex with an empty resolved scope compiles first and then returns through the normal result, invert, scope, coverage, and truncation pipeline:
 

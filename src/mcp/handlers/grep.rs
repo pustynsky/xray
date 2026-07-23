@@ -20,11 +20,13 @@ use super::utils::{self,
 };
 use super::file_scope::ResolvedFileScope;
 use super::token_regex::{
-    compile_token_regex_patterns, expand_compiled_token_regex, RegexExpansion,
-    RegexExpansionDedup, TokenSearchTelemetry,
+    compile_token_regex_patterns, expand_compiled_token_regex_for_scope, RegexExpansion,
+    TokenRegexStrategyOverride, TokenSearchTelemetry,
 };
 #[cfg(test)]
-use super::token_regex::TOKEN_REGEX_PREVIEW_MAX;
+use super::token_regex::{
+    expand_compiled_token_regex, RegexExpansionDedup, TOKEN_REGEX_PREVIEW_MAX,
+};
 use super::HandlerContext;
 
 #[path = "grep_literal_extract.rs"]
@@ -2623,6 +2625,11 @@ fn build_grep_response(
         .collect();
     let mut stale_line_files = 0usize;
     let files_json: Vec<Value> = results.iter().map(|r| {
+        // The denominator is intentionally the strategy's execution universe. For
+        // scopedFileTokens, recovering the global denominator would require the
+        // global regex scan this strategy exists to avoid. Interpret it together
+        // with regexExpansion.accountingScope; result and ranking semantics do not
+        // depend on this accounting-only denominator.
         let mut file_obj = json!({
             "path": r.file_path,
             "score": (r.tf_idf * 10000.0).round() / 10000.0,
@@ -3028,6 +3035,22 @@ fn inject_grep_ext_hint(
 }
 
 
+#[cfg(test)]
+fn token_regex_strategy_override(args: &Value) -> TokenRegexStrategyOverride {
+    match args.get("__testTokenRegexStrategy").and_then(Value::as_str) {
+        Some("global") => TokenRegexStrategyOverride::ForceGlobal,
+        Some("scoped") => TokenRegexStrategyOverride::ForceScoped,
+        _ => TokenRegexStrategyOverride::Auto,
+    }
+}
+
+#[cfg(not(test))]
+fn token_regex_strategy_override(args: &Value) -> TokenRegexStrategyOverride {
+    let _ = args;
+    TokenRegexStrategyOverride::Auto
+}
+
+
 pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let parsed = match parse_grep_args(args, &ctx.server_dir()) {
         Ok(p) => p,
@@ -3220,22 +3243,12 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
             Ok(compiled) => compiled,
             Err(error) => return ToolCallResult::error(error.to_string()),
         };
-        let expansion_started = Instant::now();
-        let plan_started = expansion_started;
-        let empty_scope = file_scope.is_empty();
-        let plan_duration = plan_started.elapsed();
-        let mut expansion = if empty_scope {
-            RegexExpansion::empty(&compiled)
-        } else {
-            expand_compiled_token_regex(
-                &compiled,
-                index.index.keys().map(String::as_str),
-                RegexExpansionDedup::DeduplicateSorted,
-            )
-        };
-        expansion.set_plan_duration(plan_duration);
-        expansion.set_expansion_total_duration(expansion_started.elapsed());
-        Some(expansion)
+        Some(expand_compiled_token_regex_for_scope(
+            &compiled,
+            &index,
+            &file_scope,
+            token_regex_strategy_override(args),
+        ))
     } else {
         None
     };
