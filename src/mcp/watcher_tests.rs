@@ -1,6 +1,7 @@
 #![allow(clippy::field_reassign_with_default)] // tests prefer mutate-after-default for readability
 use super::*;
 use std::collections::HashMap;
+use serde_json::{json, Value};
 
 
 fn make_test_index() -> ContentIndex {
@@ -856,6 +857,106 @@ fn make_batch_test_setup()
     let index = build_watch_index_from(index);
 
     (tmp, dir, Arc::new(RwLock::new(index)))
+}
+
+fn watcher_token_regex_projection(output: &Value) -> Value {
+    let files = output.get("files").and_then(Value::as_array).map(|files| {
+        files.iter().map(|file| {
+            let mut file = file.clone();
+            if let Some(terms_matched) = file.get("termsMatched").and_then(Value::as_str) {
+                let numerator = terms_matched.split_once('/').unwrap().0;
+                file["termsMatched"] = json!(numerator);
+            }
+            file
+        }).collect::<Vec<_>>()
+    });
+    json!({
+        "files": files,
+        "resultStatus": output.get("resultStatus"),
+        "totalFiles": output["summary"].get("totalFiles"),
+        "totalOccurrences": output["summary"].get("totalOccurrences"),
+    })
+}
+
+fn run_watcher_token_regex(
+    index: &Arc<RwLock<ContentIndex>>,
+    file: &str,
+    strategy: &str,
+) -> Value {
+    let mut ctx = crate::mcp::handlers::HandlerContext::default();
+    ctx.index = Arc::clone(index);
+    ctx.server_ext = "cs".to_string();
+    let result = crate::mcp::handlers::dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": [".*"],
+        "regex": true,
+        "substring": false,
+        "file": [file],
+        "__testTokenRegexStrategy": strategy,
+    }));
+    assert!(!result.is_error, "{strategy} grep failed: {}", result.content[0].text);
+    serde_json::from_str(&result.content[0].text).unwrap()
+}
+
+fn assert_watcher_token_regex_equivalent(
+    index: &Arc<RwLock<ContentIndex>>,
+    file: &str,
+) {
+    crate::mcp::handlers::token_regex::verify_file_tokens_bidirectional(
+        &index.read().unwrap(),
+    ).expect("watch mutation must preserve the complete reverse map");
+    let global = run_watcher_token_regex(index, file, "global");
+    let scoped = run_watcher_token_regex(index, file, "scoped");
+    assert_eq!(
+        watcher_token_regex_projection(&scoped),
+        watcher_token_regex_projection(&global),
+        "global/scoped mismatch after watch mutation for {file}",
+    );
+}
+
+#[test]
+fn test_token_regex_scoped_equivalence_across_watch_mutations() {
+    let (_tmp, root, index) = make_batch_test_setup();
+    {
+        let mut current = index.write().unwrap();
+        current.rebuild_file_tokens();
+    }
+    assert_watcher_token_regex_equivalent(&index, "a.cs");
+
+    let file_c = root.join("c.cs");
+    std::fs::write(&file_c, "class Gamma { Alpha shared; UniqueToken gamma; }").unwrap();
+    let mut dirty = HashSet::from([file_c.clone()]);
+    let mut removed = HashSet::new();
+    process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
+    assert_watcher_token_regex_equivalent(&index, "c.cs");
+
+    std::fs::write(&file_c, "class GammaUpdated { Beta shared; NewToken value; }").unwrap();
+    for _ in 0..2 {
+        let mut dirty = HashSet::from([file_c.clone()]);
+        process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
+        assert_watcher_token_regex_equivalent(&index, "c.cs");
+    }
+
+    let renamed = root.join("renamed.cs");
+    std::fs::rename(&file_c, &renamed).unwrap();
+    let mut dirty = HashSet::from([renamed.clone()]);
+    let mut removed = HashSet::from([file_c]);
+    process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
+    assert_watcher_token_regex_equivalent(&index, "renamed.cs");
+
+    std::fs::remove_file(&renamed).unwrap();
+    let mut dirty = HashSet::new();
+    let mut removed = HashSet::from([renamed]);
+    process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
+    assert_watcher_token_regex_equivalent(&index, "b.cs");
+
+    let file_a = root.join("a.cs");
+    let file_b = root.join("b.cs");
+    std::fs::remove_file(&file_a).unwrap();
+    std::fs::write(&file_b, "class BetaBatch { BatchToken value; }").unwrap();
+    let mut dirty = HashSet::from([file_b]);
+    let mut removed = HashSet::from([file_a]);
+    process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
+    assert_watcher_token_regex_equivalent(&index, "b.cs");
 }
 
 #[test]

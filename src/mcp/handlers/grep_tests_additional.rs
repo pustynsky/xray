@@ -2,6 +2,10 @@
 use super::*;
 use super::super::handlers_test_utils::make_params_default;
 use std::collections::{HashMap, HashSet};
+use super::super::token_regex::{
+    expand_compiled_token_regex_for_scope_with_threshold, scoped_file_tokens_eligibility,
+    verify_file_tokens_bidirectional, ScopedFileTokensEligibility,
+};
 
 
 // ─── auto_switch_to_phrase_if_needed tests ──────────────────────
@@ -946,7 +950,7 @@ fn test_token_regex_count_only_broad_pattern_has_bounded_query_metadata() {
     assert_eq!(summary["termsSearched"], json!([".*"]));
     assert_eq!(expansion["schemaVersion"], json!(2));
     assert_eq!(expansion["strategy"], "globalVocabulary");
-    assert_eq!(expansion["strategyReason"], "globalVocabularyBaseline");
+    assert_eq!(expansion["strategyReason"], "scopeUnfiltered");
     assert_eq!(expansion["accountingScope"], "globalVocabulary");
     assert_eq!(expansion["patterns"], json!(1));
     assert_eq!(expansion["tokensExamined"], json!(TOKEN_COUNT));
@@ -1063,6 +1067,562 @@ fn test_token_regex_posting_counters_distinguish_global_and_scoped_work() {
 }
 
 #[test]
+fn test_token_regex_forced_scoped_k1_scans_only_file_tokens() {
+    let ctx = make_grep_ctx(
+        vec![
+            ("tokenone", 0, vec![1]),
+            ("tokenone", 1, vec![1]),
+            ("tokentwo", 1, vec![2]),
+        ],
+        vec!["C:/test/A.rs", "C:/test/B.rs"],
+        vec!["rs"],
+    );
+    {
+        let mut index = ctx.index.write().unwrap();
+        index.rebuild_file_tokens();
+        index.file_tokens_authoritative = true;
+    }
+
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["token.*"],
+        "regex": true,
+        "countOnly": true,
+        "file": ["A.rs"],
+        "__testTokenRegexStrategy": "scoped",
+    }));
+
+    assert!(!result.is_error, "scoped token regex failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let expansion = &output["summary"]["regexExpansion"];
+    assert_eq!(expansion["strategy"], "scopedFileTokens");
+    assert_eq!(expansion["accountingScope"], "resolvedFiles");
+    assert_eq!(expansion["tokensExamined"], json!(1));
+    assert_eq!(expansion["postingListsVisited"], json!(1));
+    assert_eq!(expansion["postingsChecked"], json!(2));
+    assert_eq!(expansion["postingsInScope"], json!(1));
+    assert_eq!(output["summary"]["totalFiles"], json!(1));
+}
+
+fn make_token_regex_planner_ctx() -> HandlerContext {
+    make_grep_ctx(
+        vec![
+            ("tokenone", 0, vec![1]),
+            ("tokenone", 1, vec![1]),
+            ("tokentwo", 1, vec![2]),
+            ("otherthree", 1, vec![3]),
+            ("otherfour", 1, vec![4]),
+            ("otherfive", 1, vec![5]),
+        ],
+        vec!["C:/test/A.rs", "C:/test/B.rs"],
+        vec!["rs"],
+    )
+}
+
+fn make_ready_token_regex_planner_ctx() -> HandlerContext {
+    let ctx = make_token_regex_planner_ctx();
+    {
+        let mut index = ctx.index.write().unwrap();
+        index.rebuild_file_tokens();
+        index.file_tokens_authoritative = true;
+    }
+    ctx
+}
+
+#[test]
+fn test_token_regex_auto_ready_k1_uses_scoped_file_tokens() {
+    let ctx = make_ready_token_regex_planner_ctx();
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["token.*"],
+        "regex": true,
+        "countOnly": true,
+        "file": ["A.rs"],
+    }));
+
+    assert!(!result.is_error, "scoped token regex failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let expansion = &output["summary"]["regexExpansion"];
+    assert_eq!(expansion["strategy"], "scopedFileTokens");
+    assert_eq!(expansion["strategyReason"], "scopedCostPreferred");
+    assert_eq!(expansion["accountingScope"], "resolvedFiles");
+    assert_eq!(expansion["scopeFiles"], json!(1));
+    assert_eq!(expansion["globalUniqueTokens"], json!(5));
+    assert_eq!(expansion["scopeTokenReferences"], json!(1));
+    assert_eq!(expansion["scopeUniqueTokens"], json!(1));
+    assert_eq!(expansion["globalMatchedTokenCountKnown"], false);
+    assert!(expansion["fallbackReason"].is_null());
+    assert_eq!(expansion["tokensExamined"], json!(1));
+}
+
+#[test]
+fn test_token_regex_auto_unavailable_uses_global_fallback() {
+    let ctx = make_token_regex_planner_ctx();
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["token.*"],
+        "regex": true,
+        "countOnly": true,
+        "file": ["A.rs"],
+    }));
+
+    assert!(!result.is_error, "global token regex failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let expansion = &output["summary"]["regexExpansion"];
+    assert_eq!(expansion["strategy"], "globalVocabulary");
+    assert_eq!(expansion["strategyReason"], "reverseMapUnavailable");
+    assert_eq!(expansion["fallbackReason"], "fileTokensUnavailable");
+    assert_eq!(expansion["accountingScope"], "globalVocabulary");
+    assert_eq!(expansion["scopeFiles"], json!(1));
+    assert_eq!(expansion["globalUniqueTokens"], json!(5));
+    assert_eq!(expansion["globalMatchedTokenCountKnown"], true);
+}
+
+#[test]
+fn test_token_regex_auto_rebuild_pending_uses_global_fallback() {
+    let ctx = make_token_regex_planner_ctx();
+    {
+        let mut index = ctx.index.write().unwrap();
+        index.file_tokens_authoritative = true;
+        index.file_tokens.clear();
+    }
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["token.*"],
+        "regex": true,
+        "countOnly": true,
+        "file": ["A.rs"],
+    }));
+
+    assert!(!result.is_error, "global token regex failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let expansion = &output["summary"]["regexExpansion"];
+    assert_eq!(expansion["strategy"], "globalVocabulary");
+    assert_eq!(expansion["strategyReason"], "reverseMapRebuildPending");
+    assert_eq!(expansion["fallbackReason"], "fileTokensRebuildPending");
+}
+
+#[test]
+fn test_token_regex_auto_empty_live_slot_uses_global_fallback() {
+    let ctx = make_token_regex_planner_ctx();
+    {
+        let mut index = ctx.index.write().unwrap();
+        index.file_tokens_authoritative = true;
+        index.file_tokens = vec![Vec::new(); index.files.len()];
+    }
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["token.*"],
+        "regex": true,
+        "countOnly": true,
+        "file": ["A.rs"],
+    }));
+
+    assert!(!result.is_error, "global token regex failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let expansion = &output["summary"]["regexExpansion"];
+    assert_eq!(expansion["strategy"], "globalVocabulary");
+    assert_eq!(expansion["strategyReason"], "reverseMapInvalid");
+    assert_eq!(expansion["fallbackReason"], "fileTokensEmptyLiveSlot");
+}
+
+#[test]
+fn test_token_regex_auto_length_mismatch_uses_global_fallback() {
+    let ctx = make_ready_token_regex_planner_ctx();
+    {
+        let mut index = ctx.index.write().unwrap();
+        index.file_tokens.pop();
+    }
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["token.*"],
+        "regex": true,
+        "countOnly": true,
+        "file": ["A.rs"],
+    }));
+    assert!(!result.is_error, "global token regex failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let expansion = &output["summary"]["regexExpansion"];
+    assert_eq!(expansion["strategy"], "globalVocabulary");
+    assert_eq!(expansion["strategyReason"], "reverseMapInvalid");
+    assert_eq!(expansion["fallbackReason"], "fileTokensLengthMismatch");
+}
+
+#[test]
+fn test_token_regex_auto_wide_scope_uses_global_fallback() {
+    let ctx = make_ready_token_regex_planner_ctx();
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["token.*"],
+        "regex": true,
+        "countOnly": true,
+        "file": ["B.rs"],
+    }));
+    assert!(!result.is_error, "global token regex failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let expansion = &output["summary"]["regexExpansion"];
+    assert_eq!(expansion["strategy"], "globalVocabulary");
+    assert_eq!(expansion["strategyReason"], "tokenReferenceEstimateTooHigh");
+    assert_eq!(expansion["fallbackReason"], "scopeTokenReferencesTooHigh");
+    assert_eq!(expansion["scopeTokenReferences"], 5);
+}
+
+#[test]
+fn test_token_regex_threshold_candidates_10_25_50_percent() {
+    let ctx = make_ready_token_regex_planner_ctx();
+    let index = ctx.index.read().unwrap();
+    let scope = ResolvedFileScope::resolve(&index.files, true, Some(0), |_| true);
+    let compiled = compile_token_regex_patterns(&["token.*".to_string()]).unwrap();
+
+    let strategy_at = |threshold| {
+        expand_compiled_token_regex_for_scope_with_threshold(
+            &compiled,
+            &index,
+            &scope,
+            TokenRegexStrategyOverride::Auto,
+            threshold,
+        ).to_json(true)["strategy"].clone()
+    };
+    assert_eq!(strategy_at(10), "globalVocabulary");
+    assert_eq!(strategy_at(25), "scopedFileTokens");
+    assert_eq!(strategy_at(50), "scopedFileTokens");
+}
+
+#[test]
+fn test_token_regex_bidirectional_verifier_detects_missing_interior_token() {
+    let ctx = make_ready_token_regex_planner_ctx();
+    let mut index = ctx.index.write().unwrap();
+    let removed_token = index.file_tokens[1].remove(0);
+    assert!(!index.file_tokens[1].is_empty(), "fault must leave a non-empty slot");
+    let scope = ResolvedFileScope::resolve(&index.files, true, Some(1), |_| true);
+
+    assert_eq!(
+        scoped_file_tokens_eligibility(&index, &scope),
+        ScopedFileTokensEligibility::Ready,
+        "cheap query-local checks intentionally cannot detect interior corruption",
+    );
+    let error = verify_file_tokens_bidirectional(&index).expect_err("deep verifier must fail");
+    assert!(error.contains(&removed_token), "missing token diagnostic: {error}");
+    assert!(error.contains("missing from reverse slot"), "unexpected diagnostic: {error}");
+}
+
+#[test]
+fn test_token_regex_clone_load_and_rebuild_lifecycle_fallbacks_then_scopes() {
+    let source = make_ready_token_regex_planner_ctx();
+    let loaded_index = source.index.read().unwrap().clone();
+    assert!(!loaded_index.file_tokens_authoritative);
+    assert!(loaded_index.file_tokens.is_empty());
+    let loaded = HandlerContextBuilder::new().with_content_index(loaded_index).build();
+    let args = json!({
+        "terms": ["token.*"],
+        "regex": true,
+        "countOnly": true,
+        "file": ["A.rs"],
+    });
+
+    let unavailable = handle_xray_grep(&loaded, &args);
+    let unavailable: Value = serde_json::from_str(&unavailable.content[0].text).unwrap();
+    assert_eq!(unavailable["summary"]["regexExpansion"]["strategy"], "globalVocabulary");
+    assert_eq!(
+        unavailable["summary"]["regexExpansion"]["fallbackReason"],
+        "fileTokensUnavailable",
+    );
+
+    {
+        let mut index = loaded.index.write().unwrap();
+        index.file_tokens_authoritative = true;
+    }
+    let pending = handle_xray_grep(&loaded, &args);
+    let pending: Value = serde_json::from_str(&pending.content[0].text).unwrap();
+    assert_eq!(pending["summary"]["regexExpansion"]["strategy"], "globalVocabulary");
+    assert_eq!(
+        pending["summary"]["regexExpansion"]["fallbackReason"],
+        "fileTokensRebuildPending",
+    );
+
+    {
+        let mut index = loaded.index.write().unwrap();
+        index.rebuild_file_tokens();
+        verify_file_tokens_bidirectional(&index).expect("rebuilt reverse map");
+    }
+    let ready = handle_xray_grep(&loaded, &args);
+    let ready: Value = serde_json::from_str(&ready.content[0].text).unwrap();
+    assert_eq!(ready["summary"]["regexExpansion"]["strategy"], "scopedFileTokens");
+    assert_eq!(ready["summary"]["regexExpansion"]["tokensExamined"], 1);
+}
+
+#[test]
+fn test_token_regex_rebuild_publication_is_whole_map_under_write_lock() {
+    let ctx = make_token_regex_planner_ctx();
+    {
+        let mut index = ctx.index.write().unwrap();
+        index.file_tokens_authoritative = true;
+        index.file_tokens.clear();
+    }
+    let read_guard = ctx.index.read().unwrap();
+    let scope = ResolvedFileScope::resolve(&read_guard.files, true, Some(0), |_| true);
+    assert_eq!(
+        scoped_file_tokens_eligibility(&read_guard, &scope),
+        ScopedFileTokensEligibility::RebuildPending,
+    );
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (published_tx, published_rx) = std::sync::mpsc::channel();
+    let index = Arc::clone(&ctx.index);
+    let rebuild = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let mut index = index.write().unwrap();
+        index.rebuild_file_tokens();
+        verify_file_tokens_bidirectional(&index).expect("published reverse map");
+        published_tx.send(()).unwrap();
+    });
+    started_rx.recv().unwrap();
+    assert!(
+        published_rx.try_recv().is_err(),
+        "writer must not publish while a query holds the read lock",
+    );
+    drop(read_guard);
+    published_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    rebuild.join().unwrap();
+
+    let index = ctx.index.read().unwrap();
+    assert_eq!(
+        scoped_file_tokens_eligibility(&index, &scope),
+        ScopedFileTokensEligibility::Ready,
+    );
+}
+
+fn make_token_regex_differential_ctx() -> HandlerContext {
+    let files = vec![
+        "C:/test/A.rs".to_string(),
+        "C:/test/B.rs".to_string(),
+        "C:/test/C.rs".to_string(),
+        "C:/test/Empty.rs".to_string(),
+        String::new(),
+    ];
+    let mut index_map: HashMap<String, Vec<Posting>> = HashMap::new();
+    let mut file_token_counts = vec![0u32; files.len()];
+
+    for token_id in 0..100u32 {
+        let token = format!("sel{token_id:03}");
+        let mut postings = vec![Posting { file_id: 1, lines: vec![token_id + 1] }];
+        file_token_counts[1] += 1;
+        if token_id < 2 {
+            postings.push(Posting { file_id: 0, lines: vec![token_id + 1] });
+            file_token_counts[0] += 1;
+        }
+        if token_id == 0 {
+            postings.push(Posting { file_id: 2, lines: vec![1, 2, 3, 4] });
+            file_token_counts[2] += 4;
+        }
+        index_map.insert(token, postings);
+    }
+    for token_id in 0..100u32 {
+        index_map.insert(
+            format!("other{token_id:03}"),
+            vec![Posting { file_id: 2, lines: vec![token_id + 10] }],
+        );
+        file_token_counts[2] += 1;
+    }
+
+    let total_tokens = file_token_counts.iter().map(|&count| u64::from(count)).sum();
+    let trigram = build_trigram_index(&index_map);
+    let mut content_index = ContentIndex {
+        root: ".".to_string(),
+        files,
+        index: index_map,
+        total_tokens,
+        extensions: vec!["rs".to_string()],
+        file_token_counts,
+        trigram,
+        ..Default::default()
+    };
+    content_index.rebuild_file_tokens();
+    content_index.file_tokens_authoritative = true;
+    HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .build()
+}
+
+fn run_token_regex_strategy(ctx: &HandlerContext, args: &Value, strategy: &str) -> Value {
+    let mut args = args.clone();
+    args["__testTokenRegexStrategy"] = json!(strategy);
+    let result = handle_xray_grep(ctx, &args);
+    assert!(!result.is_error, "{strategy} token regex failed: {}", result.content[0].text);
+    serde_json::from_str(&result.content[0].text).unwrap()
+}
+
+fn terms_matched_parts(file: &Value) -> Option<(usize, usize)> {
+    let value = file.get("termsMatched")?.as_str().expect("termsMatched string");
+    let (numerator, denominator) = value.split_once('/').expect("termsMatched fraction");
+    Some((
+        numerator.parse().expect("termsMatched numerator"),
+        denominator.parse().expect("termsMatched denominator"),
+    ))
+}
+
+fn token_regex_semantic_projection(output: &Value) -> Value {
+    let mut files = output.get("files").cloned();
+    if let Some(files) = files.as_mut().and_then(Value::as_array_mut) {
+        for file in files {
+            if let Some((numerator, _)) = terms_matched_parts(file) {
+                // The numerator is result semantics. The denominator is execution
+                // accounting and is asserted separately against regexExpansion so a
+                // scoped strategy never needs a global scan just to reproduce it.
+                file["termsMatched"] = json!(numerator);
+            }
+        }
+    }
+    json!({
+        "files": files,
+        "resultStatus": output.get("resultStatus").cloned(),
+        "coverage": output.get("coverage").cloned(),
+        "coverageWarning": output.get("coverageWarning").cloned(),
+        "summary": {
+            "totalFiles": output["summary"].get("totalFiles").cloned(),
+            "totalOccurrences": output["summary"].get("totalOccurrences").cloned(),
+            "totalFilesInScope": output["summary"].get("totalFilesInScope").cloned(),
+            "invert": output["summary"].get("invert").cloned(),
+            "searchMode": output["summary"].get("searchMode").cloned(),
+            "termsSearched": output["summary"].get("termsSearched").cloned(),
+        }
+    })
+}
+
+#[test]
+fn test_token_regex_tombstone_slot_is_safe_in_scoped_union() {
+    let ctx = make_token_regex_differential_ctx();
+    let index = ctx.index.read().unwrap();
+    let scope = ResolvedFileScope::resolve(&index.files, true, None, |_| true);
+    assert_eq!(scope.len(), 5, "filtered scope includes the physical tombstone slot");
+    assert_eq!(
+        scoped_file_tokens_eligibility(&index, &scope),
+        ScopedFileTokensEligibility::Ready,
+    );
+    let compiled = compile_token_regex_patterns(&[".*".to_string()]).unwrap();
+    let global = expand_compiled_token_regex_for_scope(
+        &compiled,
+        &index,
+        &scope,
+        TokenRegexStrategyOverride::ForceGlobal,
+    );
+    let scoped = expand_compiled_token_regex_for_scope(
+        &compiled,
+        &index,
+        &scope,
+        TokenRegexStrategyOverride::ForceScoped,
+    );
+    assert_eq!(scoped.expanded_tokens, global.expanded_tokens);
+    assert_eq!(scoped.tokens_examined, 200);
+    verify_file_tokens_bidirectional(&index).expect("tombstone slot must remain consistent");
+}
+
+
+#[test]
+fn test_token_regex_forced_global_vs_scoped_differential_matrix() {
+    let ctx = make_token_regex_differential_ctx();
+    let cases = vec![
+        ("k1-selectivity-0", json!({
+            "terms": ["nevermatches"], "regex": true, "file": ["B.rs"]
+        })),
+        ("k1-selectivity-1", json!({
+            "terms": ["sel000"], "regex": true, "file": ["B.rs"]
+        })),
+        ("k1-selectivity-50", json!({
+            "terms": ["sel0[0-4][0-9]"], "regex": true, "file": ["B.rs"]
+        })),
+        ("k1-selectivity-100-count-only", json!({
+            "terms": ["sel.*"], "regex": true, "file": ["B.rs"], "countOnly": true
+        })),
+        ("k1-overlapping-patterns", json!({
+            "terms": ["sel0.*", ".*0"], "regex": true, "file": ["B.rs"]
+        })),
+        ("k1-current-and", json!({
+            "terms": ["sel0.*", ".*0"], "regex": true, "mode": "and",
+            "file": ["B.rs"], "filesOnly": true
+        })),
+        ("k1-invert", json!({
+            "terms": ["sel000"], "regex": true, "file": ["B.rs"],
+            "invert": true, "filesOnly": true
+        })),
+        ("k2-max-results", json!({
+            "terms": ["sel.*"], "regex": true, "file": ["A.rs", "B.rs"],
+            "maxResults": 1
+        })),
+        ("k2-shared-token-union", json!({
+            "terms": ["sel00[01]"], "regex": true, "file": ["A.rs", "B.rs"]
+        })),
+        ("k2-max-results-zero", json!({
+            "terms": ["sel.*"], "regex": true, "file": ["A.rs", "B.rs"],
+            "maxResults": 0
+        })),
+        ("empty-source-file", json!({
+            "terms": ["sel.*"], "regex": true, "file": ["Empty.rs"]
+        })),
+        ("all-global-fallback", json!({
+            "terms": ["sel.*"], "regex": true, "filesOnly": true
+        })),
+    ];
+
+    for (label, args) in cases {
+        let global = run_token_regex_strategy(&ctx, &args, "global");
+        let scoped = run_token_regex_strategy(&ctx, &args, "scoped");
+        assert_eq!(
+            token_regex_semantic_projection(&scoped),
+            token_regex_semantic_projection(&global),
+            "semantic mismatch for {label}",
+        );
+        for output in [&global, &scoped] {
+            let expected_denominator = output["summary"]["regexExpansion"]["matchedTokenCount"]
+                .as_u64()
+                .expect("matchedTokenCount") as usize;
+            if let Some(files) = output.get("files").and_then(Value::as_array) {
+                for file in files {
+                    if let Some((_, denominator)) = terms_matched_parts(file) {
+                        assert_eq!(
+                            denominator, expected_denominator,
+                            "termsMatched must use the execution universe for {label}",
+                        );
+                    }
+                }
+            }
+        }
+        for output in [&global, &scoped] {
+            let timings = &output["summary"]["regexExpansion"]["timings"];
+            let accounted = timings["planMs"].as_f64().unwrap()
+                + timings["universeBuildMs"].as_f64().unwrap()
+                + timings["scanCollectMs"].as_f64().unwrap()
+                + timings["sortDedupMs"].as_f64().unwrap();
+            assert!(
+                timings["expansionTotalMs"].as_f64().unwrap() + 0.001 >= accounted,
+                "expansion timing envelope for {label}: {timings}",
+            );
+        }
+        if label == "k2-shared-token-union" {
+            assert_eq!(scoped["summary"]["regexExpansion"]["scopeFiles"], 2);
+            assert_eq!(scoped["summary"]["regexExpansion"]["scopeTokenReferences"], 102);
+            assert_eq!(scoped["summary"]["regexExpansion"]["scopeUniqueTokens"], 100);
+        }
+        if label == "k1-overlapping-patterns" {
+            assert_eq!(global["files"][0]["termsMatched"], "100/110");
+            assert_eq!(scoped["files"][0]["termsMatched"], "100/100");
+        }
+        if args.get("file").is_some() {
+            assert_eq!(scoped["summary"]["regexExpansion"]["strategy"], "scopedFileTokens");
+            assert_eq!(scoped["summary"]["regexExpansion"]["accountingScope"], "resolvedFiles");
+            assert_eq!(scoped["summary"]["regexExpansion"]["globalMatchedTokenCountKnown"], false);
+        } else {
+            assert_eq!(scoped["summary"]["regexExpansion"]["strategy"], "globalVocabulary");
+        }
+    }
+
+    for strategy in ["global", "scoped"] {
+        let mut args = json!({
+            "terms": ["["], "regex": true, "file": ["B.rs"],
+        });
+        args["__testTokenRegexStrategy"] = json!(strategy);
+        let result = handle_xray_grep(&ctx, &args);
+        assert!(result.is_error, "invalid regex must fail for {strategy}");
+    }
+}
+
+
+
+
+#[test]
 fn test_non_empty_global_token_regex_matches_v1_semantics_without_v2_telemetry() {
     let ctx = make_grep_ctx(
         vec![
@@ -1086,6 +1646,12 @@ fn test_non_empty_global_token_regex_matches_v1_semantics_without_v2_telemetry()
         "strategy",
         "strategyReason",
         "accountingScope",
+        "globalUniqueTokens",
+        "scopeFiles",
+        "scopeTokenReferences",
+        "scopeUniqueTokens",
+        "globalMatchedTokenCountKnown",
+        "fallbackReason",
         "timings",
     ] {
         object.remove(field);
