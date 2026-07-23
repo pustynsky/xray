@@ -955,14 +955,9 @@ fn extract_call_sites_from_body(
         .iter().copied().collect();
 
     let all_regexes: Vec<&Regex> = vec![&EXEC_RE, &FROM_RE, &JOIN_RE, &INSERT_RE, &UPDATE_RE, &DELETE_RE];
+    let masked_body = mask_sql_comments_and_literals_preserve_offsets(body_text);
 
-    for (line_idx, line) in batch.lines.iter().enumerate() {
-        let trimmed = line.trim();
-        // Skip comment lines
-        if trimmed.starts_with("--") {
-            continue;
-        }
-
+    for (line_idx, line) in masked_body.lines().enumerate() {
         let line_num = (batch.start_line_offset + line_idx + 1) as u32;
 
         for regex in &all_regexes {
@@ -1003,7 +998,8 @@ fn extract_call_sites_from_body(
         }
     }
 
-    let masked_body = mask_sql_comments_and_literals_preserve_offsets(body_text);
+    // Declaration and scalar-candidate regexes both require a schema today. If scalar
+    // candidates gain unqualified names, declaration suppression must change with them.
     let declaration_ranges: Vec<_> = CREATE_FUNCTION_DECL_RE
         .find_iter(&masked_body)
         .map(|matched| matched.range())
@@ -1026,6 +1022,8 @@ fn extract_call_sites_from_body(
             continue;
         }
         let method_name_lower = method_name.to_ascii_lowercase();
+        // Until typed scalar call sites land (D12), keep this conservative: broad
+        // schema.name(...) matching would misclassify XML/spatial member calls.
         let has_explicit_function_name = raw_method_name.starts_with('[')
             || method_name_lower.starts_with("fn_")
             || method_name_lower.starts_with("ufn_");

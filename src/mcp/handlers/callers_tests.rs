@@ -2395,6 +2395,38 @@ BEGIN
     SELECT Geom.STDistance(OtherGeom)
 END
 GO
+CREATE PROCEDURE [dbo].[TargetProc]
+AS
+BEGIN
+    SELECT 1
+END
+GO
+CREATE PROCEDURE [dbo].[RealCaller]
+AS
+BEGIN
+    EXEC [dbo].[TargetProc]
+END
+GO
+CREATE PROCEDURE [dbo].[StringOnly]
+AS
+BEGIN
+    DECLARE @sql NVARCHAR(MAX) = N'EXEC [dbo].[TargetProc]'
+END
+GO
+CREATE PROCEDURE [dbo].[LineCommentOnly]
+AS
+BEGIN
+    -- EXEC [dbo].[TargetProc]
+    SELECT 1
+END
+GO
+CREATE PROCEDURE [dbo].[BlockCommentOnly]
+AS
+BEGIN
+    /* EXEC [dbo].[TargetProc] */
+    SELECT 1
+END
+GO
 CREATE PROCEDURE [dbo].[usp_WR_Leaf]
 AS
 BEGIN
@@ -2463,6 +2495,26 @@ END
     let callers = caller_builder.build("ufn_WR_Value", None, 0, &[]);
     assert_eq!(callers.len(), 1, "expected only the real caller: {callers:?}");
     assert_eq!(callers[0]["method"], "usp_WR_Root");
+
+    let mut masked_exec_builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 3,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
+    };
+    let target_callers = masked_exec_builder.build("TargetProc", Some("dbo"), 0, &[]);
+    assert_eq!(
+        target_callers.len(),
+        1,
+        "comments/literals must not create reverse SQL edges: {target_callers:?}"
+    );
+    assert_eq!(target_callers[0]["method"], "RealCaller");
 
     let mut recursive_caller_builder = CallerTreeBuilder {
         ctx: &caller_ctx,
