@@ -944,12 +944,34 @@ fn test_token_regex_count_only_broad_pattern_has_bounded_query_metadata() {
     let summary = &output["summary"];
     let expansion = &summary["regexExpansion"];
     assert_eq!(summary["termsSearched"], json!([".*"]));
+    assert_eq!(expansion["schemaVersion"], json!(2));
+    assert_eq!(expansion["strategy"], "globalVocabulary");
+    assert_eq!(expansion["strategyReason"], "globalVocabularyBaseline");
+    assert_eq!(expansion["accountingScope"], "globalVocabulary");
     assert_eq!(expansion["patterns"], json!(1));
     assert_eq!(expansion["tokensExamined"], json!(TOKEN_COUNT));
     assert_eq!(expansion["matchedTokenCount"], json!(TOKEN_COUNT));
     assert_eq!(expansion["postingListsVisited"], json!(TOKEN_COUNT));
     assert_eq!(expansion["postingsChecked"], json!(TOKEN_COUNT));
     assert_eq!(expansion["postingsInScope"], json!(TOKEN_COUNT));
+    let timings = &expansion["timings"];
+    for field in [
+        "planMs",
+        "compileMs",
+        "universeBuildMs",
+        "scanCollectMs",
+        "sortDedupMs",
+        "expansionTotalMs",
+        "postingScoreMs",
+    ] {
+        assert!(timings[field].as_f64().is_some(), "missing timing {field}: {timings}");
+    }
+    let expansion_phases = timings["planMs"].as_f64().unwrap()
+        + timings["universeBuildMs"].as_f64().unwrap()
+        + timings["scanCollectMs"].as_f64().unwrap()
+        + timings["sortDedupMs"].as_f64().unwrap();
+    assert!(timings["expansionTotalMs"].as_f64().unwrap() + 0.001 >= expansion_phases);
+    assert!(timings["postingScoreMs"].as_f64().unwrap() > 0.0);
     assert!(expansion.get("matchedTokenPreview").is_none());
     assert!(expansion.get("previewTruncated").is_none());
 }
@@ -983,11 +1005,25 @@ fn test_token_regex_preview_is_capped_and_independent_of_max_results() {
     assert_eq!(unlimited["files"].as_array().unwrap().len(), 2);
     assert_eq!(capped["files"].as_array().unwrap().len(), 1);
     assert_eq!(unlimited["summary"]["termsSearched"], json!(["ToKeN_.*"]));
-    assert_eq!(
-        unlimited["summary"]["regexExpansion"],
-        capped["summary"]["regexExpansion"],
-    );
+    let mut unlimited_semantics = unlimited["summary"]["regexExpansion"].clone();
+    let mut capped_semantics = capped["summary"]["regexExpansion"].clone();
+    for expansion in [&mut unlimited_semantics, &mut capped_semantics] {
+        let object = expansion.as_object_mut().unwrap();
+        for field in [
+            "schemaVersion",
+            "strategy",
+            "strategyReason",
+            "accountingScope",
+            "timings",
+        ] {
+            object.remove(field);
+        }
+    }
+    assert_eq!(unlimited_semantics, capped_semantics);
     let expansion = &unlimited["summary"]["regexExpansion"];
+    assert_eq!(expansion["schemaVersion"], json!(2));
+    assert_eq!(expansion["strategy"], "globalVocabulary");
+    assert_eq!(expansion["accountingScope"], "globalVocabulary");
     let preview = expansion["matchedTokenPreview"].as_array().unwrap();
     assert_eq!(expansion["matchedTokenCount"], json!(TOKEN_COUNT));
     assert_eq!(preview.len(), TOKEN_REGEX_PREVIEW_MAX);
@@ -1018,10 +1054,53 @@ fn test_token_regex_posting_counters_distinguish_global_and_scoped_work() {
     assert!(!result.is_error, "scoped token regex failed: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let expansion = &output["summary"]["regexExpansion"];
+    assert_eq!(expansion["strategy"], "globalVocabulary");
+    assert_eq!(expansion["accountingScope"], "globalVocabulary");
     assert_eq!(expansion["postingListsVisited"], json!(2));
     assert_eq!(expansion["postingsChecked"], json!(3));
     assert_eq!(expansion["postingsInScope"], json!(1));
     assert_eq!(output["summary"]["totalFiles"], json!(1));
+}
+
+#[test]
+fn test_non_empty_global_token_regex_matches_v1_semantics_without_v2_telemetry() {
+    let ctx = make_grep_ctx(
+        vec![
+            ("tokenone", 0, vec![1]),
+            ("tokenone", 1, vec![2]),
+            ("tokentwo", 1, vec![3]),
+        ],
+        vec!["C:/test/A.rs", "C:/test/B.rs"],
+        vec!["rs"],
+    );
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["token.*"],
+        "regex": true,
+    }));
+    assert!(!result.is_error, "token regex failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let mut expansion = output["summary"]["regexExpansion"].clone();
+    let object = expansion.as_object_mut().unwrap();
+    for field in [
+        "schemaVersion",
+        "strategy",
+        "strategyReason",
+        "accountingScope",
+        "timings",
+    ] {
+        object.remove(field);
+    }
+
+    assert_eq!(expansion, json!({
+        "patterns": 1,
+        "tokensExamined": 2,
+        "matchedTokenCount": 2,
+        "postingListsVisited": 2,
+        "postingsChecked": 3,
+        "postingsInScope": 3,
+        "matchedTokenPreview": ["tokenone", "tokentwo"],
+        "previewTruncated": 0,
+    }));
 }
 
 #[test]

@@ -19,7 +19,10 @@ use super::utils::{self,
     stale_lines_warning, stale_phrase_warning, validate_search_dir,
 };
 use super::file_scope::ResolvedFileScope;
-use super::token_regex::{expand_regex_terms, RegexExpansion, TokenSearchTelemetry};
+use super::token_regex::{
+    compile_token_regex_patterns, expand_compiled_token_regex, RegexExpansion,
+    RegexExpansionDedup, TokenSearchTelemetry,
+};
 #[cfg(test)]
 use super::token_regex::TOKEN_REGEX_PREVIEW_MAX;
 use super::HandlerContext;
@@ -3213,24 +3216,50 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     }
 
     let mut regex_expansion = if parsed.use_regex {
-        match expand_regex_terms(&raw_terms, &index) {
-            Ok(expansion) => Some(expansion),
+        let compiled = match compile_token_regex_patterns(&raw_terms) {
+            Ok(compiled) => compiled,
             Err(error) => return ToolCallResult::error(error.to_string()),
-        }
+        };
+        let expansion_started = Instant::now();
+        let plan_started = expansion_started;
+        let empty_scope = file_scope.is_empty();
+        let plan_duration = plan_started.elapsed();
+        let mut expansion = if empty_scope {
+            RegexExpansion::empty(&compiled)
+        } else {
+            expand_compiled_token_regex(
+                &compiled,
+                index.index.keys().map(String::as_str),
+                RegexExpansionDedup::DeduplicateSorted,
+            )
+        };
+        expansion.set_plan_duration(plan_duration);
+        expansion.set_expansion_total_duration(expansion_started.elapsed());
+        Some(expansion)
     } else {
         None
     };
     let search_mode = if parsed.use_regex { "regex" } else if parsed.mode_and { "and" } else { "or" };
     let term_count_for_all = raw_terms.len();
 
-    let (file_scores, token_search_telemetry) = {
-        let execution_terms = regex_expansion.as_ref()
-            .map(|expansion| expansion.expanded_tokens.as_slice())
-            .unwrap_or(raw_terms.as_slice());
+    let execution_terms = regex_expansion.as_ref()
+        .map(|expansion| expansion.expanded_tokens.as_slice())
+        .unwrap_or(raw_terms.as_slice());
+    let skip_token_scoring = regex_expansion.is_some() && file_scope.is_empty();
+    let posting_score_started = Instant::now();
+    let (file_scores, token_search_telemetry) = if skip_token_scoring {
+        (HashMap::new(), TokenSearchTelemetry::default())
+    } else {
         score_normal_token_search(execution_terms, &index, &grep_params, &file_scope)
+    };
+    let posting_score_duration = if skip_token_scoring {
+        Duration::ZERO
+    } else {
+        posting_score_started.elapsed()
     };
     if let Some(expansion) = regex_expansion.as_mut() {
         expansion.posting_telemetry = token_search_telemetry;
+        expansion.set_posting_score_duration(posting_score_duration);
     }
 
     let (mut results, total_files, total_occurrences) =

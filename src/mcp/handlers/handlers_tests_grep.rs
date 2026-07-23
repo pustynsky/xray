@@ -5048,6 +5048,102 @@ fn e2e_grep_scope_coverage_missing_file_is_not_search_not_found() {
 }
 
 #[test]
+fn e2e_token_regex_empty_scope_skips_expansion_and_postings() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("token_regex_empty");
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": [".*"],
+        "regex": true,
+        "substring": false,
+        "countOnly": true,
+        "file": ["Missing.toml"],
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let expansion = &output["summary"]["regexExpansion"];
+    assert_eq!(expansion["schemaVersion"], 2);
+    assert_eq!(expansion["strategy"], "emptyScope");
+    assert_eq!(expansion["strategyReason"], "emptyResolvedScope");
+    assert_eq!(expansion["accountingScope"], "none");
+    assert_eq!(expansion["tokensExamined"], 0);
+    assert_eq!(expansion["matchedTokenCount"], 0);
+    assert_eq!(expansion["postingListsVisited"], 0);
+    assert_eq!(expansion["postingsChecked"], 0);
+    assert_eq!(expansion["postingsInScope"], 0);
+    let timings = &expansion["timings"];
+    assert!(timings["compileMs"].as_f64().is_some());
+    assert!(timings["planMs"].as_f64().is_some());
+    assert_eq!(timings["universeBuildMs"], 0.0);
+    assert_eq!(timings["scanCollectMs"], 0.0);
+    assert_eq!(timings["sortDedupMs"], 0.0);
+    assert_eq!(timings["postingScoreMs"], 0.0);
+    assert!(
+        timings["expansionTotalMs"].as_f64().unwrap() + 0.001
+            >= timings["planMs"].as_f64().unwrap()
+    );
+    assert_eq!(output["resultStatus"]["status"], "scope_not_found");
+    assert!(expansion.get("matchedTokenPreview").is_none());
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_token_regex_invalid_pattern_precedes_empty_scope() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("token_regex_invalid");
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["["],
+        "regex": true,
+        "substring": false,
+        "file": ["Missing.toml"],
+    }));
+    assert!(result.is_error, "invalid regex must fail before empty-scope handling");
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_token_regex_exclude_only_empty_scope_preserves_status() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("token_regex_exclude");
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": [".*"],
+        "regex": true,
+        "substring": false,
+        "exclude": ["ScopeIndexed.cs"],
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["resultStatus"]["status"], "not_found", "{}", output);
+    assert_eq!(output["resultStatus"]["reasons"], json!(["no_matches"]));
+    assert_eq!(output["summary"]["totalFiles"], 0);
+    let expansion = &output["summary"]["regexExpansion"];
+    assert_eq!(expansion["tokensExamined"], 0);
+    assert_eq!(expansion["postingListsVisited"], 0);
+    assert_eq!(expansion["postingsChecked"], 0);
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_token_regex_empty_scope_preserves_invert_contract() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("token_regex_invert");
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": [".*"],
+        "regex": true,
+        "substring": false,
+        "invert": true,
+        "file": ["Missing.toml"],
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["resultStatus"]["status"], "scope_not_found", "{}", output);
+    assert_eq!(output["summary"]["invert"], true);
+    assert_eq!(output["summary"]["totalFiles"], 0);
+    assert_eq!(output["summary"]["totalFilesInScope"], 0);
+    assert!(output["files"].as_array().unwrap().is_empty());
+    let expansion = &output["summary"]["regexExpansion"];
+    assert_eq!(expansion["tokensExamined"], 0);
+    assert_eq!(expansion["postingListsVisited"], 0);
+    assert_eq!(expansion["postingsChecked"], 0);
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
 fn e2e_grep_scope_coverage_mixed_scope_is_partial() {
     let (ctx, temp_root) = make_grep_scope_coverage_context("mixed");
     let result = dispatch_tool(&ctx, "xray_grep", &json!({

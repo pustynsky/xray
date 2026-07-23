@@ -488,7 +488,12 @@ fn test_expand_regex_terms_basic() {
     index.index.insert("unrelated".to_string(), vec![Posting { file_id: 0, lines: vec![3] }]);
 
     let terms = vec![".*service".to_string()];
-    let expansion = expand_regex_terms(&terms, &index).unwrap();
+    let compiled = compile_token_regex_patterns(&terms).unwrap();
+    let expansion = expand_compiled_token_regex(
+        &compiled,
+        index.index.keys().map(String::as_str),
+        RegexExpansionDedup::DeduplicateSorted,
+    );
     assert_eq!(expansion.patterns, 1);
     assert_eq!(expansion.tokens_examined, 3);
     assert!(expansion.expanded_tokens.contains(&"userservice".to_string()));
@@ -498,10 +503,35 @@ fn test_expand_regex_terms_basic() {
 
 #[test]
 fn test_expand_regex_terms_invalid_pattern() {
-    let index = ContentIndex::default();
     let terms = vec!["[invalid".to_string()];
-    let result = expand_regex_terms(&terms, &index);
+    let result = compile_token_regex_patterns(&terms);
     assert!(result.is_err());
+}
+
+#[test]
+fn test_empty_regex_expansion_has_zero_work_and_v2_accounting() {
+    let terms = vec![".*".to_string()];
+    let compiled = compile_token_regex_patterns(&terms).unwrap();
+    let expansion = RegexExpansion::empty(&compiled);
+    let value = expansion.to_json(false);
+
+    assert_eq!(value["schemaVersion"], json!(2));
+    assert_eq!(value["strategy"], "emptyScope");
+    assert_eq!(value["strategyReason"], "emptyResolvedScope");
+    assert_eq!(value["accountingScope"], "none");
+    assert_eq!(value["tokensExamined"], 0);
+    assert_eq!(value["matchedTokenCount"], 0);
+    assert_eq!(value["postingListsVisited"], 0);
+    assert_eq!(value["postingsChecked"], 0);
+    assert_eq!(value["postingsInScope"], 0);
+    assert_eq!(value["matchedTokenPreview"], json!([]));
+    assert_eq!(value["previewTruncated"], 0);
+    assert_eq!(value["timings"]["planMs"], 0.0);
+    assert_eq!(value["timings"]["universeBuildMs"], 0.0);
+    assert_eq!(value["timings"]["scanCollectMs"], 0.0);
+    assert_eq!(value["timings"]["sortDedupMs"], 0.0);
+    assert_eq!(value["timings"]["expansionTotalMs"], 0.0);
+    assert_eq!(value["timings"]["postingScoreMs"], 0.0);
 }
 
 // ─── score_normal_token_search tests ────────────────────────────
@@ -706,7 +736,12 @@ fn test_expand_regex_terms_dedups_overlapping_matches_grep014() {
     // Two patterns that both match `UserService`. Without dedup it would
     // appear twice and double-count its scoring contribution downstream.
     let raw = vec!["User.*".to_string(), ".*Service".to_string()];
-    let expansion = expand_regex_terms(&raw, &index).unwrap();
+    let compiled = compile_token_regex_patterns(&raw).unwrap();
+    let expansion = expand_compiled_token_regex(
+        &compiled,
+        index.index.keys().map(String::as_str),
+        RegexExpansionDedup::DeduplicateSorted,
+    );
     assert_eq!(expansion.patterns, 2);
     assert_eq!(expansion.tokens_examined, 6);
     let user_service_count = expansion.expanded_tokens.iter()
@@ -717,6 +752,16 @@ fn test_expand_regex_terms_dedups_overlapping_matches_grep014() {
     let mut sorted = expansion.expanded_tokens.clone();
     sorted.sort();
     assert_eq!(expansion.expanded_tokens, sorted);
+
+    let duplicate_preserving = expand_compiled_token_regex(
+        &compiled,
+        index.index.keys().map(String::as_str),
+        RegexExpansionDedup::PreservePatternDuplicates,
+    );
+    let duplicate_count = duplicate_preserving.expanded_tokens.iter()
+        .filter(|token| token.as_str() == "UserService")
+        .count();
+    assert_eq!(duplicate_count, 2);
 }
 
 // ─── line_regex_perf_hint tests (AC-1) ──────────────────────────
