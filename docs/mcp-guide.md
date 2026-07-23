@@ -286,6 +286,71 @@ When `responseTruncated: true` appears in the summary, narrow your query with `e
 | `literalPrefilter` | `lineRegex` mode | Diagnostic block for the literal-trigram prefilter. Always emits `used`, `candidateFiles`, `totalFiles`, `extractedFragments`. Conditional fields: `reason` (when `used: false`), `shortCircuited` (when ratio guard tripped), `totalFilesAfterScope` and `candidateFilesAfterScope` (when any `dir`/`file`/`ext`/`exclude*` filter is set — see note below) |
 | `perfHint` | Slow `lineRegex` over a large index | Actionable advice for slow scans. Two variants: prefilter-applied + still slow (per-line regex is the bottleneck), prefilter-attempted-but-discarded (cites `literalPrefilter.reason`) |
 
+### Token-regex expansion telemetry
+
+Token-regex requests (`regex: true`, `substring: false`) keep the raw user patterns in `summary.termsSearched` and report bounded execution metadata in `summary.regexExpansion`.
+
+`regexExpansion.schemaVersion=2` changes the meaning of existing counters and previews. Clients must inspect both `schemaVersion` and `accountingScope`:
+
+| Schema | `accountingScope` | Counter and preview universe |
+|---|---|---|
+| absent or `1` | implicit global | Entire global token vocabulary |
+| `2` | `none` | Empty execution universe; no vocabulary or postings were scanned |
+| `2` | `globalVocabulary` | Entire global token vocabulary, matching v1 semantics |
+| `2` | `resolvedFiles` (reserved for PR 5; not emitted by PR 4) | Unique tokens in the resolved execution file scope |
+
+Schema v2 reserves `resolvedFiles` for scoped expansion in PR 5; PR 4 does not emit it. Do not infer a global matched-token total from v2 counters unless `accountingScope` is `globalVocabulary`.
+
+A valid regex with an empty resolved scope compiles first and then returns through the normal result, invert, scope, coverage, and truncation pipeline:
+
+```json
+{
+  "summary": {
+    "termsSearched": [".*"],
+    "regexExpansion": {
+      "schemaVersion": 2,
+      "strategy": "emptyScope",
+      "strategyReason": "emptyResolvedScope",
+      "accountingScope": "none",
+      "patterns": 1,
+      "tokensExamined": 0,
+      "matchedTokenCount": 0,
+      "postingListsVisited": 0,
+      "postingsChecked": 0,
+      "postingsInScope": 0,
+      "timings": {
+        "planMs": 0.001,
+        "compileMs": 0.020,
+        "universeBuildMs": 0.0,
+        "scanCollectMs": 0.0,
+        "sortDedupMs": 0.0,
+        "expansionTotalMs": 0.002,
+        "postingScoreMs": 0.0
+      }
+    }
+  }
+}
+```
+
+An invalid regex remains an error even when the resolved scope is empty. Compilation intentionally precedes the empty-scope decision.
+
+For a non-empty request in the global path, `strategy` and `accountingScope` are both `globalVocabulary`; `tokensExamined`, `matchedTokenCount`, and the optional preview retain their v1 global meaning. `countOnly: true` omits `matchedTokenPreview` and `previewTruncated` in every strategy.
+
+Timing boundaries are serial wall-clock durations:
+
+| Timing | Includes |
+|---|---|
+| `compileMs` | Construction of all `regex::Regex` values |
+| `planMs` | Strategy selection only |
+| `universeBuildMs` | Token-universe construction; zero for empty/global paths |
+| `scanCollectMs` | Regex matching and conditional cloning of matching token strings |
+| `sortDedupMs` | Deterministic MCP sort and dedup |
+| `expansionTotalMs` | Planning through finalized expansion; excludes compile and posting score |
+| `postingScoreMs` | The complete token posting scorer |
+
+`expansionTotalMs` is at least the sum of plan, universe-build, scan/collect, and sort/dedup phases apart from normal timer precision. `searchTimeMs` additionally includes scope resolution, coverage, result finalization, result sorting, and response preparation.
+
+
 ### `literalPrefilter` scope-aware vs. global counters
 
 `candidateFiles` and `totalFiles` always describe the **indexed corpus pre-scope**: the trigram-prefilter computes its candidate set against the entire content index, then `passes_file_filters` (which honours `dir` / `file` / `ext` / `excludeDir` / `exclude`) is applied per file inside the scan loop. As a result, a `dir`-scoped query and its unscoped sibling will report **identical** `candidateFiles` and `totalFiles` even though the scoped query touches far fewer files.

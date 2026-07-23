@@ -31,6 +31,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 // Import from the code-xray crate
 use code_xray::{generate_trigrams, tokenize, ContentIndex, Posting, TrigramIndex};
@@ -43,7 +44,10 @@ use file_scope::{intersect_sorted_candidate_ids, ResolvedFileScope};
 #[allow(dead_code, unused_imports)]
 #[path = "../src/mcp/handlers/token_regex.rs"]
 mod token_regex;
-use token_regex::expand_regex_terms;
+use token_regex::{
+    compile_token_regex_patterns, expand_compiled_token_regex, RegexExpansion,
+    RegexExpansionDedup,
+};
 
 // ─── Shared parameter sets (BENCH-018) ───────────────────────────────
 
@@ -1194,7 +1198,12 @@ fn bench_token_regex_expand(c: &mut Criterion) {
         ] {
             group.bench_function(BenchmarkId::new(shape, vocabulary_size), |b| {
                 b.iter(|| {
-                    let expansion = expand_regex_terms(black_box(patterns), &index).unwrap();
+                    let compiled = compile_token_regex_patterns(black_box(patterns)).unwrap();
+                    let expansion = expand_compiled_token_regex(
+                        &compiled,
+                        index.index.keys().map(String::as_str),
+                        RegexExpansionDedup::DeduplicateSorted,
+                    );
                     let postings_in_scope = expansion.expanded_tokens.iter()
                         .filter_map(|token| index.index.get(token))
                         .flat_map(|postings| postings.iter())
@@ -1204,6 +1213,63 @@ fn bench_token_regex_expand(c: &mut Criterion) {
                         expansion.tokens_examined,
                         expansion.expanded_tokens.len(),
                         postings_in_scope,
+                    ));
+                })
+            });
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_token_regex_empty_scope(c: &mut Criterion) {
+    let mut group = c.benchmark_group("token_regex_empty_scope");
+    let patterns = vec![".*".to_string()];
+
+    for &vocabulary_size in BENCH_SIZES {
+        let index = build_token_vocabulary_index(vocabulary_size, 1_000);
+        group.bench_function(BenchmarkId::new("patterns_1", vocabulary_size), |b| {
+            b.iter(|| {
+                black_box(index.index.len());
+                let compiled = compile_token_regex_patterns(black_box(&patterns)).unwrap();
+                let expansion_started = Instant::now();
+                let plan_started = Instant::now();
+                let plan_duration = plan_started.elapsed();
+                let mut expansion = RegexExpansion::empty(&compiled);
+                expansion.set_plan_duration(plan_duration);
+                expansion.set_expansion_total_duration(expansion_started.elapsed());
+                black_box((expansion.patterns, expansion.tokens_examined));
+            })
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_token_regex_phase(c: &mut Criterion) {
+    let mut group = c.benchmark_group("token_regex_phase");
+    let selectivity_cases = [
+        ("selectivity_0_percent", "never_matches"),
+        ("selectivity_1_percent", "token_.*00"),
+        ("selectivity_50_percent", "token_.*[02468]"),
+        ("selectivity_100_percent", ".*"),
+    ];
+
+    for &vocabulary_size in BENCH_SIZES {
+        let index = build_token_vocabulary_index(vocabulary_size, 1_000);
+        for (selectivity, pattern) in selectivity_cases {
+            let patterns = vec![pattern.to_string()];
+            let compiled = compile_token_regex_patterns(&patterns).unwrap();
+            group.bench_function(BenchmarkId::new(selectivity, vocabulary_size), |b| {
+                b.iter(|| {
+                    let expansion = expand_compiled_token_regex(
+                        black_box(&compiled),
+                        index.index.keys().map(String::as_str),
+                        RegexExpansionDedup::DeduplicateSorted,
+                    );
+                    black_box((
+                        expansion.tokens_examined,
+                        expansion.expanded_tokens.len(),
                     ));
                 })
             });
@@ -1224,6 +1290,8 @@ criterion_group!(
     bench_posting_scope_filter,
     bench_phrase_scope_filter,
     bench_token_regex_expand,
+    bench_token_regex_empty_scope,
+    bench_token_regex_phase,
     bench_definition_candidate_intersection,
     bench_index_build,
     bench_serialization,
