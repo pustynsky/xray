@@ -3,6 +3,8 @@
 
 ## Unreleased
 
+- **`xray_callers` now finds DI callers through non-conventionally named interfaces.** Short implementation names and exact implementation `symbolId` roots include callers whose receivers use the implementation's declared base types, matching interface-root and fully-qualified queries.
+
 - **Added `scripts/install-local.ps1` for local source deployments.** It builds the current checkout and installs `xray.exe` to `%LOCALAPPDATA%\xray` with hash verification.
 
 - **`xray_edit` now preserves NTFS alternate data streams on Windows.** Existing files are committed with `ReplaceFileW`, retaining binary, empty, Unicode-named, and `Zone.Identifier` streams byte-for-byte while changing only the unnamed stream. Direct requests targeting an ADS path remain rejected.

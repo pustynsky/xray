@@ -2118,6 +2118,33 @@ fn resolve_parent_file_ids(
         file_ids.extend(postings.iter().map(|p| p.file_id));
     }
 
+    if let Some(indices) = def_idx.name_index.get(&cls_lower) {
+        for &index in indices {
+            let Some(definition) = def_idx.definitions.get(index as usize) else { continue };
+            if !matches!(
+                definition.kind,
+                DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record
+            ) {
+                continue;
+            }
+            for base_type in &definition.base_types {
+                let base_type_lower = base_type
+                    .split('<')
+                    .next()
+                    .unwrap_or(base_type)
+                    .trim()
+                    .to_lowercase();
+                let simple_base_type = base_type_lower
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(&base_type_lower);
+                if let Some(postings) = content_index.index.get(simple_base_type) {
+                    file_ids.extend(postings.iter().map(|posting| posting.file_id));
+                }
+            }
+        }
+    }
+
     // Also check for interface name (IClassName pattern for DI)
     let interface_name = format!("i{}", cls_lower);
     if let Some(postings) = content_index.index.get(&interface_name) {

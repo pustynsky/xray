@@ -1023,6 +1023,24 @@ public sealed class InlineReceiverCaller {
     );
 }
 
+const D20_DI_IMPLEMENTATION_SOURCE: &str = r#"namespace Demo;
+public interface IWorkflowMarker { }
+public interface IWorkflowManager {
+    void Fetch();
+}
+public sealed class WorkflowManagerBlock : IWorkflowMarker, IWorkflowManager {
+    public void Fetch() { }
+}
+"#;
+
+const D20_DI_CALLER_SOURCE: &str = r#"namespace Demo;
+public sealed class WorkflowController {
+    private readonly IWorkflowManager _manager;
+    public WorkflowController(IWorkflowManager manager) { _manager = manager; }
+    public void Handle() { _manager.Fetch(); }
+}
+"#;
+
 const D20_OVERLOAD_SOURCE: &str = r#"namespace Demo {
 public sealed class Router {
     public void Route(int value) => IntTarget();
@@ -1665,6 +1683,97 @@ fn test_d20_definitions_exposes_distinct_overload_symbol_ids() {
     assert!(definitions.iter().all(|definition| {
         definition["qualifiedType"].as_str() == Some("Demo.Router")
     }), "{}", output);
+}
+
+#[test]
+fn test_xray_callers_di_implementation_roots_find_interface_receiver() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context_files(
+        &root,
+        &[
+            ("WorkflowManagerBlock.cs", D20_DI_IMPLEMENTATION_SOURCE),
+            ("WorkflowController.cs", D20_DI_CALLER_SOURCE),
+        ],
+    );
+    let symbol_id = {
+        let index = context.def_index.as_ref().unwrap().read().unwrap();
+        let definition_index = index.name_index["fetch"]
+            .iter()
+            .copied()
+            .find(|&candidate| {
+                index.definitions[candidate as usize]
+                    .parent
+                    .as_deref()
+                    .is_some_and(|parent| parent.ends_with("WorkflowManagerBlock"))
+            })
+            .unwrap();
+        index.csharp_semantics.symbol_id_for_definition(definition_index)
+            .unwrap()
+            .as_public_id()
+    };
+
+    let queries = [
+        (
+            "interface",
+            json!({
+                "method": ["Fetch"],
+                "class": "IWorkflowManager",
+                "direction": "up",
+                "depth": 1,
+                "productionOnly": true,
+                "resolveInterfaces": true
+            }),
+        ),
+        (
+            "fully-qualified implementation",
+            json!({
+                "method": ["Fetch"],
+                "class": "Demo.WorkflowManagerBlock",
+                "direction": "up",
+                "depth": 1,
+                "productionOnly": true,
+                "resolveInterfaces": true
+            }),
+        ),
+        (
+            "short implementation",
+            json!({
+                "method": ["Fetch"],
+                "class": "WorkflowManagerBlock",
+                "direction": "up",
+                "depth": 1,
+                "productionOnly": true,
+                "resolveInterfaces": true
+            }),
+        ),
+        (
+            "implementation symbolId",
+            json!({
+                "targets": [{ "symbolId": symbol_id }],
+                "direction": "up",
+                "depth": 1,
+                "productionOnly": true,
+                "resolveInterfaces": true
+            }),
+        ),
+    ];
+
+    let mut missing = Vec::new();
+    for (label, args) in queries {
+        let result = dispatch_tool(&context, "xray_callers", &args);
+        assert!(!result.is_error, "{label}: {}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let has_caller = output["callTree"].as_array().unwrap().iter().any(|node| {
+            node["class"].as_str() == Some("WorkflowController")
+                && node["method"].as_str() == Some("Handle")
+        });
+        if !has_caller {
+            missing.push(format!("{label}: {output:#}"));
+        }
+    }
+
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
 }
 
 #[test]
