@@ -466,3 +466,28 @@ Tests for the `xray_callers` MCP tool: call trees (up/down), DI resolution, over
 ### T-CR-01: Fuzzy DI matching works via `is_implementation_of`
 
 **Unit tests:** `test_verify_fuzzy_di_without_base_types`, `test_verify_reverse_fuzzy_di_without_base_types`
+
+## D20-Core release-binary gate
+
+Prerequisite: PowerShell 7 or newer (`pwsh`). Windows PowerShell 5.1 is rejected by the script before any build, index, or process operation.
+
+Run the standalone PowerShell harness from the repository root:
+
+```powershell
+# Build and test the current checkout.
+.\scripts\test-d20-release.ps1 -BuildRelease
+
+# Reuse an already built candidate.
+.\scripts\test-d20-release.ps1 -Binary .\target\release\xray.exe
+
+# Also require pre-D20 baseline red and exercise genuine v6-to-v7 migration.
+.\scripts\test-d20-release.ps1 -BuildRelease -IncludeBaselineControl
+```
+
+The harness creates an isolated C# fixture, runs a .NET compiler/runtime oracle, builds content and definition indexes, and starts the selected release binary with `serve --definitions`. It performs MCP `initialize` and request-ID synchronized `tools/call` requests for `xray_definitions`, `xray_callers`, and `xray_reindex_definitions`; fixed sleeps are not used for protocol synchronization.
+
+The candidate checks cover distinct overload and namespace-qualified `symbolId` values, exact up/down roots, bounded ambiguity without exact subtree traversal, unsafe legacy fan-out labeling, same-line call sites, partial declarations, namespace isolation, clean shutdown, and watcher add/delete/rename/reparse lifecycle. The lifecycle phase polls observable MCP outcomes with a bounded timeout and verifies that removed extension declarations and old identities do not survive reparse or full definition reindex.
+
+`-IncludeBaselineControl` builds commit `ef14a4875914fb8a5323313001f06c246688513c` in a temporary detached worktree with the same `Cargo.lock` and toolchain. The old binary must fail overload/namespace/ambiguity assertions. Its genuine v6 definition index is then loaded by the candidate: the gate requires a pre-decode version mismatch, a persisted v7 rebuild, stable exact identity after rebuild, and a clean second load.
+
+The default JSON result is `target/d20-release-result.json`; use `-OutputPath` to choose another path under `target/`. It contains fixture hashes, toolchain and OS metadata, phase/check status, raw timings, persisted index bytes, binary hashes, and cleanup status. `-KeepArtifacts` retains the temporary fixture for diagnosis. A missing .NET SDK is a failed prerequisite, not a skipped or successful oracle.

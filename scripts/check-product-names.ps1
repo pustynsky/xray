@@ -133,6 +133,14 @@ $combinedBroad = [regex]::new(
     [System.Text.RegularExpressions.RegexOptions]('Compiled, IgnoreCase')
 )
 $urlRegex = [regex]::new('https?://', 'Compiled')
+# Canonical tooling identifiers required verbatim by deterministic fixtures.
+$broadAllowlist = @(
+    @{
+        Path = 'scripts/test-d20-release.ps1'
+        Text = 'Sdk="Microsoft.NET.Sdk"'
+        Replacement = 'Sdk=""'
+    }
+)
 
 $totalFindings = 0
 $fileFindings = @{}
@@ -212,7 +220,13 @@ foreach ($gitFile in $gitFiles) {
         }
 
         if ($hasBroad -and -not $urlRegex.IsMatch($line)) {
-            $mb = $combinedBroad.Matches($line)
+            $broadScanLine = $line
+            foreach ($allowed in $broadAllowlist) {
+                if ($relativePath -eq $allowed.Path) {
+                    $broadScanLine = $broadScanLine.Replace($allowed.Text, $allowed.Replacement)
+                }
+            }
+            $mb = $combinedBroad.Matches($broadScanLine)
             foreach ($hit in $mb) {
                 $matched = $hit.Value
                 foreach ($bp in $broadPatterns) {
