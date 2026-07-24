@@ -841,99 +841,6 @@ fn windows_path(path: &Path) -> Result<Vec<u16>, String> {
     Ok(wide)
 }
 
-#[cfg(windows)]
-fn validate_alternate_data_stream_safety(target: &PreparedEditTarget) -> Result<(), String> {
-    use windows_sys::Win32::Foundation::{
-        ERROR_HANDLE_EOF, ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE,
-    };
-    use windows_sys::Win32::Storage::FileSystem::{
-        FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard,
-        WIN32_FIND_STREAM_DATA,
-    };
-
-    if !target.file_existed {
-        return Ok(());
-    }
-
-    let path = &target.write_path;
-    let path_wide = windows_path(path)?;
-    // SAFETY: `WIN32_FIND_STREAM_DATA` is a plain Win32 output buffer, and zero is a valid
-    // initial state for every field before `FindFirstStreamW` populates it.
-    let mut stream_data: WIN32_FIND_STREAM_DATA = unsafe { std::mem::zeroed() };
-    // SAFETY: `path_wide` is NUL-terminated and `stream_data` remains valid for the call.
-    let find_handle = unsafe {
-        FindFirstStreamW(
-            path_wide.as_ptr(),
-            FindStreamInfoStandard,
-            (&mut stream_data as *mut WIN32_FIND_STREAM_DATA).cast(),
-            0,
-        )
-    };
-    if find_handle == INVALID_HANDLE_VALUE {
-        let error = std::io::Error::last_os_error();
-        // Microsoft documents EOF as "no streams" and INVALID_PARAMETER as a filesystem
-        // that does not support streams. Every other failure remains fail-closed.
-        if matches!(
-            error.raw_os_error(),
-            Some(code) if code == ERROR_HANDLE_EOF as i32
-                || code == ERROR_INVALID_PARAMETER as i32
-        ) {
-            return Ok(());
-        }
-        return Err(format!(
-            "cannot inspect NTFS alternate data streams for '{}'; editing is disabled to prevent data loss: {}",
-            path.display(),
-            error
-        ));
-    }
-
-    let result = loop {
-        let name_end = stream_data
-            .cStreamName
-            .iter()
-            .position(|&unit| unit == 0)
-            .unwrap_or(stream_data.cStreamName.len());
-        let stream_name = String::from_utf16_lossy(&stream_data.cStreamName[..name_end]);
-        if !stream_name.eq_ignore_ascii_case("::$DATA") {
-            break Err(format!(
-                "File '{}' contains NTFS alternate data streams; editing is disabled to prevent data loss",
-                path.display()
-            ));
-        }
-
-        // SAFETY: `find_handle` is open and `stream_data` remains valid for the call.
-        if unsafe {
-            FindNextStreamW(
-                find_handle,
-                (&mut stream_data as *mut WIN32_FIND_STREAM_DATA).cast(),
-            )
-        } != 0
-        {
-            continue;
-        }
-
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(ERROR_HANDLE_EOF as i32) {
-            break Ok(());
-        }
-        break Err(format!(
-            "cannot finish inspecting NTFS alternate data streams for '{}'; editing is disabled to prevent data loss: {}",
-            path.display(),
-            error
-        ));
-    };
-
-    // SAFETY: `find_handle` came from a successful `FindFirstStreamW` call.
-    let close_result = unsafe { FindClose(find_handle) };
-    if close_result == 0 && result.is_ok() {
-        return Err(format!(
-            "cannot close the NTFS stream enumeration handle for '{}'; editing is disabled to prevent data loss: {}",
-            path.display(),
-            std::io::Error::last_os_error()
-        ));
-    }
-    result
-}
 
 #[cfg(windows)]
 fn get_windows_file_attributes(path: &Path) -> Result<u32, String> {
@@ -1284,8 +1191,6 @@ fn read_and_validate_requested_file(
     ensure_git_internal_edit_allowed(&logical_path, path_str, allow_git_internals)?;
     let target = read_and_validate_file(server_dir, path_str, dry_run, allow_break_hard_links)?;
     ensure_git_internal_edit_allowed(&target.write_path, path_str, allow_git_internals)?;
-    #[cfg(windows)]
-    validate_alternate_data_stream_safety(&target)?;
     Ok(target)
 }
 
@@ -1852,15 +1757,50 @@ fn commit_new_file_no_clobber(target: &PreparedEditTarget, staged: &Path) -> Res
     }
 }
 
-fn commit_staged_file(target: &PreparedEditTarget, staged: &Path) -> Result<(), String> {
-    validate_source_unchanged(target)?;
-    #[cfg(windows)]
-    validate_alternate_data_stream_safety(target)?;
-    if target.file_existed {
-        rename_replace(staged, &target.write_path, target.metadata.as_ref())
-    } else {
-        commit_new_file_no_clobber(target, staged)
+#[derive(Debug)]
+struct CommitFailure {
+    message: String,
+    committed: bool,
+}
+
+impl std::fmt::Display for CommitFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
     }
+}
+
+impl std::ops::Deref for CommitFailure {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.message
+    }
+}
+
+impl CommitFailure {
+    fn before_commit(message: String) -> Self {
+        Self { message, committed: false }
+    }
+
+    #[cfg(windows)]
+    fn after_commit(message: String) -> Self {
+        Self { message, committed: true }
+    }
+}
+
+fn commit_staged_file(
+    target: &PreparedEditTarget,
+    staged: &Path,
+) -> Result<(), CommitFailure> {
+    validate_source_unchanged(target).map_err(CommitFailure::before_commit)?;
+    if target.file_existed {
+        #[cfg(windows)]
+        return rename_replace(staged, &target.write_path, target.metadata.as_ref());
+        #[cfg(not(windows))]
+        return rename_replace(staged, &target.write_path, target.metadata.as_ref())
+            .map_err(CommitFailure::before_commit);
+    }
+    commit_new_file_no_clobber(target, staged).map_err(CommitFailure::before_commit)
 }
 
 
@@ -1872,7 +1812,7 @@ fn write_file_with_endings(
     // Atomic write: stage into a sibling temp file, fsync, then rename over the target.
     // Plain `std::fs::write` does open(O_TRUNC) + write_all, leaving the file empty/partial
     // if the process is killed between those two steps. The rename below is atomic on POSIX
-    // and best-effort-atomic on Windows (see `rename_replace` for the remove+rename fallback).
+    // and uses ReplaceFileW for existing files on Windows.
     let tmp = temp_path_for(&target.write_path);
     stage_file_with_endings(
         &tmp,
@@ -1883,7 +1823,12 @@ fn write_file_with_endings(
 
     if let Err(error) = commit_staged_file(target, &tmp) {
         remove_file_best_effort(&tmp);
-        return Err(error);
+        if error.committed {
+            let committed_file = serde_json::to_string(&target.write_path)
+                .unwrap_or_else(|_| "null".to_string());
+            return Err(format!("{}. committedFile: {}", error.message, committed_file));
+        }
+        return Err(error.message);
     }
 
     // Crash-durability: fsync the parent directory so the rename itself is
@@ -1987,8 +1932,6 @@ fn temp_path_for(target: &Path) -> PathBuf {
     staging_path_for(target, "xray_tmp", COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Backup file path used by `rename_replace` to protect against the Windows
-/// remove-then-rename data-loss window (EDIT-007).
 fn backup_path_for(target: &Path) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -2000,21 +1943,81 @@ fn backup_path_for(target: &Path) -> PathBuf {
     )
 }
 
-/// Rename `src` to `dst`, replacing `dst` if it exists.
-///
-/// On Windows, `std::fs::rename` may fail when `dst` exists, so we fall back to
-/// `remove(dst)` + `rename(src, dst)`. The naive fallback has a data-loss
-/// window (EDIT-007): if `remove` succeeds but `rename` then fails (antivirus
-/// holding a handle, OneDrive sync, transient I/O), the target is gone forever.
-/// We mitigate by copying the original to a sibling backup first, restoring it
-/// on rename failure. The backup is removed on success.
+/// Replace `dst` with the staged file while preserving platform metadata.
+/// Windows uses `ReplaceFileW` to retain named streams.
+#[cfg(windows)]
+fn rename_replace(
+    src: &Path,
+    dst: &Path,
+    metadata: Option<&FileMetadataSnapshot>,
+) -> Result<(), CommitFailure> {
+    if !dst.exists() {
+        return std::fs::rename(src, dst).map_err(|error| {
+            CommitFailure::before_commit(format!(
+                "Cannot rename temp to '{}': {}",
+                dst.display(), error
+            ))
+        });
+    }
+
+    if let Some(metadata) = metadata {
+        metadata
+            .prepare_destination_for_replace(dst)
+            .map_err(CommitFailure::before_commit)?;
+        if let Err(error) = metadata.prepare_destination_for_replace(src) {
+            return match metadata.apply_to_staged_file(dst) {
+                Ok(()) => Err(CommitFailure::before_commit(error)),
+                Err(restore_error) => Err(CommitFailure::before_commit(format!(
+                    "{}; also failed to restore destination metadata: {}",
+                    error, restore_error
+                ))),
+            };
+        }
+    }
+
+    let backup = match rename_replace_windows(src, dst) {
+        Ok(backup) => backup,
+        Err(error) => {
+            if dst.exists()
+                && let Some(metadata) = metadata
+                && let Err(restore_error) = metadata.apply_to_staged_file(dst)
+            {
+                return Err(CommitFailure::before_commit(format!(
+                    "{}; also failed to restore metadata: {}",
+                    error, restore_error
+                )));
+            }
+            return Err(CommitFailure::before_commit(error));
+        }
+    };
+
+    if let Some(metadata) = metadata
+        && let Err(error) = metadata.apply_to_staged_file(dst)
+    {
+        return match restore_windows_backup(&backup, dst, src) {
+            Ok(()) => Err(CommitFailure::before_commit(format!(
+                "Replacement of '{}' was rolled back because metadata restoration failed: {}",
+                dst.display(), error
+            ))),
+            Err(rollback_error) => Err(CommitFailure::after_commit(format!(
+                "Replacement of '{}' committed but metadata restoration and rollback failed: {}; {}; recovery backup retained at '{}'",
+                dst.display(),
+                error,
+                rollback_error,
+                backup.display()
+            ))),
+        };
+    }
+    remove_file_best_effort(&backup);
+    Ok(())
+}
+
+#[cfg(not(windows))]
 fn rename_replace(
     src: &Path,
     dst: &Path,
     metadata: Option<&FileMetadataSnapshot>,
 ) -> Result<(), String> {
-    // `src` is fully staged, synced, and metadata-complete before this call.
-    // Try direct rename first (atomic on POSIX, sometimes works on Windows).
     let mut rename_error = match std::fs::rename(src, dst) {
         Ok(()) => return Ok(()),
         Err(error) => error,
@@ -2048,12 +2051,90 @@ fn rename_replace(
     result
 }
 
+#[cfg(windows)]
+fn rename_replace_windows(src: &Path, dst: &Path) -> Result<PathBuf, String> {
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+
+    let src_wide = windows_path(src)?;
+    let dst_wide = windows_path(dst)?;
+    let backup = backup_path_for(dst);
+    let backup_wide = windows_path(&backup)?;
+
+    // SAFETY: all paths are NUL-terminated and remain valid for the call.
+    let replaced = unsafe {
+        ReplaceFileW(
+            dst_wide.as_ptr(),
+            src_wide.as_ptr(),
+            backup_wide.as_ptr(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if replaced != 0 {
+        return Ok(backup);
+    }
+
+    let replace_error = std::io::Error::last_os_error();
+    if backup.exists() && !dst.exists() {
+        return match std::fs::rename(&backup, dst) {
+            Ok(()) => Err(format!(
+                "Cannot replace '{}': {}; original file restored from backup",
+                dst.display(), replace_error
+            )),
+            Err(restore_error) => Err(format!(
+                "Cannot replace '{}': {}; also failed to restore backup '{}': {}",
+                dst.display(),
+                replace_error,
+                backup.display(),
+                restore_error
+            )),
+        };
+    }
+    if backup.exists() {
+        return Err(format!(
+            "Cannot replace '{}': {}; recovery backup retained at '{}'",
+            dst.display(),
+            replace_error,
+            backup.display()
+        ));
+    }
+    Err(format!("Cannot replace '{}': {}", dst.display(), replace_error))
+}
+
+#[cfg(windows)]
+fn restore_windows_backup(backup: &Path, dst: &Path, staged: &Path) -> Result<(), String> {
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+
+    let backup_wide = windows_path(backup)?;
+    let dst_wide = windows_path(dst)?;
+    let staged_wide = windows_path(staged)?;
+    // SAFETY: all paths are NUL-terminated and remain valid for the call.
+    let restored = unsafe {
+        ReplaceFileW(
+            dst_wide.as_ptr(),
+            backup_wide.as_ptr(),
+            staged_wide.as_ptr(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if restored != 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "cannot restore original from ADS-aware backup: {}",
+        std::io::Error::last_os_error()
+    ))
+}
+
+#[cfg(not(windows))]
 fn rename_replace_fallback(
     src: &Path,
     dst: &Path,
     original_error: &std::io::Error,
 ) -> Result<(), String> {
-    // EDIT-007: stage a backup of the original before remove+rename.
     let backup = backup_path_for(dst);
     if let Err(error) = std::fs::copy(dst, &backup) {
         return Err(format!(
@@ -2552,19 +2633,19 @@ fn handle_multi_file_edit(
                 for (_, _, _, temp_path) in &temp_files[renamed..] {
                     remove_file_best_effort(temp_path);
                 }
-                // Build the list of files that already committed (renames
-                // succeeded for indices 0..renamed). These cannot be rolled back
-                // by this tool — surface them so the caller can `git restore`.
-                let committed_files: Vec<String> = temp_files[..renamed]
+                // Include the current file when its swap committed but recovery failed.
+                // These files cannot be rolled back by this tool; surface them for recovery.
+                let committed_count = renamed + usize::from(e.committed);
+                let committed_files: Vec<String> = temp_files[..committed_count]
                     .iter()
                     .map(|(_, path, _, _)| (*path).to_string())
                     .collect();
                 let committed_json = serde_json::to_string(&committed_files)
                     .unwrap_or_else(|_| "[]".to_string());
                 return ToolCallResult::error(format!(
-                    "File '{}': rename failed after {} of {} files committed: {}. \
+                    "File '{}': commit failed after {} of {} files committed: {}. \
                      Already-committed files cannot be rolled back. committedFiles: {}",
-                    path_str, renamed, temp_files.len(), e, committed_json
+                    path_str, committed_count, temp_files.len(), e.message, committed_json
                 ));
             }
         }
