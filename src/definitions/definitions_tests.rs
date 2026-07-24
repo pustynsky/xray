@@ -415,6 +415,37 @@ fn test_compact_removes_tombstones() {
     assert_eq!(file1_defs, &vec![0u32], "file_index[1] should point to 0 after compact");
 }
 
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn test_csharp_semantic_compaction_removes_dead_callables() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let first_file = root.join("First.cs");
+    let second_file = root.join("Second.cs");
+    std::fs::write(
+        &first_file,
+        "public sealed class First { public void Run() { } }",
+    ).unwrap();
+    std::fs::write(
+        &second_file,
+        "public sealed class Second { public void Run() { } }",
+    ).unwrap();
+
+    let mut index = DefinitionIndex {
+        root: root.to_string_lossy().to_string(),
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    super::incremental::update_file_definitions(&mut index, &first_file);
+    super::incremental::update_file_definitions(&mut index, &second_file);
+    super::incremental::update_file_definitions(&mut index, &first_file);
+    assert_eq!(index.csharp_semantics.callables.len(), 3);
+
+    super::incremental::compact_definitions(&mut index);
+    assert_eq!(index.csharp_semantics.callables.len(), 2);
+}
+
+
 #[test]
 fn test_compact_no_tombstones_is_noop() {
     use std::path::PathBuf;
@@ -1022,6 +1053,7 @@ fn test_definition_index_field_count_guard() {
         worker_panics: 0,
         empty_file_ids: Vec::new(),
         extension_methods: HashMap::new(),
+        csharp_semantics: Default::default(),
         respect_git_exclude: false,
     };
     drop(_guard);
@@ -1141,6 +1173,7 @@ fn test_apply_parsed_result_new_file() {
         call_sites: vec![],
         code_stats: vec![],
         extension_methods: HashMap::new(),
+        csharp_semantics: Default::default(),
 
     };
 
@@ -1181,6 +1214,7 @@ fn test_apply_parsed_result_existing_file_replaces_defs() {
         ],
         call_sites: vec![], code_stats: vec![],
         extension_methods: HashMap::new(),
+        csharp_semantics: Default::default(),
     };
     super::incremental::apply_parsed_result(&mut index, result1);
     assert!(index.name_index.contains_key("classa"));
@@ -1197,6 +1231,7 @@ fn test_apply_parsed_result_existing_file_replaces_defs() {
         ],
         call_sites: vec![], code_stats: vec![],
         extension_methods: HashMap::new(),
+        csharp_semantics: Default::default(),
     };
     super::incremental::apply_parsed_result(&mut index, result2);
 
@@ -1229,6 +1264,7 @@ fn test_apply_parsed_result_merges_extension_methods() {
         ],
         call_sites: vec![], code_stats: vec![],
         extension_methods: ext_methods,
+        csharp_semantics: Default::default(),
 
     };
 
@@ -1236,6 +1272,50 @@ fn test_apply_parsed_result_merges_extension_methods() {
 
     assert!(index.extension_methods.contains_key("Capitalize"));
     assert_eq!(index.extension_methods["Capitalize"], vec!["StringExtensions".to_string()]);
+}
+
+
+#[test]
+fn test_apply_parsed_result_replaces_file_owned_extension_methods() {
+    use std::path::PathBuf;
+    use super::types::*;
+    use std::collections::HashMap;
+
+    let mut index = DefinitionIndex::default();
+    let definition = || DefinitionEntry {
+        file_id: 0,
+        name: "StringExtensions".to_string(),
+        kind: DefinitionKind::Class,
+        line_start: 1,
+        line_end: 10,
+        parent: None,
+        signature: None,
+        modifiers: vec![],
+        attributes: vec![],
+        base_types: vec![],
+    };
+    let mut extension_methods = HashMap::new();
+    extension_methods.insert("Capitalize".to_string(), vec!["StringExtensions".to_string()]);
+
+    super::incremental::apply_parsed_result(&mut index, ParsedFileResult {
+        path: PathBuf::from("Extensions.cs"),
+        definitions: vec![definition()],
+        call_sites: vec![],
+        code_stats: vec![],
+        extension_methods,
+        csharp_semantics: Default::default(),
+    });
+    assert!(index.extension_methods.contains_key("Capitalize"));
+
+    super::incremental::apply_parsed_result(&mut index, ParsedFileResult {
+        path: PathBuf::from("Extensions.cs"),
+        definitions: vec![definition()],
+        call_sites: vec![],
+        code_stats: vec![],
+        extension_methods: HashMap::new(),
+        csharp_semantics: Default::default(),
+    });
+    assert!(!index.extension_methods.contains_key("Capitalize"));
 }
 
 #[test]
@@ -1267,6 +1347,7 @@ fn test_apply_parsed_result_remaps_file_id_in_all_defs() {
         ],
         call_sites: vec![], code_stats: vec![],
         extension_methods: HashMap::new(),
+        csharp_semantics: Default::default(),
     };
 
     super::incremental::apply_parsed_result(&mut index, result);
@@ -1320,6 +1401,7 @@ fn test_apply_parsed_result_with_call_sites_and_code_stats() {
             }),
         ],
         extension_methods: HashMap::new(),
+        csharp_semantics: Default::default(),
 
     };
 

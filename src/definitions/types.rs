@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use super::csharp_semantics::{CSharpFileContribution, CSharpSemanticIndex};
+
 // ─── Definition Kind ─────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -232,7 +234,7 @@ pub struct CallSite {
 
 /// Format version for DefinitionIndex. Bump when changing the struct layout.
 /// Loading an index with a different version triggers a rebuild.
-pub const DEFINITION_INDEX_VERSION: u32 = 6;
+pub const DEFINITION_INDEX_VERSION: u32 = 7;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(Default)]
@@ -278,6 +280,8 @@ pub struct DefinitionIndex {
     /// def_idx -> list of call sites found in that method/constructor body.
     #[serde(default)]
     pub method_calls: HashMap<u32, Vec<CallSite>>,
+    #[serde(default)]
+    pub csharp_semantics: CSharpSemanticIndex,
     /// def_idx -> CodeStats for methods/constructors/functions.
     #[serde(default)]
     pub code_stats: HashMap<u32, CodeStats>,
@@ -347,6 +351,8 @@ pub struct DefinitionIndexHead {
     #[serde(default)]
     pub method_calls: HashMap<u32, Vec<CallSite>>,
     #[serde(default)]
+    pub csharp_semantics: CSharpSemanticIndex,
+    #[serde(default)]
     pub code_stats: HashMap<u32, CodeStats>,
     #[serde(default)]
     pub template_children: HashMap<u32, Vec<String>>,
@@ -386,6 +392,7 @@ impl DefinitionIndex {
             file_index: self.file_index.clone(),
             selector_index: self.selector_index.clone(),
             method_calls: self.method_calls.clone(),
+            csharp_semantics: self.csharp_semantics.clone(),
             code_stats: self.code_stats.clone(),
             template_children: self.template_children.clone(),
             path_to_id: self.path_to_id.clone(),
@@ -422,6 +429,7 @@ impl DefinitionIndex {
             file_index: head.file_index,
             selector_index: head.selector_index,
             method_calls: head.method_calls,
+            csharp_semantics: head.csharp_semantics,
             code_stats: head.code_stats,
             template_children: head.template_children,
             path_to_id: head.path_to_id,
@@ -484,11 +492,14 @@ impl DefinitionIndex {
 pub type ParseResult = (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>);
 
 /// Result type for the C# parser, which also returns extension method mappings.
-#[cfg(feature = "lang-csharp")]
+#[cfg(all(feature = "lang-csharp", test))]
 pub type CsharpParseResult = (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>, HashMap<String, Vec<String>>);
 
+#[cfg(feature = "lang-csharp")]
+pub type CsharpSemanticParseResult = (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>, HashMap<String, Vec<String>>, CSharpFileContribution);
+
 /// Chunk type used during parallel definition index building.
-pub type DefChunk = (u32, Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>);
+pub(crate) type DefChunk = (u32, Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>, CSharpFileContribution);
 
 
 /// Parsed results for a single file — ready to be applied to the index.
@@ -501,6 +512,7 @@ pub struct ParsedFileResult {
     pub call_sites: Vec<(usize, Vec<CallSite>)>,
     pub code_stats: Vec<(usize, CodeStats)>,
     pub extension_methods: HashMap<String, Vec<String>>,
+    pub csharp_semantics: CSharpFileContribution,
 }
 
 // ─── CLI Args ────────────────────────────────────────────────────────

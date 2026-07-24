@@ -621,22 +621,24 @@ fn handle_contains_line_mode(
             continue;
         };
         if let Some(def_indices) = index.file_index.get(&file_id) {
-            let mut matching: Vec<&DefinitionEntry> = def_indices.iter()
-                .filter_map(|&di| index.definitions.get(di as usize))
-                .filter(|d| d.line_start <= line_num && d.line_end >= line_num)
+            let mut matching: Vec<(u32, &DefinitionEntry)> = def_indices.iter()
+                .filter_map(|&di| index.definitions.get(di as usize).map(|definition| (di, definition)))
+                .filter(|(_, definition)| definition.line_start <= line_num && definition.line_end >= line_num)
                 .collect();
 
             // A2 fix: Apply kind filter
             if let Some(ref kind_str) = args.kind_filter {
                 let kinds: Vec<&str> = kind_str.split(',').map(|s| s.trim()).collect();
-                matching.retain(|d| kinds.iter().any(|k| d.kind.as_str().eq_ignore_ascii_case(k)));
+                matching.retain(|(_, definition)| {
+                    kinds.iter().any(|kind| definition.kind.as_str().eq_ignore_ascii_case(kind))
+                });
             }
             // A2 fix: Apply parent filter
             if let Some(ref parent_str) = args.parent_filter {
                 let parent_lower = parent_str.to_lowercase();
                 let parent_terms: Vec<&str> = parent_lower.split(',').map(|s| s.trim()).collect();
-                matching.retain(|d| {
-                    d.parent.as_ref()
+                matching.retain(|(_, definition)| {
+                    definition.parent.as_ref()
                         .map(|p| {
                             let p_lower = p.to_lowercase();
                             parent_terms.iter().any(|term| p_lower.contains(term))
@@ -646,9 +648,9 @@ fn handle_contains_line_mode(
             }
 
             // Sort by range size (smallest first = most specific)
-            matching.sort_by_key(|d| d.line_end - d.line_start);
+            matching.sort_by_key(|(_, definition)| definition.line_end - definition.line_start);
 
-            for (i, def) in matching.iter().enumerate() {
+            for (i, (def_idx, def)) in matching.iter().enumerate() {
                 let mut obj = json!({
                     "name": def.name,
                     "kind": def.kind.as_str(),
@@ -664,6 +666,7 @@ fn handle_contains_line_mode(
                 if !def.modifiers.is_empty() {
                     obj["modifiers"] = json!(def.modifiers);
                 }
+                inject_csharp_symbol_identity(index, *def_idx, &mut obj);
                 if args.include_body {
                     if i == 0 {
                         // Track available lines for innermost only (parents don't emit body)
@@ -1700,6 +1703,17 @@ fn format_search_output(
 }
 
 /// Format a single definition entry as a JSON object.
+fn inject_csharp_symbol_identity(index: &DefinitionIndex, def_idx: u32, obj: &mut Value) {
+    let Some(callable) = index.csharp_semantics.callable_for_definition(def_idx) else {
+        return;
+    };
+    obj["symbolId"] = json!(callable.symbol_id.as_public_id());
+    if let Some(qualified_type) = index.csharp_semantics.strings.get(callable.qualified_parent) {
+        obj["qualifiedType"] = json!(qualified_type);
+    }
+}
+
+
 fn format_definition_entry(
     index: &DefinitionIndex,
     def_idx: u32,
@@ -1741,6 +1755,7 @@ fn format_definition_entry(
     if let Some(ref parent) = def.parent {
         obj["parent"] = json!(parent);
     }
+    inject_csharp_symbol_identity(index, def_idx, &mut obj);
     // Angular template metadata
     if let Some(children) = index.template_children.get(&def_idx) {
         obj["templateChildren"] = json!(children);

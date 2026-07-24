@@ -1447,6 +1447,7 @@ fn load_or_build_definition_index(
             file_index: HashMap::new(),
             path_to_id: HashMap::new(),
             method_calls: HashMap::new(),
+            csharp_semantics: Default::default(),
             code_stats: HashMap::new(),
             parse_errors: 0,
             lossy_file_count: 0,

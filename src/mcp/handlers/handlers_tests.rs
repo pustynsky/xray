@@ -322,9 +322,11 @@ fn test_contains_line_requires_file() {
 fn test_xray_callers_has_required_params() {
     let tools = tool_definitions(&["cs".to_string()]);
     let callers = tools.iter().find(|t| t.name == "xray_callers").unwrap();
-    let required = callers.input_schema["required"].as_array().unwrap();
-    assert_eq!(required.len(), 1);
-    assert_eq!(required[0], "method");
+    assert!(callers.input_schema["required"].as_array().unwrap().is_empty());
+    let alternatives = callers.input_schema["anyOf"].as_array().unwrap();
+    assert_eq!(alternatives.len(), 2);
+    assert_eq!(alternatives[0]["required"][0], "method");
+    assert_eq!(alternatives[1]["required"][0], "targets");
 }
 
 #[test]
