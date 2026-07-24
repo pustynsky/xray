@@ -10,9 +10,10 @@ use ignore::WalkBuilder;
 use tracing::{info, warn};
 
 use crate::{canonicalize_or_warn, clean_path, read_file_lossy};
-use super::{index_file_defs, types::*};
+use super::{index_file_defs_with_semantics, types::*};
+use super::csharp_semantics::CSharpFileContribution;
 #[cfg(feature = "lang-csharp")]
-use super::parser_csharp::parse_csharp_definitions;
+use super::parser_csharp::parse_csharp_definitions_with_semantics;
 #[cfg(feature = "lang-typescript")]
 use super::parser_typescript::parse_typescript_definitions;
 use super::parser_sql::parse_sql_definitions;
@@ -38,15 +39,18 @@ pub fn parse_file_standalone(path: &Path, temp_file_id: u32) -> Option<ParsedFil
 
     #[cfg_attr(not(feature = "lang-csharp"), allow(unused_mut))]
     let mut extension_methods = HashMap::new();
+    #[cfg_attr(not(feature = "lang-csharp"), allow(unused_mut))]
+    let mut csharp_semantics = CSharpFileContribution::default();
 
     let (defs, calls, stats) = match ext_lower.as_str() {
         #[cfg(feature = "lang-csharp")]
         "cs" => {
             let mut cs_parser = tree_sitter::Parser::new();
             cs_parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).ok();
-            let (defs, calls, stats, ext_methods) =
-                parse_csharp_definitions(&mut cs_parser, &content, temp_file_id);
+            let (defs, calls, stats, ext_methods, semantics) =
+                parse_csharp_definitions_with_semantics(&mut cs_parser, &content, temp_file_id);
             extension_methods = ext_methods;
+            csharp_semantics = semantics;
             (defs, calls, stats)
         }
         #[cfg(feature = "lang-typescript")]
@@ -78,6 +82,7 @@ pub fn parse_file_standalone(path: &Path, temp_file_id: u32) -> Option<ParsedFil
         call_sites: calls,
         code_stats: stats,
         extension_methods,
+        csharp_semantics,
     })
 }
 
@@ -104,13 +109,16 @@ fn parse_file_with_parsers(
     let ext_lower = ext.to_lowercase();
     #[cfg_attr(not(feature = "lang-csharp"), allow(unused_mut))]
     let mut extension_methods = HashMap::new();
+    #[cfg_attr(not(feature = "lang-csharp"), allow(unused_mut))]
+    let mut csharp_semantics = CSharpFileContribution::default();
 
     let (defs, calls, stats) = match ext_lower.as_str() {
         #[cfg(feature = "lang-csharp")]
         "cs" => {
-            let (defs, calls, stats, ext_methods) =
-                parse_csharp_definitions(cs_parser, &content, temp_file_id);
+            let (defs, calls, stats, ext_methods, semantics) =
+                parse_csharp_definitions_with_semantics(cs_parser, &content, temp_file_id);
             extension_methods = ext_methods;
+            csharp_semantics = semantics;
             (defs, calls, stats)
         }
         #[cfg(feature = "lang-typescript")]
@@ -152,6 +160,7 @@ fn parse_file_with_parsers(
         call_sites: calls,
         code_stats: stats,
         extension_methods,
+        csharp_semantics,
     })
 }
 
@@ -184,13 +193,23 @@ pub fn apply_parsed_result(
         def.file_id = file_id;
     }
 
-    // Apply definitions, call sites, code stats
-    index_file_defs(index, file_id, defs, result.call_sites, result.code_stats);
-
-    // Merge extension methods (C#-specific)
-    for (method_name, classes) in result.extension_methods {
-        index.extension_methods.entry(method_name).or_default().extend(classes);
+    let mut csharp_semantics = result.csharp_semantics;
+    if csharp_semantics.extension_methods.is_empty() {
+        csharp_semantics.extension_methods = result.extension_methods.clone();
     }
+
+
+    // Apply definitions, call sites, code stats
+    index_file_defs_with_semantics(
+        index,
+        file_id,
+        defs,
+        result.call_sites,
+        result.code_stats,
+        csharp_semantics,
+    );
+
+    index.extension_methods = index.csharp_semantics.merged_extension_methods();
 }
 
 /// Update definitions for a single file (incremental).
@@ -225,10 +244,20 @@ pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
 
     let def_indices = match index.file_index.remove(&file_id) {
         Some(indices) => indices,
-        None => return,
+        None => {
+            index.csharp_semantics.remove_file_contribution(
+                file_id,
+                &std::collections::HashSet::new(),
+            );
+            index.extension_methods = index.csharp_semantics.merged_extension_methods();
+            return;
+        }
     };
 
     let indices_set: std::collections::HashSet<u32> = def_indices.iter().cloned().collect();
+
+    index.csharp_semantics.remove_file_contribution(file_id, &indices_set);
+    index.extension_methods = index.csharp_semantics.merged_extension_methods();
 
     // Remove call graph and code stats entries
     for &di in &def_indices {
@@ -377,6 +406,8 @@ pub fn compact_definitions(index: &mut DefinitionIndex) {
     index.template_children = index.template_children.drain()
         .filter_map(|(k, v)| remap.get(&k).map(|&new_k| (new_k, v)))
         .collect();
+
+    index.csharp_semantics.remap_definitions(&remap, new_defs.len());
 
     let after = new_defs.len();
     index.definitions = new_defs;

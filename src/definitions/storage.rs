@@ -42,6 +42,31 @@ pub fn load_definition_index(dir: &str, exts: &str, index_base: &std::path::Path
 /// `LZ4_MAGIC` -> legacy single-frame load. Legacy fallback exists only
 /// for tests that still write via raw `save_compressed`; production saves
 /// always use the sharded path.
+fn validate_loaded_definition_index(
+    mut index: DefinitionIndex,
+    path: &std::path::Path,
+) -> Result<DefinitionIndex, crate::SearchError> {
+    let active_definitions: std::collections::HashSet<u32> = index.file_index.values()
+        .flat_map(|definitions| definitions.iter().copied())
+        .collect();
+    let method_call_lengths: std::collections::HashMap<u32, usize> = index.method_calls.iter()
+        .map(|(&owner, calls)| (owner, calls.len()))
+        .collect();
+    index.csharp_semantics.validate(
+        index.definitions.len(),
+        &active_definitions,
+        &method_call_lengths,
+    ).map_err(|message| crate::SearchError::IndexLoad {
+        path: path.display().to_string(),
+        message: format!("semantic index inconsistent: {message}"),
+    })?;
+    if !index.csharp_semantics.extension_methods_by_file.is_empty() {
+        index.extension_methods = index.csharp_semantics.merged_extension_methods();
+    }
+    Ok(index)
+}
+
+
 pub fn load_definition_index_at_path(path: &std::path::Path) -> Result<DefinitionIndex, crate::SearchError> {
     use std::io::Read;
 
@@ -89,10 +114,14 @@ pub fn load_definition_index_at_path(path: &std::path::Path) -> Result<Definitio
             super::types::DefinitionIndexHead,
             super::types::DefinitionEntry,
         >(path, "definition-index")?;
-        Ok(DefinitionIndex::from_head_and_entries(head, definitions))
+        validate_loaded_definition_index(
+            DefinitionIndex::from_head_and_entries(head, definitions),
+            path,
+        )
     } else {
         // Legacy LZ4_MAGIC or pre-LZ4 plain bincode — keep working for tests.
-        crate::index::load_compressed(path, "definition-index")
+        let index = crate::index::load_compressed(path, "definition-index")?;
+        validate_loaded_definition_index(index, path)
     }
 }
 

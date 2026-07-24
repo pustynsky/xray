@@ -972,20 +972,28 @@ public sealed class InlineReceiverCaller {
             .iter()
             .filter(|node| node["method"].as_str() == Some("Execute"))
             .collect();
-        assert_eq!(
-            execute_nodes
-                .first()
-                .and_then(|node| node["class"].as_str()),
-            expected_class,
-            "{}",
-            output
-        );
-        assert_eq!(
-            execute_nodes.len(),
-            if expected_class.is_some() { 1 } else { 0 },
-            "{}",
-            output
-        );
+        assert_eq!(execute_nodes.len(), 1, "{}", output);
+        if let Some(expected_class) = expected_class {
+            assert_eq!(
+                execute_nodes[0]["nodeKind"].as_str(),
+                Some("callee"),
+                "{}",
+                output
+            );
+            assert_eq!(
+                execute_nodes[0]["class"].as_str(),
+                Some(expected_class),
+                "{}",
+                output
+            );
+        } else {
+            assert_eq!(
+                execute_nodes[0]["nodeKind"].as_str(),
+                Some("ambiguousCall"),
+                "{}",
+                output
+            );
+        }
     }
 
     let result = dispatch_tool(
@@ -1013,6 +1021,920 @@ public sealed class InlineReceiverCaller {
         "{}",
         output
     );
+}
+
+const D20_OVERLOAD_SOURCE: &str = r#"namespace Demo {
+public sealed class Router {
+    public void Route(int value) => IntTarget();
+    public void Route(string value) => StringTarget();
+    public void CallInt() => Route(1);
+    public void CallString() => Route("x");
+    public void CallUnknown(dynamic value) => Route(value);
+    private readonly Router router = new Router();
+    public void CallThroughThis() => this.router.Route(1);
+    private void IntTarget() { }
+    private void StringTarget() { }
+}
+}
+"#;
+
+const D20_NAMESPACE_SOURCE: &str = r#"namespace One {
+public sealed class Collision {
+    public void SameName() => OneTarget();
+    private void OneTarget() { }
+}
+}
+namespace Two {
+public sealed class Collision {
+    public void SameName() => TwoTarget();
+    private void TwoTarget() { }
+}
+}
+public sealed class NamespaceCaller {
+    public void CallOne() => new One.Collision().SameName();
+}
+"#;
+
+
+const D20_PRODUCTION_SOURCE: &str = r#"namespace Demo;
+public sealed partial class Router {
+    public void Route(int value) => IntTarget();
+    public void CallUnknown(dynamic value) => Route(value);
+    private void IntTarget() { }
+}
+"#;
+
+const D20_TEST_SOURCE: &str = r#"namespace Demo;
+public sealed partial class Router {
+    public void Route(string value) => StringTarget();
+    private void StringTarget() { }
+}
+"#;
+
+
+const D20_EXPLICIT_INTERFACE_SOURCE: &str = r#"namespace Demo;
+public interface IFoo { void Run(int value); }
+public interface IBar { void Run(int value); }
+public sealed class ExplicitRunner : IFoo, IBar {
+    void IFoo.Run(int value) { }
+    void IBar.Run(int value) { }
+}
+"#;
+
+const D20_GENERIC_ALIAS_SOURCE: &str = r#"namespace Demo;
+public sealed class FormatTarget {
+    public void Map(List<int> value) { }
+}
+"#;
+
+const D20_GENERIC_CANONICAL_SOURCE: &str = r#"namespace Demo;
+public sealed class FormatTarget {
+    public void Map(List< System.Int32 > value) { }
+}
+"#;
+
+
+const D20_PARTIAL_SOURCE: &str = r#"namespace Demo;
+public sealed partial class PartialTarget {
+    partial void Run();
+    partial void Run() { }
+}
+"#;
+
+
+const D20_NAMED_ARGUMENT_SOURCE: &str = r#"namespace Demo;
+public sealed class Binder {
+    public void Pick(int a, string b) => NamedTarget();
+    public void Pick(string a, int b) => OtherTarget();
+    public void CallNamed() => Pick(b: "x", a: 1);
+    private void NamedTarget() { }
+    private void OtherTarget() { }
+}
+"#;
+
+const D20_INTEGER_SUFFIX_SOURCE: &str = r#"namespace Demo;
+public sealed class NumericRouter {
+    public void Number(int value) => IntTarget();
+    public void Number(long value) => LongTarget();
+    public void CallLong() => Number(1L);
+    private void IntTarget() { }
+    private void LongTarget() { }
+}
+"#;
+
+const D20_NESTED_RECEIVER_SOURCE: &str = r#"namespace Demo;
+public sealed class Router { public void Route(int value) { } }
+public sealed class OtherRouter { public void Route(int value) { } }
+public sealed class Holder { public OtherRouter router = new OtherRouter(); }
+public sealed class NestedCaller {
+    private readonly Router router = new Router();
+    private readonly Holder holder = new Holder();
+    public void CallNested() => this.holder.router.Route(1);
+}
+"#;
+
+const D20_MULTIPLE_BODIES_SOURCE: &str = r#"namespace Demo;
+public sealed partial class ConditionalTarget {
+#if FIRST
+    public void Run() => FirstTarget();
+#else
+    public void Run() => SecondTarget();
+#endif
+    private void FirstTarget() { }
+    private void SecondTarget() { }
+}
+"#;
+
+
+const D20_PARAMS_SOURCE: &str = r#"namespace Demo;
+public sealed class ParamsTarget {
+    public void Pack(params int[] values) => ParamsBody();
+    public void Pack(string value) => StringBody();
+    public void CallExpanded() => Pack(1, 2);
+    private void ParamsBody() { }
+    private void StringBody() { }
+}
+"#;
+
+
+const D20_DIRECT_THIS_SOURCE: &str = r#"namespace Demo;
+public sealed class SelfTarget {
+    public void Route(int value) => SelfBody();
+    public void CallSelf() => this.Route(1);
+    private void SelfBody() { }
+}
+public sealed class OtherTarget {
+    public void Route(int value) { }
+}
+"#;
+
+const D20_BASE_SOURCE: &str = r#"namespace Demo;
+public class BaseTarget {
+    public virtual void Route(int value) => BaseBody();
+    private void BaseBody() { }
+}
+public sealed class DerivedTarget : BaseTarget {
+    public override void Route(int value) { }
+    public void CallBase() => base.Route(1);
+}
+public sealed class OtherTarget {
+    public void Route(int value) { }
+}
+"#;
+
+fn d20_callers_context(
+    root: &std::path::Path,
+    file_name: &str,
+    source: &str,
+) -> HandlerContext {
+    d20_callers_context_files(root, &[(file_name, source)])
+}
+
+fn d20_callers_context_files(
+    root: &std::path::Path,
+    files: &[(&str, &str)],
+) -> HandlerContext {
+    let mut definition_index = DefinitionIndex {
+        root: root.to_string_lossy().to_string(),
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    for (file_name, source) in files {
+        let source_file = root.join(file_name);
+        std::fs::write(&source_file, source).unwrap();
+        crate::definitions::update_file_definitions(&mut definition_index, &source_file);
+    }
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+
+    HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(definition_index))),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(
+            root.to_string_lossy().to_string(),
+        ))),
+        server_ext: "cs".to_string(),
+        ..Default::default()
+    }
+}
+
+fn d20_symbol_id(context: &HandlerContext, method: &str, signature_fragment: &str) -> String {
+    let index = context.def_index.as_ref().unwrap().read().unwrap();
+    let definition_index = index.name_index[&method.to_lowercase()]
+        .iter()
+        .copied()
+        .find(|&candidate| {
+            index.definitions[candidate as usize].signature.as_deref()
+                .is_some_and(|signature| signature.contains(signature_fragment))
+        })
+        .unwrap();
+    index.csharp_semantics.symbol_id_for_definition(definition_index)
+        .unwrap()
+        .as_public_id()
+}
+
+#[test]
+fn test_d20_call_int_resolves_only_int_overload() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Overloads.cs", D20_OVERLOAD_SOURCE);
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["CallInt"],
+            "class": "Router",
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let route_nodes: Vec<_> = output["callTree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["method"].as_str() == Some("Route"))
+        .collect();
+
+    assert_eq!(route_nodes.len(), 1, "{}", output);
+    assert_eq!(route_nodes[0]["line"].as_u64(), Some(3), "{}", output);
+}
+
+#[test]
+fn test_d20_call_string_resolves_only_string_overload() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Overloads.cs", D20_OVERLOAD_SOURCE);
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["CallString"],
+            "class": "Router",
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let route_nodes: Vec<_> = output["callTree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["method"].as_str() == Some("Route"))
+        .collect();
+
+    assert_eq!(route_nodes.len(), 1, "{}", output);
+    assert_eq!(route_nodes[0]["line"].as_u64(), Some(4), "{}", output);
+}
+
+#[test]
+fn test_d20_this_field_receiver_uses_declared_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Overloads.cs", D20_OVERLOAD_SOURCE);
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["CallThroughThis"],
+            "class": "Router",
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let route_nodes: Vec<_> = output["callTree"].as_array().unwrap().iter()
+        .filter(|node| node["method"].as_str() == Some("Route"))
+        .collect();
+    assert_eq!(route_nodes.len(), 1, "{}", output);
+    assert_eq!(route_nodes[0]["line"].as_u64(), Some(3), "{}", output);
+}
+
+#[test]
+fn test_d20_production_only_filters_test_overload_before_resolution() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context_files(
+        &root,
+        &[
+            ("Router.cs", D20_PRODUCTION_SOURCE),
+            ("Router_tests.cs", D20_TEST_SOURCE),
+        ],
+    );
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["CallUnknown"],
+            "class": "Router",
+            "direction": "down",
+            "depth": 1,
+            "productionOnly": true
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let route_nodes: Vec<_> = output["callTree"].as_array().unwrap().iter()
+        .filter(|node| node["method"].as_str() == Some("Route"))
+        .collect();
+    assert_eq!(route_nodes.len(), 1, "{}", output);
+    assert_eq!(route_nodes[0]["file"].as_str(), Some("Router.cs"), "{}", output);
+    assert!(!output["resultStatus"]["reasons"].as_array().unwrap().iter()
+        .any(|reason| reason.as_str() == Some("ambiguous_overload")), "{}", output);
+}
+
+#[test]
+fn test_d20_direct_this_call_uses_current_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(
+        &root,
+        "D20DirectThis.cs",
+        D20_DIRECT_THIS_SOURCE,
+    );
+
+    {
+        let index = context.def_index.as_ref().unwrap().read().unwrap();
+        let caller = index.name_index["callself"][0];
+        let shape = index.csharp_semantics.call_shape(caller, 0).unwrap();
+        let crate::definitions::CSharpTypeEvidence::Exact(receiver) = shape.receiver else {
+            panic!("{shape:?}");
+        };
+        assert_eq!(index.csharp_semantics.strings.get(receiver), Some("Demo.SelfTarget"));
+        assert!(!shape.base_receiver);
+    }
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["CallSelf"],
+            "class": "SelfTarget",
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let route_nodes: Vec<_> = output["callTree"].as_array().unwrap().iter()
+        .filter(|node| node["method"].as_str() == Some("Route"))
+        .collect();
+    assert_eq!(route_nodes.len(), 1, "{}", output);
+    assert_eq!(route_nodes[0]["nodeKind"].as_str(), Some("callee"), "{}", output);
+    assert_eq!(route_nodes[0]["class"].as_str(), Some("SelfTarget"), "{}", output);
+}
+
+#[test]
+fn test_d20_base_call_selects_base_without_dispatch_expansion() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Base.cs", D20_BASE_SOURCE);
+
+    {
+        let index = context.def_index.as_ref().unwrap().read().unwrap();
+        let caller = index.name_index["callbase"][0];
+        let shape = index.csharp_semantics.call_shape(caller, 0).unwrap();
+        let crate::definitions::CSharpTypeEvidence::Exact(receiver) = shape.receiver else {
+            panic!("{shape:?}");
+        };
+        assert_eq!(index.csharp_semantics.strings.get(receiver), Some("BaseTarget"));
+        assert!(shape.base_receiver);
+    }
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["CallBase"],
+            "class": "DerivedTarget",
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let route_nodes: Vec<_> = output["callTree"].as_array().unwrap().iter()
+        .filter(|node| node["method"].as_str() == Some("Route"))
+        .collect();
+    assert_eq!(route_nodes.len(), 1, "{}", output);
+    assert_eq!(route_nodes[0]["nodeKind"].as_str(), Some("callee"), "{}", output);
+    assert_eq!(route_nodes[0]["class"].as_str(), Some("BaseTarget"), "{}", output);
+}
+
+
+#[test]
+fn test_d20_named_arguments_bind_by_parameter_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Named.cs", D20_NAMED_ARGUMENT_SOURCE);
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["CallNamed"],
+            "class": "Binder",
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let pick_nodes: Vec<_> = output["callTree"].as_array().unwrap().iter()
+        .filter(|node| node["method"].as_str() == Some("Pick"))
+        .collect();
+    assert_eq!(pick_nodes.len(), 1, "{}", output);
+    assert_eq!(pick_nodes[0]["line"].as_u64(), Some(3), "{}", output);
+}
+
+#[test]
+fn test_d20_integer_suffix_selects_long_overload() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(
+        &root,
+        "D20IntegerSuffix.cs",
+        D20_INTEGER_SUFFIX_SOURCE,
+    );
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["CallLong"],
+            "class": "NumericRouter",
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let number_nodes: Vec<_> = output["callTree"].as_array().unwrap().iter()
+        .filter(|node| node["method"].as_str() == Some("Number"))
+        .collect();
+    assert_eq!(number_nodes.len(), 1, "{}", output);
+    assert_eq!(number_nodes[0]["line"].as_u64(), Some(4), "{}", output);
+}
+
+#[test]
+fn test_d20_nested_this_receiver_remains_ambiguous() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(
+        &root,
+        "D20NestedReceiver.cs",
+        D20_NESTED_RECEIVER_SOURCE,
+    );
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["CallNested"],
+            "class": "NestedCaller",
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let route_nodes: Vec<_> = output["callTree"].as_array().unwrap().iter()
+        .filter(|node| node["method"].as_str() == Some("Route"))
+        .collect();
+    assert_eq!(route_nodes.len(), 1, "{}", output);
+    assert_eq!(route_nodes[0]["nodeKind"].as_str(), Some("ambiguousCall"), "{}", output);
+    assert_eq!(
+        route_nodes[0]["resolution"]["candidates"].as_array().unwrap().len(),
+        2,
+        "{}",
+        output
+    );
+}
+
+
+#[test]
+fn test_d20_params_array_expanded_form_resolves_element_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Params.cs", D20_PARAMS_SOURCE);
+
+    {
+        let index = context.def_index.as_ref().unwrap().read().unwrap();
+        let pack_definitions = &index.name_index["pack"];
+        let params_definition = pack_definitions.iter().copied()
+            .find(|&candidate| index.definitions[candidate as usize].line_start == 3)
+            .unwrap();
+        let callable = index.csharp_semantics.callable_for_definition(params_definition).unwrap();
+        assert!(callable.parameters[0].is_params, "{:?}", callable.parameters);
+        assert_eq!(
+            index.csharp_semantics.strings.get(callable.parameters[0].ty),
+            Some("System.Int32[]")
+        );
+        let caller = index.name_index["callexpanded"][0];
+        let shape = index.csharp_semantics.call_shape(caller, 0).unwrap();
+        assert_eq!(shape.arguments.len(), 2, "{shape:?}");
+    }
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["CallExpanded"],
+            "class": "ParamsTarget",
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let pack_nodes: Vec<_> = output["callTree"].as_array().unwrap().iter()
+        .filter(|node| node["method"].as_str() == Some("Pack"))
+        .collect();
+    assert_eq!(pack_nodes.len(), 1, "{}", output);
+    assert_eq!(pack_nodes[0]["line"].as_u64(), Some(3), "{}", output);
+}
+
+#[test]
+fn test_d20_unknown_argument_reports_ambiguity_without_traversal() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Overloads.cs", D20_OVERLOAD_SOURCE);
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["CallUnknown"],
+            "class": "Router",
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let call_tree = output["callTree"].as_array().unwrap();
+    let exact_route_nodes: Vec<_> = call_tree
+        .iter()
+        .filter(|node| {
+            node["nodeKind"].as_str() == Some("callee")
+                && node["method"].as_str() == Some("Route")
+        })
+        .collect();
+    let ambiguous_route_nodes: Vec<_> = call_tree
+        .iter()
+        .filter(|node| {
+            node["nodeKind"].as_str() == Some("ambiguousCall")
+                && node["method"].as_str() == Some("Route")
+        })
+        .collect();
+    let reasons = output["resultStatus"]["reasons"].as_array().unwrap();
+
+    assert!(exact_route_nodes.is_empty(), "{}", output);
+    assert_eq!(ambiguous_route_nodes.len(), 1, "{}", output);
+    assert!(
+        reasons.iter().any(|reason| reason.as_str() == Some("ambiguous_overload")),
+        "{}",
+        output
+    );
+}
+
+#[test]
+fn test_d20_qualified_receiver_avoids_namespace_collision() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Namespaces.cs", D20_NAMESPACE_SOURCE);
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["CallOne"],
+            "class": "NamespaceCaller",
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let same_name_nodes: Vec<_> = output["callTree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["method"].as_str() == Some("SameName"))
+        .collect();
+
+    assert_eq!(same_name_nodes.len(), 1, "{}", output);
+    assert_eq!(same_name_nodes[0]["line"].as_u64(), Some(3), "{}", output);
+}
+
+#[test]
+fn test_d20_definitions_exposes_distinct_overload_symbol_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Overloads.cs", D20_OVERLOAD_SOURCE);
+
+    let result = dispatch_tool(
+        &context,
+        "xray_definitions",
+        &json!({
+            "name": ["Route"],
+            "parent": ["Router"],
+            "exactNameOnly": true
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let definitions = output["definitions"].as_array().unwrap();
+    assert_eq!(definitions.len(), 2, "{}", output);
+    let symbol_ids: std::collections::HashSet<_> = definitions.iter()
+        .map(|definition| definition["symbolId"].as_str().unwrap())
+        .collect();
+    assert_eq!(symbol_ids.len(), 2, "{}", output);
+    assert!(definitions.iter().all(|definition| {
+        definition["qualifiedType"].as_str() == Some("Demo.Router")
+    }), "{}", output);
+}
+
+#[test]
+fn test_d20_symbol_id_golden_vector() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Overloads.cs", D20_OVERLOAD_SOURCE);
+    let symbol_id = d20_symbol_id(&context, "Route", "int value");
+
+    assert_eq!(
+        symbol_id,
+        "cs:v1:542d9ed0fc8dac26cf66119daaabf146508c9506ef2e87350f2bc4bc3eac4e77"
+    );
+}
+
+#[test]
+fn test_d20_explicit_interface_implementations_have_distinct_symbol_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(
+        &root,
+        "D20ExplicitInterfaces.cs",
+        D20_EXPLICIT_INTERFACE_SOURCE,
+    );
+
+    let index = context.def_index.as_ref().unwrap().read().unwrap();
+    let run_definitions: Vec<_> = index.name_index["run"].iter()
+        .copied()
+        .filter(|&candidate| {
+            index.definitions[candidate as usize].parent.as_deref() == Some("ExplicitRunner")
+        })
+        .collect();
+    assert_eq!(run_definitions.len(), 2);
+    let symbol_ids: std::collections::HashSet<_> = run_definitions.iter()
+        .map(|&candidate| index.csharp_semantics.symbol_id_for_definition(candidate).unwrap())
+        .collect();
+    assert_eq!(symbol_ids.len(), 2);
+}
+
+#[test]
+fn test_d20_symbol_id_normalizes_generic_aliases_and_whitespace() {
+    let first_temp = tempfile::tempdir().unwrap();
+    let first_root = crate::canonicalize_test_root(first_temp.path());
+    let first = d20_callers_context(
+        &first_root,
+        "FormatTarget.cs",
+        D20_GENERIC_ALIAS_SOURCE,
+    );
+    let first_id = d20_symbol_id(&first, "Map", "List<int>");
+
+    let second_temp = tempfile::tempdir().unwrap();
+    let second_root = crate::canonicalize_test_root(second_temp.path());
+    let second = d20_callers_context(
+        &second_root,
+        "FormatTarget.cs",
+        D20_GENERIC_CANONICAL_SOURCE,
+    );
+    let second_id = d20_symbol_id(&second, "Map", "List< System.Int32 >");
+
+    assert_eq!(first_id, second_id);
+}
+
+#[test]
+fn test_d20_legacy_root_reports_ambiguity_without_traversal() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Overloads.cs", D20_OVERLOAD_SOURCE);
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["Route"],
+            "class": "Router",
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["callTree"].as_array().unwrap().is_empty(), "{}", output);
+    assert_eq!(output["rootResolution"]["status"], "ambiguous", "{}", output);
+    assert_eq!(
+        output["rootResolution"]["candidates"].as_array().unwrap().len(),
+        2,
+        "{}",
+        output
+    );
+    assert_eq!(output["resultStatus"]["status"], "partial", "{}", output);
+    assert!(output["resultStatus"]["reasons"].as_array().unwrap().iter()
+        .any(|reason| reason.as_str() == Some("ambiguous_root")), "{}", output);
+}
+
+#[test]
+fn test_d20_legacy_policy_preserves_unsafe_root_fan_out() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Overloads.cs", D20_OVERLOAD_SOURCE);
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["Route"],
+            "class": "Router",
+            "direction": "down",
+            "depth": 1,
+            "ambiguityPolicy": "legacy"
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let methods: std::collections::HashSet<_> = output["callTree"].as_array().unwrap().iter()
+        .filter_map(|node| node["method"].as_str())
+        .collect();
+    assert_eq!(methods, std::collections::HashSet::from(["IntTarget", "StringTarget"]), "{}", output);
+    assert_eq!(output["resultStatus"]["safeForExactSemantics"], false, "{}", output);
+    assert!(output["resultStatus"]["reasons"].as_array().unwrap().iter()
+        .any(|reason| reason.as_str() == Some("legacy_ambiguous_fanout")), "{}", output);
+}
+
+#[test]
+fn test_d20_exact_symbol_selects_empty_body_implementation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Partial.cs", D20_PARTIAL_SOURCE);
+    let symbol_id = d20_symbol_id(&context, "Run", "partial void Run");
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "targets": [{ "symbolId": symbol_id }],
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["rootResolution"]["line"].as_u64(), Some(4), "{}", output);
+    assert!(output["callTree"].as_array().unwrap().is_empty(), "{}", output);
+}
+
+
+#[test]
+fn test_d20_exact_symbol_down_traverses_selected_overload_body() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Overloads.cs", D20_OVERLOAD_SOURCE);
+    let symbol_id = d20_symbol_id(&context, "Route", "int value");
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "targets": [{ "symbolId": symbol_id }],
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let methods: Vec<_> = output["callTree"].as_array().unwrap().iter()
+        .filter_map(|node| node["method"].as_str())
+        .collect();
+    assert_eq!(methods, vec!["IntTarget"], "{}", output);
+    assert_eq!(output["rootResolution"]["status"], "exact", "{}", output);
+    assert_eq!(output["rootResolution"]["symbolId"], symbol_id, "{}", output);
+}
+
+#[test]
+fn test_d20_exact_symbol_up_excludes_other_and_ambiguous_callers() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Overloads.cs", D20_OVERLOAD_SOURCE);
+    let symbol_id = d20_symbol_id(&context, "Route", "int value");
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "targets": [{ "symbolId": symbol_id }],
+            "direction": "up",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let methods: Vec<_> = output["callTree"].as_array().unwrap().iter()
+        .filter_map(|node| node["method"].as_str())
+        .collect();
+    assert_eq!(methods, vec!["CallInt", "CallUnknown", "CallThroughThis"], "{}", output);
+    assert_eq!(output["rootResolution"]["symbolId"], symbol_id, "{}", output);
+}
+
+#[test]
+fn test_d20_exact_symbol_up_surfaces_ambiguous_reference() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Overloads.cs", D20_OVERLOAD_SOURCE);
+    let symbol_id = d20_symbol_id(&context, "Route", "int value");
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "targets": [{ "symbolId": symbol_id }],
+            "direction": "up",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let ambiguous = output["callTree"].as_array().unwrap().iter()
+        .find(|node| node["method"].as_str() == Some("CallUnknown"))
+        .unwrap_or_else(|| panic!("{}", output));
+    assert_eq!(ambiguous["nodeKind"].as_str(), Some("ambiguousCaller"), "{}", output);
+    assert_eq!(ambiguous["resolution"]["status"].as_str(), Some("ambiguous"), "{}", output);
+    assert_eq!(output["resultStatus"]["status"].as_str(), Some("partial"), "{}", output);
+    assert!(output["resultStatus"]["reasons"].as_array().unwrap().iter()
+        .any(|reason| reason.as_str() == Some("ambiguous_overload")), "{}", output);
+}
+
+#[test]
+fn test_d20_multiple_body_root_reports_invalid_ambiguity() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(
+        &root,
+        "D20MultipleBodies.cs",
+        D20_MULTIPLE_BODIES_SOURCE,
+    );
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["Run"],
+            "class": "ConditionalTarget",
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["callTree"].as_array().unwrap().is_empty(), "{}", output);
+    assert_eq!(
+        output["rootResolution"]["reason"].as_str(),
+        Some("invalid_multiple_bodies"),
+        "{}",
+        output
+    );
+    assert_eq!(output["resultStatus"]["status"].as_str(), Some("partial"), "{}", output);
+}
+
+#[test]
+fn test_d20_exact_symbol_rejects_noncanonical_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(&root, "D20Overloads.cs", D20_OVERLOAD_SOURCE);
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "targets": [{ "symbolId": format!("cs:v1:{}", "A".repeat(64)) }]
+        }),
+    );
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("64 lowercase hex"));
 }
 
 #[test]

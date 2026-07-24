@@ -3,15 +3,27 @@
 use std::collections::HashMap;
 
 use super::types::*;
+use super::csharp_semantics::*;
 use super::tree_sitter_utils::{node_text, find_child_by_kind, find_descendant_by_kind, find_child_by_field, count_named_children, walk_code_stats, warn_ast_depth_exceeded, MAX_AST_RECURSION_DEPTH, MAX_PARSE_SOURCE_BYTES, PARSE_TIMEOUT_MICROS, CSHARP_CODE_STATS_CONFIG};
 
 // ─── Main entry point ───────────────────────────────────────────────
 
+#[cfg(test)]
 pub(crate) fn parse_csharp_definitions(
     parser: &mut tree_sitter::Parser,
     source: &str,
     file_id: u32,
 ) -> CsharpParseResult {
+    let (definitions, calls, stats, extension_methods, _) =
+        parse_csharp_definitions_with_semantics(parser, source, file_id);
+    (definitions, calls, stats, extension_methods)
+}
+
+pub(crate) fn parse_csharp_definitions_with_semantics(
+    parser: &mut tree_sitter::Parser,
+    source: &str,
+    file_id: u32,
+) -> CsharpSemanticParseResult {
     // PARSE-002: skip oversized sources before tree-sitter allocates ~10× RAM.
     if source.len() > MAX_PARSE_SOURCE_BYTES {
         tracing::warn!(
@@ -21,7 +33,7 @@ pub(crate) fn parse_csharp_definitions(
             limit = MAX_PARSE_SOURCE_BYTES,
             "skipping oversized C# source"
         );
-        return (Vec::new(), Vec::new(), Vec::new(), HashMap::new());
+        return (Vec::new(), Vec::new(), Vec::new(), HashMap::new(), CSharpFileContribution::default());
     }
     // PARSE-001: bound parse wall-clock so a single pathological file cannot
     // pin a worker thread indefinitely.
@@ -34,7 +46,7 @@ pub(crate) fn parse_csharp_definitions(
                 file_id = file_id,
                 "tree-sitter C# parse returned None (timeout or grammar error)"
             );
-            return (Vec::new(), Vec::new(), Vec::new(), HashMap::new());
+            return (Vec::new(), Vec::new(), Vec::new(), HashMap::new(), CSharpFileContribution::default());
         }
     };
 
@@ -42,6 +54,30 @@ pub(crate) fn parse_csharp_definitions(
     let source_bytes = source.as_bytes();
     let mut method_nodes: Vec<(usize, tree_sitter::Node)> = Vec::new();
     walk_csharp_node_collecting(tree.root_node(), source_bytes, file_id, None, &mut defs, &mut method_nodes, 0);
+
+    let mut csharp_semantics = CSharpFileContribution::default();
+    for &(def_local_idx, method_node) in &method_nodes {
+        let def = &defs[def_local_idx];
+        if matches!(def.kind, DefinitionKind::Method | DefinitionKind::Constructor)
+            && let Some(qualified_parent) = qualified_parent_for_node(method_node, source_bytes)
+        {
+            csharp_semantics.callables.push(CSharpLocalCallable {
+                local_def_idx: def_local_idx,
+                qualified_parent,
+                name: def.name.clone(),
+                kind: if def.kind == DefinitionKind::Constructor {
+                    CSharpCallableKind::Constructor
+                } else {
+                    CSharpCallableKind::Method
+                },
+                explicit_interface: csharp_explicit_interface(method_node, source_bytes),
+                has_body: find_child_by_kind(method_node, "block").is_some()
+                    || find_child_by_kind(method_node, "arrow_expression_clause").is_some(),
+                generic_arity: csharp_method_generic_arity(method_node),
+                parameters: extract_csharp_parameter_shapes(method_node, source_bytes),
+            });
+        }
+    }
 
     // Build per-class field type maps and method return type maps from the collected defs
     let mut class_field_types: HashMap<String, HashMap<String, String>> = HashMap::new();
@@ -174,9 +210,24 @@ pub(crate) fn parse_csharp_definitions(
             .cloned()
             .unwrap_or_default();
 
-        let calls = extract_call_sites(method_node, source_bytes, parent_name, &field_types, &base_types, &method_return_types);
+        let qualified_parent = qualified_parent_for_node(method_node, source_bytes)
+            .unwrap_or_else(|| parent_name.to_string());
+        let (calls, shapes) = extract_call_sites(
+            method_node,
+            source_bytes,
+            parent_name,
+            &qualified_parent,
+            &field_types,
+            &base_types,
+            &method_return_types,
+        );
         if !calls.is_empty() {
+            debug_assert_eq!(calls.len(), shapes.len());
             call_sites.push((def_local_idx, calls));
+            csharp_semantics.call_sites.push(CSharpLocalCallSites {
+                local_def_idx: def_local_idx,
+                shapes,
+            });
         }
     }
 
@@ -194,8 +245,9 @@ pub(crate) fn parse_csharp_definitions(
 
     // Build extension method map: detect static classes with `this` parameter methods
     let extension_methods = build_extension_method_map(&defs);
+    csharp_semantics.extension_methods = extension_methods.clone();
 
-    (defs, call_sites, code_stats_entries, extension_methods)
+    (defs, call_sites, code_stats_entries, extension_methods, csharp_semantics)
 }
 
 /// Build a map of extension method names to the static classes that define them.
@@ -485,6 +537,268 @@ fn collect_constructor_assignments(
 
 // ─── Call site extraction ───────────────────────────────────────────
 
+fn qualified_parent_for_node(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let mut namespaces = Vec::new();
+    let mut types = Vec::new();
+    let mut saw_file_scoped_namespace = false;
+    let mut current = node.parent();
+
+    while let Some(ancestor) = current {
+        match ancestor.kind() {
+            "namespace_declaration" | "file_scoped_namespace_declaration" => {
+                saw_file_scoped_namespace |= ancestor.kind() == "file_scoped_namespace_declaration";
+                if let Some(name) = find_child_by_field(ancestor, "name") {
+                    let value = node_text(name, source).trim();
+                    if !value.is_empty() {
+                        namespaces.push(value.to_string());
+                    }
+                }
+            }
+            "class_declaration" | "interface_declaration" | "struct_declaration"
+            | "record_declaration" => {
+                if let Some(name) = find_child_by_field(ancestor, "name") {
+                    let value = node_text(name, source).trim();
+                    if !value.is_empty() {
+                        types.push(value.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+        current = ancestor.parent();
+    }
+
+    if !saw_file_scoped_namespace {
+        let mut root = node;
+        while let Some(parent) = root.parent() {
+            root = parent;
+        }
+        if let Some(namespace) = find_child_by_kind(root, "file_scoped_namespace_declaration")
+            && let Some(name) = find_child_by_field(namespace, "name")
+        {
+            let value = node_text(name, source).trim();
+            if !value.is_empty() {
+                namespaces.push(value.to_string());
+            }
+        }
+    }
+
+
+    if types.is_empty() {
+        return None;
+    }
+    namespaces.reverse();
+    types.reverse();
+    namespaces.extend(types);
+    Some(namespaces.join("."))
+}
+
+fn csharp_explicit_interface(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let specifier = find_child_by_kind(node, "explicit_interface_specifier")?;
+    let value = node_text(specifier, source).trim().trim_end_matches('.');
+    (!value.is_empty()).then(|| canonical_csharp_type(value))
+}
+
+
+fn csharp_method_generic_arity(node: tree_sitter::Node) -> u16 {
+    find_child_by_kind(node, "type_parameter_list")
+        .map(|parameters| count_named_children(parameters).min(u16::MAX as u32) as u16)
+        .unwrap_or(0)
+}
+
+fn extract_csharp_parameter_shapes(
+    method_node: tree_sitter::Node,
+    source: &[u8],
+) -> Vec<CSharpLocalParameterShape> {
+    let Some(parameter_list) = find_child_by_kind(method_node, "parameter_list") else {
+        return Vec::new();
+    };
+    let mut cursor = parameter_list.walk();
+    let mut parameters: Vec<_> = parameter_list.named_children(&mut cursor)
+        .filter(|parameter| parameter.kind() == "parameter")
+        .filter_map(|parameter| {
+            let name = find_child_by_field(parameter, "name")?;
+            let ty = find_child_by_field(parameter, "type")?;
+            let parameter_text = node_text(parameter, source);
+            Some(CSharpLocalParameterShape {
+                name: node_text(name, source).trim().to_string(),
+                ty: canonical_csharp_type(node_text(ty, source)),
+                ref_kind: csharp_ref_kind(parameter_text),
+                optional: parameter_text.contains('='),
+                is_params: false,
+            })
+        })
+        .collect();
+    if node_text(parameter_list, source)
+        .split(|character: char| character.is_whitespace() || matches!(character, '(' | ')' | ','))
+        .any(|token| token == "params")
+        && let Some(name) = find_child_by_field(parameter_list, "name")
+        && let Some(ty) = find_child_by_field(parameter_list, "type")
+    {
+        parameters.push(CSharpLocalParameterShape {
+            name: node_text(name, source).trim().to_string(),
+            ty: canonical_csharp_type(node_text(ty, source)),
+            ref_kind: CSharpRefKind::None,
+            optional: false,
+            is_params: true,
+        });
+    }
+    parameters
+}
+
+fn csharp_ref_kind(text: &str) -> CSharpRefKind {
+    let tokens: Vec<_> = text.split_whitespace().collect();
+    if tokens.windows(2).any(|pair| pair == ["ref", "readonly"]) {
+        CSharpRefKind::RefReadonly
+    } else if tokens.contains(&"out") {
+        CSharpRefKind::Out
+    } else if tokens.contains(&"in") {
+        CSharpRefKind::In
+    } else if tokens.contains(&"ref") {
+        CSharpRefKind::Ref
+    } else {
+        CSharpRefKind::None
+    }
+}
+
+fn canonical_csharp_type(type_text: &str) -> String {
+    let value = type_text.trim().trim_start_matches("global::");
+    if value.starts_with('(') && value.ends_with(')') {
+        let elements = split_csharp_type_list(&value[1..value.len() - 1]);
+        if elements.len() > 1 {
+            return format!(
+                "({})",
+                elements.into_iter()
+                    .map(canonical_csharp_tuple_element)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
+    }
+
+    let mut result = String::with_capacity(value.len());
+    let chars: Vec<char> = value.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let current = chars[index];
+        if current.is_whitespace() || current == '?' {
+            index += 1;
+            continue;
+        }
+        if chars[index..].starts_with(&['g', 'l', 'o', 'b', 'a', 'l', ':', ':']) {
+            index += 8;
+            continue;
+        }
+        if current == '_' || current == '@' || current.is_alphabetic() {
+            let start = index;
+            index += 1;
+            while index < chars.len()
+                && (chars[index] == '_' || chars[index].is_alphanumeric())
+            {
+                index += 1;
+            }
+            let identifier: String = chars[start..index].iter().collect();
+            result.push_str(canonical_csharp_identifier(&identifier));
+            continue;
+        }
+        result.push(current);
+        index += 1;
+    }
+    result
+}
+
+fn canonical_csharp_identifier(identifier: &str) -> &str {
+    match identifier {
+        "bool" => "System.Boolean",
+        "byte" => "System.Byte",
+        "sbyte" => "System.SByte",
+        "short" => "System.Int16",
+        "ushort" => "System.UInt16",
+        "int" => "System.Int32",
+        "uint" => "System.UInt32",
+        "long" => "System.Int64",
+        "ulong" => "System.UInt64",
+        "nint" => "System.IntPtr",
+        "nuint" => "System.UIntPtr",
+        "char" => "System.Char",
+        "float" => "System.Single",
+        "double" => "System.Double",
+        "decimal" => "System.Decimal",
+        "string" => "System.String",
+        "object" => "System.Object",
+        "void" => "System.Void",
+        other => other,
+    }
+}
+
+fn split_csharp_type_list(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut angle_depth = 0u32;
+    let mut bracket_depth = 0u32;
+    let mut paren_depth = 0u32;
+    for (index, character) in value.char_indices() {
+        match character {
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            ',' if angle_depth == 0 && bracket_depth == 0 && paren_depth == 0 => {
+                parts.push(value[start..index].trim());
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(value[start..].trim());
+    parts
+}
+
+fn canonical_csharp_tuple_element(value: &str) -> String {
+    let mut angle_depth = 0u32;
+    let mut bracket_depth = 0u32;
+    let mut paren_depth = 0u32;
+    let mut last_space = None;
+    for (index, character) in value.char_indices() {
+        match character {
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            _ if character.is_whitespace()
+                && angle_depth == 0
+                && bracket_depth == 0
+                && paren_depth == 0 => last_space = Some(index),
+            _ => {}
+        }
+    }
+    let type_part = last_space.and_then(|index| {
+        let suffix = value[index..].trim();
+        (!suffix.is_empty()
+            && suffix.chars().all(|character| character == '_' || character.is_alphanumeric()))
+            .then_some(value[..index].trim())
+    }).unwrap_or(value);
+    canonical_csharp_type(type_part)
+}
+
+fn type_evidence_from_text(type_text: &str) -> CSharpLocalTypeEvidence {
+    if type_text.trim().trim_end_matches('?') == "dynamic" {
+        CSharpLocalTypeEvidence::Dynamic
+    } else {
+        let ty = canonical_csharp_type(type_text);
+        if ty.is_empty() {
+            CSharpLocalTypeEvidence::Unknown
+        } else {
+            CSharpLocalTypeEvidence::Exact(ty)
+        }
+    }
+}
+
+
 fn extract_csharp_parameter_types(
     method_node: tree_sitter::Node,
     source: &[u8],
@@ -507,11 +821,25 @@ fn extract_csharp_parameter_types(
         };
         let name = node_text(name_node, source).trim();
         let type_text = node_text(type_node, source);
-        if !name.is_empty()
-            && let Some(type_name) = normalize_csharp_receiver_type(type_text) {
+        if !name.is_empty() {
+            if let Some(type_name) = normalize_csharp_receiver_type(type_text) {
                 parameter_types.insert(name.to_string(), type_name);
+            } else if type_text.trim().trim_end_matches('?') == "dynamic" {
+                parameter_types.insert(name.to_string(), "dynamic".to_string());
             }
+        }
     }
+
+    if node_text(parameter_list, source)
+        .split(|character: char| character.is_whitespace() || matches!(character, '(' | ')' | ','))
+        .any(|token| token == "params")
+        && let Some(name) = find_child_by_field(parameter_list, "name")
+        && let Some(ty) = find_child_by_field(parameter_list, "type")
+        && let Some(type_name) = normalize_csharp_receiver_type(node_text(ty, source))
+    {
+        parameter_types.insert(node_text(name, source).trim().to_string(), type_name);
+    }
+
 
     parameter_types
 }
@@ -520,17 +848,17 @@ fn extract_call_sites(
     method_node: tree_sitter::Node,
     source: &[u8],
     class_name: &str,
+    qualified_parent: &str,
     field_types: &HashMap<String, String>,
     base_types: &[String],
     method_return_types: &HashMap<String, String>,
-) -> Vec<CallSite> {
+) -> (Vec<CallSite>, Vec<CSharpLocalCallSiteShape>) {
     let mut calls = Vec::new();
 
     let body = find_child_by_kind(method_node, "block")
         .or_else(|| find_child_by_kind(method_node, "arrow_expression_clause"));
 
     if let Some(body_node) = body {
-        // Method parameters shadow same-named fields for bare receiver lookup.
         let mut combined_types = field_types.clone();
         for (name, type_name) in extract_csharp_parameter_types(method_node, source) {
             combined_types.insert(name, type_name);
@@ -538,32 +866,45 @@ fn extract_call_sites(
 
         let local_vars = extract_csharp_local_var_types(body_node, source, method_return_types);
         for (name, type_name) in local_vars {
-            combined_types.entry(name).or_insert(type_name);
+            combined_types.insert(name, type_name);
         }
 
-        walk_for_invocations(body_node, source, class_name, &combined_types, base_types, &mut calls, 0);
+        walk_for_invocations(
+            body_node,
+            source,
+            class_name,
+            qualified_parent,
+            &combined_types,
+            base_types,
+            &mut calls,
+            0,
+        );
     }
 
-    calls.sort_by(|a, b| a.line.cmp(&b.line)
-        .then_with(|| a.method_name.cmp(&b.method_name))
-        .then_with(|| a.receiver_type.cmp(&b.receiver_type)));
-    calls.dedup_by(|a, b| a.line == b.line && a.method_name == b.method_name && a.receiver_type == b.receiver_type);
+    calls.sort_by(|(left, left_shape), (right, right_shape)| {
+        left.line.cmp(&right.line)
+            .then_with(|| left_shape.source_start.cmp(&right_shape.source_start))
+            .then_with(|| left.method_name.cmp(&right.method_name))
+            .then_with(|| left.receiver_type.cmp(&right.receiver_type))
+    });
+    calls.dedup_by(|(_, left), (_, right)| {
+        left.source_start == right.source_start && left.source_end == right.source_end
+    });
 
-    calls
+    calls.into_iter().unzip()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_for_invocations(
     node: tree_sitter::Node,
     source: &[u8],
     class_name: &str,
+    qualified_parent: &str,
     field_types: &HashMap<String, String>,
     base_types: &[String],
-    calls: &mut Vec<CallSite>,
+    calls: &mut Vec<(CallSite, CSharpLocalCallSiteShape)>,
     depth: usize,
 ) {
-    // Depth-guard tripwire (MINOR-11): chained calls in adversarial code
-    // (e.g. obfuscated fluent APIs) could descend without bound. Stop past
-    // MAX_AST_RECURSION_DEPTH to keep parse threads alive.
     if depth > MAX_AST_RECURSION_DEPTH {
         warn_ast_depth_exceeded("csharp", node);
         return;
@@ -571,27 +912,53 @@ fn walk_for_invocations(
     match node.kind() {
         "invocation_expression" => {
             if let Some(call) = extract_invocation(node, source, class_name, field_types, base_types) {
-                calls.push(call);
+                let shape = extract_csharp_call_site_shape(
+                    node,
+                    source,
+                    qualified_parent,
+                    field_types,
+                    base_types,
+                );
+                calls.push((call, shape));
             }
-            // Recurse into ALL children — not just argument_list.
-            // The expression child (first child, typically member_access_expression)
-            // may contain nested invocation_expressions for chained calls like:
-            //   a.Method1().Method2().ConfigureAwait(false)
-            // AST: invocation(member_access(invocation(member_access(...)), name), args)
             for i in 0..node.child_count() {
                 let child = node.child(i).unwrap();
-                walk_for_invocations(child, source, class_name, field_types, base_types, calls, depth + 1);
+                walk_for_invocations(
+                    child,
+                    source,
+                    class_name,
+                    qualified_parent,
+                    field_types,
+                    base_types,
+                    calls,
+                    depth + 1,
+                );
             }
             return;
         }
         "object_creation_expression" => {
             if let Some(call) = extract_object_creation(node, source) {
-                calls.push(call);
+                let shape = extract_csharp_call_site_shape(
+                    node,
+                    source,
+                    qualified_parent,
+                    field_types,
+                    base_types,
+                );
+                calls.push((call, shape));
             }
-            // Same fix: recurse into all children to capture nested calls in arguments
             for i in 0..node.child_count() {
                 let child = node.child(i).unwrap();
-                walk_for_invocations(child, source, class_name, field_types, base_types, calls, depth + 1);
+                walk_for_invocations(
+                    child,
+                    source,
+                    class_name,
+                    qualified_parent,
+                    field_types,
+                    base_types,
+                    calls,
+                    depth + 1,
+                );
             }
             return;
         }
@@ -599,7 +966,330 @@ fn walk_for_invocations(
     }
 
     for i in 0..node.child_count() {
-        walk_for_invocations(node.child(i).unwrap(), source, class_name, field_types, base_types, calls, depth + 1);
+        walk_for_invocations(
+            node.child(i).unwrap(),
+            source,
+            class_name,
+            qualified_parent,
+            field_types,
+            base_types,
+            calls,
+            depth + 1,
+        );
+    }
+}
+
+fn extract_csharp_call_site_shape(
+    node: tree_sitter::Node,
+    source: &[u8],
+    qualified_parent: &str,
+    field_types: &HashMap<String, String>,
+    base_types: &[String],
+) -> CSharpLocalCallSiteShape {
+    let receiver = if node.kind() == "object_creation_expression" {
+        find_child_by_field(node, "type")
+            .map(|ty| type_evidence_from_text(node_text(ty, source)))
+            .unwrap_or_default()
+    } else {
+        node.child(0)
+            .map(|expression| csharp_receiver_evidence(
+                expression,
+                source,
+                qualified_parent,
+                field_types,
+                base_types,
+            ))
+            .unwrap_or_default()
+    };
+
+    CSharpLocalCallSiteShape {
+        source_start: node.start_byte().min(u32::MAX as usize) as u32,
+        source_end: node.end_byte().min(u32::MAX as usize) as u32,
+        receiver,
+        base_receiver: csharp_invocation_has_base_receiver(node, source),
+        method_generic_arity: csharp_call_generic_arity(node),
+        arguments: extract_csharp_argument_shapes(node, source, field_types),
+    }
+}
+
+fn csharp_invocation_has_base_receiver(node: tree_sitter::Node, source: &[u8]) -> bool {
+    if node.kind() != "invocation_expression" {
+        return false;
+    }
+    node.child(0)
+        .filter(|expression| expression.kind() == "member_access_expression")
+        .and_then(|expression| {
+            find_child_by_field(expression, "expression").or_else(|| expression.child(0))
+        })
+        .is_some_and(|receiver| {
+            receiver.kind() == "base_expression"
+                || receiver.kind() == "base"
+                || node_text(receiver, source).trim() == "base"
+        })
+}
+
+
+fn csharp_receiver_evidence(
+    expression: tree_sitter::Node,
+    source: &[u8],
+    qualified_parent: &str,
+    field_types: &HashMap<String, String>,
+    base_types: &[String],
+) -> CSharpLocalTypeEvidence {
+    match expression.kind() {
+        "identifier" | "generic_name" => {
+            CSharpLocalTypeEvidence::Exact(qualified_parent.to_string())
+        }
+        "member_access_expression" | "conditional_access_expression" => {
+            find_child_by_field(expression, "expression")
+                .or_else(|| expression.child(0))
+                .map(|receiver| csharp_expression_type_evidence(
+                    receiver,
+                    source,
+                    qualified_parent,
+                    field_types,
+                    base_types,
+                ))
+                .unwrap_or_default()
+        }
+        _ => CSharpLocalTypeEvidence::Unknown,
+    }
+}
+
+fn csharp_matching_type_evidence(
+    left: tree_sitter::Node,
+    right: tree_sitter::Node,
+    source: &[u8],
+    qualified_parent: &str,
+    field_types: &HashMap<String, String>,
+    base_types: &[String],
+) -> CSharpLocalTypeEvidence {
+    let left = csharp_expression_type_evidence(
+        left,
+        source,
+        qualified_parent,
+        field_types,
+        base_types,
+    );
+    let right = csharp_expression_type_evidence(
+        right,
+        source,
+        qualified_parent,
+        field_types,
+        base_types,
+    );
+    match (left, right) {
+        (CSharpLocalTypeEvidence::Exact(left), CSharpLocalTypeEvidence::Exact(right))
+            if left == right => CSharpLocalTypeEvidence::Exact(left),
+        _ => CSharpLocalTypeEvidence::Unknown,
+    }
+}
+
+
+fn csharp_expression_type_evidence(
+    expression: tree_sitter::Node,
+    source: &[u8],
+    qualified_parent: &str,
+    field_types: &HashMap<String, String>,
+    base_types: &[String],
+) -> CSharpLocalTypeEvidence {
+    match node_text(expression, source).trim() {
+        "this" => return CSharpLocalTypeEvidence::Exact(qualified_parent.to_string()),
+        "base" => return base_types.first()
+            .map(|base_type| type_evidence_from_text(base_type))
+            .unwrap_or_default(),
+        _ => {}
+    }
+    match expression.kind() {
+        "object_creation_expression" => find_child_by_field(expression, "type")
+            .map(|ty| type_evidence_from_text(node_text(ty, source)))
+            .unwrap_or_default(),
+        "identifier" => {
+            let value = node_text(expression, source).trim();
+            if value == "this" {
+                CSharpLocalTypeEvidence::Exact(qualified_parent.to_string())
+            } else if let Some(ty) = field_types.get(value) {
+                type_evidence_from_text(ty)
+            } else {
+                CSharpLocalTypeEvidence::Unknown
+            }
+        }
+        "this_expression" => {
+            CSharpLocalTypeEvidence::Exact(qualified_parent.to_string())
+        }
+        "base_expression" => base_types.first()
+            .map(|base_type| type_evidence_from_text(base_type))
+            .unwrap_or_default(),
+        "member_access_expression" => {
+            let receiver = find_child_by_field(expression, "expression")
+                .or_else(|| expression.child(0));
+            let field_name = find_child_by_field(expression, "name")
+                .map(|name| node_text(name, source).trim());
+            if receiver.is_some_and(|value| value.kind() == "this_expression")
+                && let Some(ty) = field_name.and_then(|name| field_types.get(name))
+            {
+                type_evidence_from_text(ty)
+            } else {
+                CSharpLocalTypeEvidence::Unknown
+            }
+        }
+        "conditional_expression" => {
+            let Some(consequence) = find_child_by_field(expression, "consequence") else {
+                return CSharpLocalTypeEvidence::Unknown;
+            };
+            let Some(alternative) = find_child_by_field(expression, "alternative") else {
+                return CSharpLocalTypeEvidence::Unknown;
+            };
+            csharp_matching_type_evidence(
+                consequence,
+                alternative,
+                source,
+                qualified_parent,
+                field_types,
+                base_types,
+            )
+        }
+        "binary_expression" if has_direct_child_kind(expression, "??") => {
+            let Some(left) = find_child_by_field(expression, "left") else {
+                return CSharpLocalTypeEvidence::Unknown;
+            };
+            let Some(right) = find_child_by_field(expression, "right") else {
+                return CSharpLocalTypeEvidence::Unknown;
+            };
+            csharp_matching_type_evidence(
+                left,
+                right,
+                source,
+                qualified_parent,
+                field_types,
+                base_types,
+            )
+        }
+
+        "parenthesized_expression" => expression.named_child(0)
+            .map(|child| csharp_expression_type_evidence(
+                child,
+                source,
+                qualified_parent,
+                field_types,
+                base_types,
+            ))
+            .unwrap_or_default(),
+        _ => CSharpLocalTypeEvidence::Unknown,
+    }
+}
+
+fn csharp_call_generic_arity(node: tree_sitter::Node) -> Option<u16> {
+    let expression = node.child(0)?;
+    let generic = if expression.kind() == "generic_name" {
+        Some(expression)
+    } else {
+        find_child_by_field(expression, "name")
+            .filter(|name| name.kind() == "generic_name")
+    }?;
+    find_child_by_kind(generic, "type_argument_list")
+        .map(|arguments| count_named_children(arguments).min(u16::MAX as u32) as u16)
+}
+
+fn extract_csharp_argument_shapes(
+    node: tree_sitter::Node,
+    source: &[u8],
+    field_types: &HashMap<String, String>,
+) -> Vec<CSharpLocalArgumentShape> {
+    let Some(argument_list) = find_child_by_kind(node, "argument_list") else {
+        return Vec::new();
+    };
+    let mut cursor = argument_list.walk();
+    argument_list.named_children(&mut cursor)
+        .map(|argument| {
+            let expression = if argument.kind() == "argument" {
+                find_child_by_field(argument, "expression")
+                    .or_else(|| argument.named_child(argument.named_child_count().saturating_sub(1)))
+            } else {
+                Some(argument)
+            };
+            let text = node_text(argument, source);
+            CSharpLocalArgumentShape {
+                name: csharp_argument_name(argument, source),
+                ref_kind: csharp_ref_kind(text),
+                ty: expression
+                    .map(|value| csharp_argument_type_evidence(value, source, field_types))
+                    .unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+fn csharp_argument_name(argument: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let name = find_child_by_field(argument, "name").or_else(|| {
+        find_child_by_kind(argument, "name_colon")?.named_child(0)
+    })?;
+    Some(node_text(name, source).trim().to_string())
+}
+
+fn csharp_integer_literal_evidence(literal: &str) -> CSharpLocalTypeEvidence {
+    let value = literal.trim().replace('_', "");
+    let lower = value.to_ascii_lowercase();
+    let (digits, ty) = if lower.ends_with("ul") || lower.ends_with("lu") {
+        (&lower[..lower.len() - 2], "System.UInt64")
+    } else if lower.ends_with('l') {
+        (&lower[..lower.len() - 1], "System.Int64")
+    } else if lower.ends_with('u') {
+        (&lower[..lower.len() - 1], "System.UInt32")
+    } else {
+        (lower.as_str(), "System.Int32")
+    };
+    let parsed = if let Some(hex) = digits.strip_prefix("0x") {
+        u128::from_str_radix(hex, 16).ok()
+    } else if let Some(binary) = digits.strip_prefix("0b") {
+        u128::from_str_radix(binary, 2).ok()
+    } else {
+        digits.parse::<u128>().ok()
+    };
+    let Some(parsed) = parsed else {
+        return CSharpLocalTypeEvidence::Unknown;
+    };
+    let in_range = match ty {
+        "System.Int32" => parsed <= i32::MAX as u128,
+        "System.UInt32" => parsed <= u32::MAX as u128,
+        "System.Int64" => parsed <= i64::MAX as u128,
+        "System.UInt64" => parsed <= u64::MAX as u128,
+        _ => false,
+    };
+    if in_range {
+        CSharpLocalTypeEvidence::Exact(ty.to_string())
+    } else {
+        CSharpLocalTypeEvidence::Unknown
+    }
+}
+
+
+fn csharp_argument_type_evidence(
+    expression: tree_sitter::Node,
+    source: &[u8],
+    field_types: &HashMap<String, String>,
+) -> CSharpLocalTypeEvidence {
+    match expression.kind() {
+        "integer_literal" => csharp_integer_literal_evidence(node_text(expression, source)),
+        "string_literal" | "verbatim_string_literal" | "raw_string_literal" => {
+            CSharpLocalTypeEvidence::Exact("System.String".to_string())
+        }
+        "character_literal" => CSharpLocalTypeEvidence::Exact("System.Char".to_string()),
+        "boolean_literal" => CSharpLocalTypeEvidence::Exact("System.Boolean".to_string()),
+        "null_literal" => CSharpLocalTypeEvidence::NullLiteral,
+        "identifier" => field_types.get(node_text(expression, source).trim())
+            .map(|ty| type_evidence_from_text(ty))
+            .unwrap_or_default(),
+        "object_creation_expression" => find_child_by_field(expression, "type")
+            .map(|ty| type_evidence_from_text(node_text(ty, source)))
+            .unwrap_or_default(),
+        "cast_expression" => find_child_by_field(expression, "type")
+            .map(|ty| type_evidence_from_text(node_text(ty, source)))
+            .unwrap_or_default(),
+        "parenthesized_expression" => expression.named_child(0)
+            .map(|value| csharp_argument_type_evidence(value, source, field_types))
+            .unwrap_or_default(),
+        _ => CSharpLocalTypeEvidence::Unknown,
     }
 }
 

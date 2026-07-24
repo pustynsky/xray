@@ -408,11 +408,24 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 }
 ```
 
+For an exact C# overload, first read `symbolId` from `xray_definitions`, then reuse it as the root:
+
+```json
+{
+  "targets": [{ "symbolId": "cs:v1:542d9ed0fc8dac26cf66119daaabf146508c9506ef2e87350f2bc4bc3eac4e77" }],
+  "direction": "down",
+  "depth": 3
+}
+```
+
+Legacy `method + class` discovery remains supported. When it matches multiple C# symbols, the default response contains `rootResolution.status="ambiguous"`, bounded candidates, and an empty exact traversal.
+
 ### Parameters
 
 | Parameter            | Description                                                                                                                                         |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `method` (required)  | Method name to trace, as an array of strings. Multi-element array for multi-method batch (e.g., `["Foo", "Bar", "Baz"]`). Each method gets an independent call tree. Single-element array returns `{callTree}`, multi-element returns `{results: [{method, callTree, nodesInTree}, ...]}`. **BREAKING 2026-04-25:** array required — comma-separated string is hard-rejected |
+| `method` (one of)   | Method name to trace, as an array of strings. Multi-element array enables legacy multi-method batch mode. Mutually exclusive with `targets`. |
+| `targets` (one of)  | Exact C# root selector: `[{"symbolId":"cs:v1:<64 lowercase hex>"}]`. Get the ID from `xray_definitions`. One target is supported in this version; mutually exclusive with `method` and `class`. |
 | `class`              | Scope to a specific class. DI-aware: `class: "UserService"` also finds callers using `IUserService`. Works for both `"up"` and `"down"` directions. See [DI Support](di-support.md) for the full list of resolved patterns and supported containers. |
 | `direction`          | `"up"` = find callers (default), `"down"` = find callees                                                                                            |
 | `depth`              | Max recursion depth (default: 3, max: 10)                                                                                                           |
@@ -421,6 +434,7 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 | `excludeDir`         | Directory substrings to exclude, e.g. `["\\test\\", "\\Mock\\"]`                                                                                    |
 | `excludeFile`        | File path substrings to exclude                                                                                                                     |
 | `resolveInterfaces`  | Auto-resolve interface → implementation (default: true)                                                                                             |
+| `ambiguityPolicy`    | C# ambiguity behavior: `"report"` (default) returns candidates without traversing ambiguous roots/edges; `"legacy"` preserves historical fan-out and marks the result unsafe for exact semantics. |
 | `ext`                | array&lt;string&gt; — file extension filter (default: server's `--ext`). **BREAKING 2026-04-25:** array required                                                                                                   |
 | `includeBody`        | Include source code body of each method in the call tree (default: false). Also adds `rootMethod` with the target method's body                     |
 | `includeDocComments` | Expand body upward to include doc-comments above definitions. Implies `includeBody=true`. Adds `docCommentLines` field (default: false)             |
@@ -577,6 +591,8 @@ When `maxTotalNodes` or `maxCallersPerLevel` omits an otherwise eligible node, `
 **Backward compatibility:** Single-method calls (no comma) return the existing format with `callTree` at the top level. Multi-method calls return `results` array.
 
 ### Limitations
+
+- **C# resolution is conservative, not compiler-complete.** Exact local syntax evidence is used when available; unsupported conversions, dynamic dispatch, project-wide aliases, and unresolved receiver chains return ambiguity or no exact edge rather than selecting an arbitrary overload.
 
 - **Interface vs concrete class name:** when searching for callers, always use the **interface name** (e.g., `class: "IUserService"`) rather than the concrete class name (e.g., `class: "UserService"`). Calls through DI use the interface type as the receiver. Searching with the concrete class returns 0 callers if all call sites use the interface. Alternatively, set `resolveInterfaces: true` to auto-resolve implementations.
 

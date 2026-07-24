@@ -454,6 +454,24 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                         "items": { "type": "string" },
                         "description": "Method name(s) to find callers/callees for. Each array entry is one method; multiple entries = batch (e.g., [\"Foo\",\"Bar\",\"Baz\"]). Each method gets an independent call tree. Single-element array returns {callTree: [...]}, multi-element returns {results: [{method, callTree}, ...]}."
                     },
+                    "targets": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "symbolId": {
+                                    "type": "string",
+                                    "pattern": "^cs:v1:[0-9a-f]{64}$",
+                                    "description": "Exact C# callable symbolId returned by xray_definitions."
+                                }
+                            },
+                            "required": ["symbolId"],
+                            "additionalProperties": false
+                        },
+                        "description": "Exact C# symbolId root; incompatible with method/class. One target is supported."
+                    },
                     "class": {
                         "type": "string",
                         "description": "STRONGLY RECOMMENDED: Parent class name to scope the search. Without this, callers of ALL methods with this name across the entire codebase are found, which may mix results from unrelated classes and produce misleading call trees. Always specify when you know the containing class. DI-aware: automatically includes callers that use the interface (e.g., class='UserService' also finds callers using IUserService)."
@@ -526,12 +544,22 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                         "type": "boolean",
                         "description": "When true, excludes test files and test methods from caller/callee trees and marks resultStatus.scope.productionOnly=true. (default: false)"
                     },
+                    "ambiguityPolicy": {
+                        "type": "string",
+                        "enum": ["report", "legacy"],
+                        "description": "C# ambiguity mode: report (default) or unsafe legacy fan-out."
+                    },
+
                     "includeGrepReferences": {
                         "type": "boolean",
                         "description": "Add grepReferences[] — files containing the method name as text but NOT in the call tree. Catches delegate usage, method groups, reflection. Skipped for method names shorter than 4 characters to avoid noise. (default: false)"
                     }
                 },
-                "required": ["method"]
+                "required": [],
+                "anyOf": [
+                    { "required": ["method"] },
+                    { "required": ["targets"] }
+                ]
             }),
         },
         ToolDefinition {

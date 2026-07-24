@@ -9,7 +9,10 @@ use serde_json::{json, Value};
 
 use crate::mcp::protocol::ToolCallResult;
 use crate::ContentIndex;
-use crate::definitions::{CallSite, CallSiteKind, DefinitionEntry, DefinitionIndex, DefinitionKind};
+use crate::definitions::{
+    CallSite, CallSiteKind, CSharpCallSiteShape, CSharpCallableRecord, CSharpRefKind,
+    CSharpTypeEvidence, DefinitionEntry, DefinitionIndex, DefinitionKind,
+};
 use code_xray::generate_trigrams;
 
 use super::HandlerContext;
@@ -194,6 +197,11 @@ fn is_test_method(def: &DefinitionEntry, file_path: &str) -> bool {
     false
 }
 
+
+fn excluded_from_production(definition: &DefinitionEntry, file_path: &str) -> bool {
+    is_test_file(file_path) || is_test_method(definition, file_path)
+}
+
 /// Check if a file path indicates a test file.
 /// Covers: Rust `_tests.rs`, TypeScript/JavaScript `.spec.ts`/`.test.ts`,
 /// and directory conventions (`/tests/`, `/test/`).
@@ -374,6 +382,245 @@ fn template_navigation_source_file(node: &Value, def_idx: &DefinitionIndex) -> O
 }
 
 
+fn inject_exact_root_resolution(
+    output: &mut Value,
+    index: &DefinitionIndex,
+    definition_index: u32,
+) {
+    let Some(definition) = index.definitions.get(definition_index as usize) else {
+        return;
+    };
+    let Some(callable) = index.csharp_semantics.callable_for_definition(definition_index) else {
+        return;
+    };
+    let symbol_id = callable.symbol_id.as_public_id();
+    let qualified_type = index.csharp_semantics.strings.get(callable.qualified_parent);
+    let explicit_interface = callable.explicit_interface
+        .and_then(|qualifier| index.csharp_semantics.strings.get(qualifier));
+    let file = index.files.get(definition.file_id as usize)
+        .and_then(|path| Path::new(path).file_name())
+        .and_then(|name| name.to_str());
+    output["query"]["targets"] = json!([{ "symbolId": symbol_id }]);
+    output["rootResolution"] = json!({
+        "status": "exact",
+        "symbolId": symbol_id,
+        "qualifiedType": qualified_type,
+        "explicitInterface": explicit_interface,
+        "signature": definition.signature,
+        "file": file,
+        "line": definition.line_start,
+    });
+}
+
+
+fn read_symbol_target(args: &Value) -> Result<Option<String>, String> {
+    let Some(targets) = args.get("targets") else {
+        return Ok(None);
+    };
+    if args.get("method").is_some() {
+        return Err("targets and method are mutually exclusive".to_string());
+    }
+    let targets = targets.as_array()
+        .ok_or_else(|| "targets must be an array".to_string())?;
+    if targets.len() != 1 {
+        return Err("targets currently requires exactly one symbolId target".to_string());
+    }
+    let target = targets[0].as_object()
+        .ok_or_else(|| "targets[0] must be an object".to_string())?;
+    if target.len() != 1 || !target.contains_key("symbolId") {
+        return Err("targets[0] must contain only symbolId".to_string());
+    }
+    let symbol_id = target["symbolId"].as_str()
+        .ok_or_else(|| "targets[0].symbolId must be a string".to_string())?;
+    Ok(Some(symbol_id.to_string()))
+}
+
+fn resolve_symbol_root(
+    index: &DefinitionIndex,
+    value: &str,
+    production_only: bool,
+) -> Result<u32, String> {
+    let symbol_id = crate::definitions::CSharpSymbolId::parse(value)
+        .ok_or_else(|| "symbolId must match cs:v1: followed by 64 lowercase hex characters".to_string())?;
+    let mut occurrences: Vec<_> = index.csharp_semantics.definitions_for_symbol(symbol_id)
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            index.definitions.get(*candidate as usize).is_some_and(|definition| {
+                let active = index.file_index.get(&definition.file_id)
+                    .is_some_and(|active| active.contains(candidate));
+                let file = index.files.get(definition.file_id as usize)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                active && (!production_only || !excluded_from_production(definition, file))
+            })
+        })
+        .collect();
+    if occurrences.is_empty() {
+        return Err(format!("symbolId not found: {value}"));
+    }
+    let bodies: Vec<_> = occurrences.iter().copied()
+        .filter(|&candidate| {
+            index.csharp_semantics.callable_for_definition(candidate)
+                .is_some_and(|callable| callable.has_body)
+        })
+        .collect();
+    if bodies.len() > 1 {
+        return Err(format!("symbolId has multiple body occurrences: {value}"));
+    }
+    if let Some(body) = bodies.first() {
+        return Ok(*body);
+    }
+    occurrences.sort_by_key(|candidate| {
+        index.definitions.get(*candidate as usize)
+            .map(|definition| (definition.file_id, definition.line_start))
+            .unwrap_or((u32::MAX, u32::MAX))
+    });
+    Ok(occurrences[0])
+}
+
+
+fn mark_legacy_ambiguous_fanout(result_status: &mut Value) {
+    result_status["status"] = json!("partial");
+    result_status["complete"] = json!(false);
+    result_status["safeForExactSemantics"] = json!(false);
+    result_status["safeForExhaustiveClaims"] = json!(false);
+    if let Some(reasons) = result_status["reasons"].as_array_mut() {
+        reasons.push(json!("legacy_ambiguous_fanout"));
+    }
+}
+
+
+struct CSharpRootCandidates {
+    definitions: Vec<u32>,
+    reason: Option<&'static str>,
+}
+
+
+fn csharp_ambiguous_root_candidates(
+    index: &DefinitionIndex,
+    method_name: &str,
+    class_filter: Option<&str>,
+    production_only: bool,
+) -> CSharpRootCandidates {
+    let Some(indices) = index.name_index.get(&method_name.to_lowercase()) else {
+        return CSharpRootCandidates { definitions: Vec::new(), reason: None };
+    };
+    let mut by_symbol: HashMap<crate::definitions::CSharpSymbolId, Vec<u32>> = HashMap::new();
+    for &definition_index in indices {
+        let Some(definition) = index.definitions.get(definition_index as usize) else {
+            continue;
+        };
+        if definition.name != method_name
+            || !matches!(definition.kind, DefinitionKind::Method | DefinitionKind::Constructor)
+        {
+            continue;
+        }
+        if let Some(class_name) = class_filter
+            && definition.parent.as_deref() != Some(class_name)
+        {
+            continue;
+        }
+        let file = index.files.get(definition.file_id as usize).map(String::as_str).unwrap_or("");
+        if production_only && excluded_from_production(definition, file) {
+            continue;
+        }
+        let Some(symbol_id) = index.csharp_semantics.symbol_id_for_definition(definition_index) else {
+            continue;
+        };
+        by_symbol.entry(symbol_id).or_default().push(definition_index);
+    }
+
+    let mut definitions = Vec::new();
+    let mut invalid_multiple_bodies = false;
+    for occurrences in by_symbol.into_values() {
+        let bodies: Vec<_> = occurrences.iter().copied().filter(|&definition| {
+            index.csharp_semantics.callable_for_definition(definition)
+                .is_some_and(|callable| callable.has_body)
+        }).collect();
+        if bodies.len() > 1 {
+            invalid_multiple_bodies = true;
+            definitions.extend(bodies);
+        } else if let Some(body) = bodies.first() {
+            definitions.push(*body);
+        } else if let Some(declaration) = occurrences.first() {
+            definitions.push(*declaration);
+        }
+    }
+    definitions.sort_by_key(|candidate| {
+        let symbol_id = index.csharp_semantics.symbol_id_for_definition(*candidate)
+            .map(|symbol_id| symbol_id.0)
+            .unwrap_or([0; 32]);
+        let location = index.definitions.get(*candidate as usize)
+            .map(|definition| (definition.file_id, definition.line_start))
+            .unwrap_or((u32::MAX, u32::MAX));
+        (symbol_id, location)
+    });
+    CSharpRootCandidates {
+        definitions,
+        reason: invalid_multiple_bodies.then_some("invalid_multiple_bodies"),
+    }
+}
+
+fn build_ambiguous_root_result(
+    index: &DefinitionIndex,
+    method_name: &str,
+    class_filter: Option<&str>,
+    direction: &str,
+    candidates: &[u32],
+    reason: &str,
+    production_only: bool,
+) -> ToolCallResult {
+    let candidate_values: Vec<_> = candidates.iter()
+        .filter_map(|&candidate| csharp_resolution_candidate(index, candidate))
+        .collect();
+    let mut output = json!({
+        "callTree": [],
+        "query": {
+            "method": method_name,
+            "direction": direction,
+            "productionOnly": production_only,
+        },
+        "rootResolution": {
+            "status": "ambiguous",
+            "reason": reason,
+            "candidates": candidate_values,
+        },
+        "summary": {
+            "totalNodes": 0,
+            "truncated": false,
+            "resolutionSummary": {
+                "ambiguousRoots": 1,
+            }
+        }
+    });
+    if let Some(class_name) = class_filter {
+        output["query"]["class"] = json!(class_name);
+    }
+    let mut result_status = build_result_status(
+        "partial",
+        false,
+        false,
+        false,
+        "ast_call_graph",
+        vec![reason.to_string()],
+    );
+    add_collection_accounting(
+        &mut result_status,
+        json!({ "nodes": 0 }),
+        json!({ "nodes": 0 }),
+    );
+    result_status["totalKnown"] = json!(true);
+    result_status["scope"] = json!({
+        "productionOnly": production_only,
+        "includesTests": !production_only,
+        "builtInExcludes": if production_only { json!(["test files", "test methods"]) } else { Value::Array(Vec::new()) },
+    });
+    let output = attach_result_status(output, result_status);
+    ToolCallResult::success(json_to_string(&output))
+}
+
+
 pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let def_index = match &ctx.def_index {
         Some(idx) => idx,
@@ -382,35 +629,42 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         ),
     };
 
-    // 2026-04-25 list-params migration: `method` is now `array<string>` (each entry
-    // is one method name; multi-entry array means batch-callers). Trim+empty-filter
-    // each entry to preserve prior behavior. Missing key OR empty array → error.
-    if args.get("method").is_none() {
-        return ToolCallResult::error("Missing required parameter: method".to_string());
-    }
-    let methods_raw = match super::utils::read_string_array(args, "method") {
-        Ok(v) => v,
-        Err(e) => return ToolCallResult::error(e),
+    let target_symbol_id = match read_symbol_target(args) {
+        Ok(value) => value,
+        Err(error) => return ToolCallResult::error(error),
     };
-    let methods: Vec<String> = methods_raw.into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if methods.is_empty() {
-        return ToolCallResult::error("method parameter is empty after parsing".to_string());
-    }
-    let class_filter = match read_string(args, "class") {
-        Ok(v) => v,
-        Err(e) => return ToolCallResult::error(e),
+    let methods = if target_symbol_id.is_some() {
+        Vec::new()
+    } else {
+        if args.get("method").is_none() {
+            return ToolCallResult::error("Missing required parameter: method or targets".to_string());
+        }
+        let methods_raw = match super::utils::read_string_array(args, "method") {
+            Ok(value) => value,
+            Err(error) => return ToolCallResult::error(error),
+        };
+        let methods: Vec<String> = methods_raw.into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
+        if methods.is_empty() {
+            return ToolCallResult::error("method parameter is empty after parsing".to_string());
+        }
+        methods
+    };
+    let mut class_filter = match read_string(args, "class") {
+        Ok(value) => value,
+        Err(error) => return ToolCallResult::error(error),
     };
 
-    // For multi-method batch, delegate to batch handler
+    if target_symbol_id.is_some() && class_filter.is_some() {
+        return ToolCallResult::error("class cannot be combined with targets".to_string());
+    }
     if methods.len() > 1 {
         return handle_multi_method_callers(ctx, args, def_index, &methods, class_filter.as_deref());
     }
 
-    // Single method — existing behavior (backward compatible)
-    let method_name = methods.into_iter().next().unwrap();
+    let mut method_name = methods.into_iter().next().unwrap_or_default();
 
     let max_depth = {
         let raw = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3);
@@ -464,6 +718,15 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
     // Impact analysis parameter
     let impact_analysis = args.get("impactAnalysis").and_then(|v| v.as_bool()).unwrap_or(false);
     let production_only = args.get("productionOnly").and_then(|v| v.as_bool()).unwrap_or(false);
+    let ambiguity_policy = match read_enum_string_with_default(
+        args,
+        "ambiguityPolicy",
+        &["report", "legacy"],
+        "report",
+    ) {
+        Ok(value) => value.to_lowercase(),
+        Err(error) => return ToolCallResult::error(error),
+    };
     if impact_analysis && direction != "up" {
         return ToolCallResult::error(
             "impactAnalysis only works with direction='up'. It traces callers upward to find test methods covering the target.".to_string()
@@ -481,6 +744,51 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         Err(e) => return ToolCallResult::error(format!("Failed to acquire definition index lock: {}", e)),
     };
 
+    let exact_root_definition = if let Some(ref symbol_id) = target_symbol_id {
+        let definition_index = match resolve_symbol_root(
+            &def_idx,
+            symbol_id,
+            production_only,
+        ) {
+            Ok(value) => value,
+            Err(error) => return ToolCallResult::error(error),
+        };
+        let Some(definition) = def_idx.definitions.get(definition_index as usize) else {
+            return ToolCallResult::error(format!("symbolId points outside definition index: {symbol_id}"));
+        };
+        method_name = definition.name.clone();
+        class_filter = definition.parent.clone();
+        Some(definition_index)
+    } else {
+        None
+    };
+
+    let ambiguous_root_candidates = if exact_root_definition.is_none() {
+        csharp_ambiguous_root_candidates(
+            &def_idx,
+            &method_name,
+            class_filter.as_deref(),
+            production_only,
+        )
+    } else {
+        CSharpRootCandidates { definitions: Vec::new(), reason: None }
+    };
+    let report_root = ambiguous_root_candidates.reason.is_some()
+        || (ambiguity_policy == "report" && ambiguous_root_candidates.definitions.len() > 1);
+    if report_root {
+        return build_ambiguous_root_result(
+            &def_idx,
+            &method_name,
+            class_filter.as_deref(),
+            direction,
+            &ambiguous_root_candidates.definitions,
+            ambiguous_root_candidates.reason.unwrap_or("ambiguous_root"),
+            production_only,
+        );
+    }
+    let legacy_ambiguous_root = ambiguity_policy == "legacy"
+        && ambiguous_root_candidates.definitions.len() > 1;
+
     let limits = CallerLimits { max_callers_per_level, max_total_nodes };
     // MINOR-9: Relaxed ordering below is correct while `build()` runs on a single thread.
     // If handle_multi_method_callers is ever parallelized (e.g. `methods.par_iter()`),
@@ -492,7 +800,11 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
 
     // Check for ambiguous method names and generate warning
     let method_lower = method_name.to_lowercase();
-    let ambiguity_warning = check_method_ambiguity(&method_name, &method_lower, class_filter.as_deref(), &def_idx);
+    let ambiguity_warning = if exact_root_definition.is_some() {
+        None
+    } else {
+        check_method_ambiguity(&method_name, &method_lower, class_filter.as_deref(), &def_idx)
+    };
 
     // ─── Angular template tree (check before standard call tree) ─────
     let is_down = direction == "down";
@@ -620,12 +932,22 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             per_level_dropped: 0,
             interface_lookup_cache: HashMap::new(),
         };
-        let tree = builder.build(
-            &method_name,
-            class_filter.as_deref(),
-            0,
-            &initial_chain,
-        );
+        let tree = if let Some(root_definition) = exact_root_definition {
+            builder.build_exact_root(
+                &method_name,
+                class_filter.as_deref(),
+                0,
+                &initial_chain,
+                root_definition,
+            )
+        } else {
+            builder.build(
+                &method_name,
+                class_filter.as_deref(),
+                0,
+                &initial_chain,
+            )
+        };
 
         // CALL-005: dedup is only needed when resolveInterfaces=true, which is
         // the only path that can produce duplicate root-level callers (the same
@@ -633,6 +955,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         // interface resolution the builder cannot emit duplicates, so the O(N)
         // walk + per-node `format!()` allocations are pure waste on the hot path.
         let tree = if resolve_interfaces { dedup_caller_tree(tree) } else { tree };
+        let ambiguous_references = count_nodes_by_kind(&tree, "ambiguousCaller");
 
         let total_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
         let truncated = builder.total_limit_hit;
@@ -646,6 +969,11 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             "truncated": truncated,
             "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
         });
+        if ambiguous_references > 0 {
+            summary["resolutionSummary"] = json!({
+                "ambiguousReferences": ambiguous_references,
+            });
+        }
         // MINOR-7: surface per-level truncation so clients can distinguish
         // "full result" from "capped to maxCallersPerLevel".
         if builder.per_level_dropped > 0 {
@@ -759,12 +1087,15 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         if let Some(ref cls) = class_filter {
             output["query"]["class"] = json!(cls);
         }
+        if let Some(root_definition) = exact_root_definition {
+            inject_exact_root_resolution(&mut output, &def_idx, root_definition);
+        }
         let body_lines_available = if include_body {
             compute_body_lines_from_tree(&tree, root_method.as_ref()).1
         } else {
             0
         };
-        let result_status = build_callers_result_status(
+        let mut result_status = build_callers_result_status(
             count_tree_nodes(&tree),
             total_nodes_lower_bound,
             truncated,
@@ -776,6 +1107,25 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             false,
             is_sql_routine_query(&def_idx, &method_name, class_filter.as_deref()),
         );
+        if ambiguous_references > 0 {
+            result_status["status"] = json!("partial");
+            result_status["complete"] = json!(false);
+            result_status["safeForExactSemantics"] = json!(false);
+            result_status["safeForExhaustiveClaims"] = json!(false);
+            if let Some(reasons) = result_status["reasons"].as_array_mut() {
+                reasons.push(json!("ambiguous_overload"));
+            }
+            result_status["resolutionCompleteness"] = json!({
+                "exact": false,
+                "allCallsResolved": false,
+                "allStaticTargetsUnique": false,
+            });
+        }
+
+        if legacy_ambiguous_root {
+            mark_legacy_ambiguous_fanout(&mut result_status);
+            output["warning"] = json!("ambiguityPolicy=legacy traverses ambiguous C# roots and is deprecated for exact analysis.");
+        }
         let output = attach_result_status(output, result_status);
         ToolCallResult::success(json_to_string(&output))
     } else {
@@ -788,11 +1138,21 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             total_limit_hit: false,
             per_level_dropped: 0,
         };
-        let tree = builder.build(
-            &method_name,
-            class_filter.as_deref(),
-            0,
-        );
+        let tree = if let Some(root_definition) = exact_root_definition {
+            builder.build_exact_root(
+                &method_name,
+                class_filter.as_deref(),
+                0,
+                root_definition,
+            )
+        } else {
+            builder.build(
+                &method_name,
+                class_filter.as_deref(),
+                0,
+            )
+        };
+        let ambiguous_edges = count_nodes_by_kind(&tree, "ambiguousCall");
 
         let total_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
         let truncated = builder.total_limit_hit;
@@ -805,6 +1165,11 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             "truncated": truncated,
             "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
         });
+        if ambiguous_edges > 0 {
+            summary["resolutionSummary"] = json!({
+                "ambiguousEdges": ambiguous_edges,
+            });
+        }
         if builder.per_level_dropped > 0 {
             summary["perLevelTruncated"] = json!(true);
             summary["callersDroppedPerLevel"] = json!(builder.per_level_dropped);
@@ -861,12 +1226,15 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         if let Some(ref cls) = class_filter {
             output["query"]["class"] = json!(cls);
         }
+        if let Some(root_definition) = exact_root_definition {
+            inject_exact_root_resolution(&mut output, &def_idx, root_definition);
+        }
         let body_lines_available = if include_body {
             compute_body_lines_from_tree(&tree, root_method.as_ref()).1
         } else {
             0
         };
-        let result_status = build_callers_result_status(
+        let mut result_status = build_callers_result_status(
             count_tree_nodes(&tree),
             total_nodes_lower_bound,
             truncated,
@@ -878,6 +1246,25 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             false,
             is_sql_routine_query(&def_idx, &method_name, class_filter.as_deref()),
         );
+        if ambiguous_edges > 0 {
+            result_status["status"] = json!("partial");
+            result_status["complete"] = json!(false);
+            result_status["safeForExactSemantics"] = json!(false);
+            result_status["safeForExhaustiveClaims"] = json!(false);
+            if let Some(reasons) = result_status["reasons"].as_array_mut() {
+                reasons.push(json!("ambiguous_overload"));
+            }
+            result_status["resolutionCompleteness"] = json!({
+                "exact": false,
+                "allCallsResolved": false,
+                "allStaticTargetsUnique": false,
+            });
+        }
+        if legacy_ambiguous_root {
+            mark_legacy_ambiguous_fanout(&mut result_status);
+            output["warning"] = json!("ambiguityPolicy=legacy traverses ambiguous C# roots and is deprecated for exact analysis.");
+        }
+
         let output = attach_result_status(output, result_status);
         ToolCallResult::success(json_to_string(&output))
     }
@@ -1971,6 +2358,59 @@ fn collect_substring_file_ids(
 ///
 /// Returns false if:
 /// - The call-site has a receiver_type that does NOT match target_class
+enum ExactTargetReferenceResolution {
+    Exact,
+    Ambiguous(Vec<u32>),
+    NotFound,
+}
+
+fn resolve_exact_target_reference(
+    def_idx: &DefinitionIndex,
+    caller_di: u32,
+    call_line: u32,
+    method_name: &str,
+    target_definition: u32,
+    policy: ResolutionPolicy,
+    production_only: bool,
+) -> ExactTargetReferenceResolution {
+    let Some(call_sites) = def_idx.method_calls.get(&caller_di) else {
+        return ExactTargetReferenceResolution::NotFound;
+    };
+    let caller_parent = def_idx.definitions.get(caller_di as usize)
+        .and_then(|definition| definition.parent.as_deref());
+    let method_name_lower = method_name.to_lowercase();
+    let mut ambiguous = Vec::new();
+    for (ordinal, call) in call_sites.iter().enumerate().filter(|(_, call)| {
+        call.line == call_line && call.method_name.to_lowercase() == method_name_lower
+    }) {
+        match resolve_call_site_for_graph(
+            call,
+            def_idx,
+            caller_di,
+            ordinal,
+            caller_parent,
+            policy,
+            production_only,
+        ) {
+            CSharpCallResolution::Resolved(candidates) if candidates.contains(&target_definition) => {
+                return ExactTargetReferenceResolution::Exact;
+            }
+            CSharpCallResolution::Ambiguous(candidates) if candidates.contains(&target_definition) => {
+                ambiguous.extend(candidates);
+            }
+            _ => {}
+        }
+    }
+    if ambiguous.is_empty() {
+        ExactTargetReferenceResolution::NotFound
+    } else {
+        ambiguous.sort_unstable();
+        ambiguous.dedup();
+        ExactTargetReferenceResolution::Ambiguous(ambiguous)
+    }
+}
+
+
 #[cfg(test)]
 fn verify_call_site_target(
     def_idx: &DefinitionIndex,
@@ -1986,17 +2426,22 @@ fn verify_call_site_target(
         call_line,
         method_name,
         target_class,
+        None,
+        false,
         extension_methods_lower,
         ResolutionPolicy::ExpandInterfaceImplementations,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verify_call_site_target_with_policy(
     def_idx: &DefinitionIndex,
     caller_di: u32,
     call_line: u32,
     method_name: &str,
     target_class: Option<&str>,
+    exact_target_definition: Option<u32>,
+    production_only: bool,
     // CALL-V-001: optional pre-computed lowercase lookup
     // (`method_lower → [class_lower, ...]`) for `def_idx.extension_methods`.
     // When `Some`, the extension-method check is O(1); when `None`, falls
@@ -2023,6 +2468,21 @@ fn verify_call_site_target_with_policy(
     // declaration, comment, string, or another non-call occurrence.
     if matching_calls.is_empty() {
         return false;
+    }
+
+    if let Some(target_definition) = exact_target_definition {
+        return matches!(
+            resolve_exact_target_reference(
+                def_idx,
+                caller_di,
+                call_line,
+                method_name,
+                target_definition,
+                policy,
+                production_only,
+            ),
+            ExactTargetReferenceResolution::Exact
+        );
     }
 
     // Unscoped SQL caller queries still require exact AST evidence, but do not
@@ -2455,12 +2915,43 @@ impl CallerTreeBuilder<'_> {
         current_depth: usize,
         call_chain: &[String],
     ) -> Vec<Value> {
+        self.build_with_root(method_name, parent_class, current_depth, call_chain, None)
+    }
+
+    fn build_exact_root(
+        &mut self,
+        method_name: &str,
+        parent_class: Option<&str>,
+        current_depth: usize,
+        call_chain: &[String],
+        root_definition: u32,
+    ) -> Vec<Value> {
+        self.build_with_root(
+            method_name,
+            parent_class,
+            current_depth,
+            call_chain,
+            Some(root_definition),
+        )
+    }
+
+    fn build_with_root(
+        &mut self,
+        method_name: &str,
+        parent_class: Option<&str>,
+        current_depth: usize,
+        call_chain: &[String],
+        root_definition: Option<u32>,
+    ) -> Vec<Value> {
         if current_depth >= self.max_depth || self.total_limit_hit {
             return Vec::new();
         }
         let method_lower = method_name.to_lowercase();
 
-        let target_line = find_target_line(self.ctx.def_idx, &method_lower, parent_class);
+        let target_line = root_definition
+            .and_then(|definition| self.ctx.def_idx.definitions.get(definition as usize))
+            .map(|definition| definition.line_start)
+            .or_else(|| find_target_line(self.ctx.def_idx, &method_lower, parent_class));
 
         // Use class.method.line as visited key to distinguish overloads
         let visited_key = if let Some(cls) = parent_class {
@@ -2500,6 +2991,8 @@ impl CallerTreeBuilder<'_> {
             di: u32,
             file_path: String,
             call_sites: Vec<u32>,
+            ambiguous_call_sites: Vec<u32>,
+            ambiguous_candidates: Vec<u32>,
         }
 
         let mut caller_map: HashMap<String, CallerInfo> = HashMap::new();
@@ -2561,18 +3054,37 @@ impl CallerTreeBuilder<'_> {
                     .and_then(|extension| extension.to_str())
                     .is_some_and(|extension| extension.eq_ignore_ascii_case("sql"));
                 let requires_call_site_validation = parent_class.is_some() || is_sql;
-                if requires_call_site_validation
-                    && !verify_call_site_target_with_policy(
+                let mut ambiguous_candidates = Vec::new();
+                if requires_call_site_validation {
+                    if let Some(target_definition) = root_definition {
+                        match resolve_exact_target_reference(
+                            self.ctx.def_idx,
+                            caller_di,
+                            line,
+                            &method_lower,
+                            target_definition,
+                            self.ctx.resolution_policy,
+                            self.ctx.production_only,
+                        ) {
+                            ExactTargetReferenceResolution::Exact => {}
+                            ExactTargetReferenceResolution::Ambiguous(candidates) => {
+                                ambiguous_candidates = candidates;
+                            }
+                            ExactTargetReferenceResolution::NotFound => continue,
+                        }
+                    } else if !verify_call_site_target_with_policy(
                         self.ctx.def_idx,
                         caller_di,
                         line,
                         &method_lower,
                         parent_class,
+                        None,
+                        self.ctx.production_only,
                         Some(&self.ctx.extension_methods_lower),
                         self.ctx.resolution_policy,
-                    )
-                {
-                    continue;
+                    ) {
+                        continue;
+                    }
                 }
                 if is_sql
                     && parent_class.is_none()
@@ -2593,11 +3105,19 @@ impl CallerTreeBuilder<'_> {
                     caller_line
                 );
 
+                let is_ambiguous = !ambiguous_candidates.is_empty();
                 if let Some(existing) = caller_map.get_mut(&caller_key) {
-                    // Same caller method — just add the call site line
-                    if !existing.call_sites.contains(&line) {
-                        existing.call_sites.push(line);
+                    let call_sites = if is_ambiguous {
+                        &mut existing.ambiguous_call_sites
+                    } else {
+                        &mut existing.call_sites
+                    };
+                    if !call_sites.contains(&line) {
+                        call_sites.push(line);
                     }
+                    existing.ambiguous_candidates.extend(ambiguous_candidates);
+                    existing.ambiguous_candidates.sort_unstable();
+                    existing.ambiguous_candidates.dedup();
                 } else {
                     if caller_map.len() >= collection_limit { continue; }
                     caller_order.push(caller_key.clone());
@@ -2607,7 +3127,9 @@ impl CallerTreeBuilder<'_> {
                         line: caller_line,
                         di: caller_di,
                         file_path: file_path.clone(),
-                        call_sites: vec![line],
+                        call_sites: if is_ambiguous { Vec::new() } else { vec![line] },
+                        ambiguous_call_sites: if is_ambiguous { vec![line] } else { Vec::new() },
+                        ambiguous_candidates,
                     });
                 }
             }
@@ -2717,6 +3239,30 @@ impl CallerTreeBuilder<'_> {
             }
             let mut sorted_call_sites = info.call_sites.clone();
             sorted_call_sites.sort();
+
+            if sorted_call_sites.is_empty() && !info.ambiguous_call_sites.is_empty() {
+                let mut ambiguous_call_sites = info.ambiguous_call_sites.clone();
+                ambiguous_call_sites.sort_unstable();
+                let mut node = build_caller_node(
+                    &info.name,
+                    info.parent.as_deref(),
+                    info.line,
+                    &ambiguous_call_sites,
+                    &info.file_path,
+                    Vec::new(),
+                );
+                node["nodeKind"] = json!("ambiguousCaller");
+                node["resolution"] = json!({
+                    "status": "ambiguous",
+                    "reason": "ambiguous_overload",
+                    "candidates": csharp_resolution_candidates(
+                        self.ctx.def_idx,
+                        &info.ambiguous_candidates,
+                    ),
+                });
+                callers.push(node);
+                continue;
+            }
 
             // Impact analysis: check if this caller is a test method
             if self.ctx.impact_analysis {
@@ -2984,6 +3530,18 @@ fn find_template_parents(
 
 /// Build a callee tree (direction = "down"): find what methods are called by this method.
 /// Uses pre-computed call graph from AST analysis (method_calls in DefinitionIndex).
+fn count_nodes_by_kind(nodes: &[Value], node_kind: &str) -> usize {
+    nodes.iter().map(|node| {
+        usize::from(node["nodeKind"].as_str() == Some(node_kind))
+            + node["callers"].as_array()
+                .map(|children| count_nodes_by_kind(children, node_kind))
+                .unwrap_or(0)
+            + node["callees"].as_array()
+                .map(|children| count_nodes_by_kind(children, node_kind))
+                .unwrap_or(0)
+    }).sum()
+}
+
 struct CalleeTreeBuilder<'a> {
     ctx: &'a CallerTreeContext<'a>,
     max_depth: usize,
@@ -3001,6 +3559,31 @@ impl CalleeTreeBuilder<'_> {
         class_filter: Option<&str>,
         current_depth: usize,
     ) -> Vec<Value> {
+        self.build_with_root(method_name, class_filter, current_depth, None)
+    }
+
+    fn build_exact_root(
+        &mut self,
+        method_name: &str,
+        class_filter: Option<&str>,
+        current_depth: usize,
+        root_definition: u32,
+    ) -> Vec<Value> {
+        self.build_with_root(
+            method_name,
+            class_filter,
+            current_depth,
+            Some(root_definition),
+        )
+    }
+
+    fn build_with_root(
+        &mut self,
+        method_name: &str,
+        class_filter: Option<&str>,
+        current_depth: usize,
+        root_definition: Option<u32>,
+    ) -> Vec<Value> {
         if current_depth >= self.max_depth || self.total_limit_hit {
             return Vec::new();
         }
@@ -3011,7 +3594,10 @@ impl CalleeTreeBuilder<'_> {
 
         let method_lower = method_name.to_lowercase();
 
-        let target_line = find_target_line(def_idx, &method_lower, class_filter);
+        let target_line = root_definition
+            .and_then(|definition| def_idx.definitions.get(definition as usize))
+            .map(|definition| definition.line_start)
+            .or_else(|| find_target_line(def_idx, &method_lower, class_filter));
 
         // Use class.method.line as visit key to distinguish overloads
         let visit_key = if let Some(cls) = class_filter {
@@ -3024,7 +3610,7 @@ impl CalleeTreeBuilder<'_> {
         }
 
         // Find all definitions of this method (with their def_idx indices)
-        let method_def_indices: Vec<u32> = def_idx.name_index
+        let mut method_def_indices: Vec<u32> = def_idx.name_index
             .get(&method_lower)
             .map(|indices| {
                 indices.iter()
@@ -3052,6 +3638,9 @@ impl CalleeTreeBuilder<'_> {
             })
             .unwrap_or_default();
 
+        if let Some(root_definition) = root_definition {
+            method_def_indices.retain(|&definition| definition == root_definition);
+        }
         if method_def_indices.is_empty() {
             return Vec::new();
         }
@@ -3066,16 +3655,69 @@ impl CalleeTreeBuilder<'_> {
                 None => continue,
             };
 
-            for call in call_sites {
-                // Resolve this call site to actual definitions
+            for (call_ordinal, call) in call_sites.iter().enumerate() {
                 let caller_parent = def_idx.definitions.get(method_di as usize)
                     .and_then(|d| d.parent.as_deref());
-                let resolved = resolve_call_site_with_policy(
+                let resolved = match resolve_call_site_for_graph(
                     call,
                     def_idx,
+                    method_di,
+                    call_ordinal,
                     caller_parent,
                     self.ctx.resolution_policy,
-                );
+                    self.ctx.production_only,
+                ) {
+                    CSharpCallResolution::Resolved(candidates) => candidates,
+                    CSharpCallResolution::Ambiguous(candidates) => {
+                        let shape = def_idx.csharp_semantics.call_shape(method_di, call_ordinal);
+                        let source_start = shape.map(|value| value.source_start).unwrap_or(call.line);
+                        let callee_key = format!("ambiguous.{}.{}", call.method_name, source_start);
+                        if seen_callees.contains(&callee_key) {
+                            continue;
+                        }
+                        if callees.len() >= limits.max_callers_per_level {
+                            seen_callees.insert(callee_key);
+                            self.per_level_dropped += 1;
+                            continue;
+                        }
+                        if !try_reserve_graph_node(
+                            node_count,
+                            limits.max_total_nodes,
+                            &mut self.total_limit_hit,
+                        ) {
+                            break 'methods;
+                        }
+                        seen_callees.insert(callee_key);
+
+                        let candidate_values: Vec<_> = candidates.iter()
+                            .take(10)
+                            .filter_map(|&candidate| csharp_resolution_candidate(def_idx, candidate))
+                            .collect();
+                        let mut node = json!({
+                            "nodeKind": "ambiguousCall",
+                            "method": call.method_name,
+                            "callSite": {
+                                "line": call.line,
+                                "sourceStart": shape.map(|value| value.source_start),
+                                "sourceEnd": shape.map(|value| value.source_end),
+                            },
+                            "resolution": {
+                                "status": "ambiguous",
+                                "reason": "ambiguous_overload",
+                                "candidates": candidate_values,
+                            }
+                        });
+                        if let Some(caller_file) = def_idx.definitions.get(method_di as usize)
+                            .and_then(|definition| def_idx.files.get(definition.file_id as usize))
+                            .and_then(|path| Path::new(path).file_name())
+                            .and_then(|name| name.to_str())
+                        {
+                            node["callSite"]["file"] = json!(caller_file);
+                        }
+                        callees.push(node);
+                        continue;
+                    }
+                };
 
                 for callee_di in resolved {
                     let callee_def = match def_idx.definitions.get(callee_di as usize) {
@@ -3089,7 +3731,7 @@ impl CalleeTreeBuilder<'_> {
                     if !self.ctx.passes_file_filters(callee_file) {
                         continue;
                     }
-                    if self.ctx.production_only && is_test_method(callee_def, callee_file) {
+                    if self.ctx.production_only && excluded_from_production(callee_def, callee_file) {
                         continue;
                     }
 
@@ -3274,6 +3916,340 @@ fn is_class_generic(def_idx: &DefinitionIndex, class_name_lower: &str) -> bool {
 /// Uses receiver_type to disambiguate when available. When receiver is unknown,
 /// scopes to the caller's own class if `caller_parent` is provided, otherwise
 /// falls back to accepting all matching methods.
+enum CSharpCallResolution {
+    Resolved(Vec<u32>),
+    Ambiguous(Vec<u32>),
+}
+
+fn resolve_call_site_for_graph(
+    call: &CallSite,
+    def_idx: &DefinitionIndex,
+    caller_def_idx: u32,
+    call_ordinal: usize,
+    caller_parent: Option<&str>,
+    policy: ResolutionPolicy,
+    production_only: bool,
+) -> CSharpCallResolution {
+    let legacy: Vec<_> = resolve_call_site_with_policy(call, def_idx, caller_parent, policy)
+        .into_iter()
+        .filter(|&candidate| {
+            if !production_only {
+                return true;
+            }
+            let Some(definition) = def_idx.definitions.get(candidate as usize) else {
+                return false;
+            };
+            let file = def_idx.files.get(definition.file_id as usize)
+                .map(String::as_str)
+                .unwrap_or("");
+            !excluded_from_production(definition, file)
+        })
+        .collect();
+    let Some(shape) = def_idx.csharp_semantics.call_shape(caller_def_idx, call_ordinal) else {
+        return CSharpCallResolution::Resolved(legacy);
+    };
+    let structured: Vec<_> = def_idx.name_index
+        .get(&call.method_name.to_lowercase())
+        .into_iter()
+        .flatten()
+        .filter_map(|&candidate| {
+            let definition = def_idx.definitions.get(candidate as usize)?;
+            if definition.name != call.method_name {
+                return None;
+            }
+            let active = def_idx.file_index.get(&definition.file_id)
+                .is_some_and(|definitions| definitions.contains(&candidate));
+            let file = def_idx.files.get(definition.file_id as usize)
+                .map(String::as_str)
+                .unwrap_or("");
+            if !active || (production_only && excluded_from_production(definition, file)) {
+                return None;
+            }
+            def_idx.csharp_semantics.callable_for_definition(candidate)
+                .map(|callable| (candidate, callable))
+        })
+        .collect();
+    if structured.is_empty() {
+        return CSharpCallResolution::Resolved(legacy);
+    }
+
+    let applicable: Vec<_> = structured.into_iter()
+        .filter(|(_, callable)| csharp_candidate_applies(def_idx, callable, shape))
+        .collect();
+    let owner_matches: Vec<_> = applicable.iter()
+        .filter(|(_, callable)| csharp_receiver_matches(def_idx, callable, shape))
+        .map(|(candidate, _)| *candidate)
+        .collect();
+
+    if owner_matches.is_empty() {
+        let candidates: Vec<_> = applicable.iter()
+            .map(|(candidate, _)| *candidate)
+            .collect();
+        return if candidates.is_empty() {
+            CSharpCallResolution::Resolved(candidates)
+        } else {
+            CSharpCallResolution::Ambiguous(candidates)
+        };
+    }
+    if owner_matches.len() == 1 {
+        let selected = owner_matches[0];
+        let mut resolved = vec![selected];
+        let expand_related = !shape.base_receiver
+            && (!csharp_receiver_is_interface(def_idx, shape)
+                || policy.expands_interface_implementations());
+        if expand_related {
+            for (candidate, callable) in applicable {
+                if candidate != selected
+                    && csharp_candidate_has_base_receiver(def_idx, candidate, shape)
+                    && csharp_callable_matches_candidate(def_idx, selected, callable)
+                {
+                    resolved.push(candidate);
+                }
+            }
+        }
+        return CSharpCallResolution::Resolved(resolved);
+    }
+    if csharp_candidates_share_shape(def_idx, &owner_matches) {
+        CSharpCallResolution::Resolved(owner_matches)
+    } else {
+        CSharpCallResolution::Ambiguous(owner_matches)
+    }
+}
+
+fn csharp_candidate_applies(
+    def_idx: &DefinitionIndex,
+    callable: &CSharpCallableRecord,
+    shape: &CSharpCallSiteShape,
+) -> bool {
+    if let Some(generic_arity) = shape.method_generic_arity
+        && generic_arity != callable.generic_arity
+    {
+        return false;
+    }
+
+    let has_params = callable.parameters.last().is_some_and(|parameter| parameter.is_params);
+    if (!has_params && shape.arguments.len() > callable.parameters.len())
+        || (callable.parameters.is_empty() && !shape.arguments.is_empty())
+    {
+        return false;
+    }
+
+    let mut bound = vec![false; callable.parameters.len()];
+    let mut next_position = 0usize;
+    let mut params_expanded = false;
+    for argument in &shape.arguments {
+        let parameter_index = if let Some(argument_name) = argument.name {
+            let Some(index) = callable.parameters.iter()
+                .position(|parameter| parameter.name == argument_name)
+            else {
+                return false;
+            };
+            index
+        } else {
+            while next_position < bound.len() && bound[next_position] {
+                next_position += 1;
+            }
+            if next_position < bound.len() {
+                let index = next_position;
+                next_position += 1;
+                index
+            } else if has_params {
+                callable.parameters.len() - 1
+            } else {
+                return false;
+            }
+        };
+        let parameter = &callable.parameters[parameter_index];
+        let repeated_params = parameter.is_params
+            && bound[parameter_index]
+            && argument.name.is_none();
+        if bound[parameter_index] && !repeated_params {
+            return false;
+        }
+        if repeated_params && !params_expanded {
+            return false;
+        }
+        bound[parameter_index] = true;
+        if argument.ref_kind != parameter.ref_kind {
+            return false;
+        }
+        if let CSharpTypeEvidence::Exact(argument_type) = argument.ty {
+            let Some(argument_type) = def_idx.csharp_semantics.strings.get(argument_type) else {
+                return false;
+            };
+            let Some(parameter_type) = def_idx.csharp_semantics.strings.get(parameter.ty) else {
+                return false;
+            };
+            if parameter.is_params {
+                if !repeated_params && argument_type == parameter_type {
+                    params_expanded = false;
+                } else if parameter_type.strip_suffix("[]") == Some(argument_type) {
+                    params_expanded = true;
+                } else {
+                    return false;
+                }
+            } else if argument_type != parameter_type {
+                return false;
+            }
+        } else if parameter.is_params && shape.arguments.len() > callable.parameters.len() {
+            params_expanded = true;
+        }
+    }
+    callable.parameters.iter().zip(bound).all(|(parameter, is_bound)| {
+        is_bound || parameter.optional || parameter.is_params
+    })
+}
+
+fn csharp_receiver_matches(
+    def_idx: &DefinitionIndex,
+    callable: &CSharpCallableRecord,
+    shape: &CSharpCallSiteShape,
+) -> bool {
+    let CSharpTypeEvidence::Exact(receiver) = shape.receiver else {
+        return true;
+    };
+    let Some(receiver) = def_idx.csharp_semantics.strings.get(receiver) else {
+        return false;
+    };
+    let Some(parent) = def_idx.csharp_semantics.strings.get(callable.qualified_parent) else {
+        return false;
+    };
+    if receiver.contains('.') {
+        receiver == parent
+    } else {
+        parent.rsplit('.').next() == Some(receiver)
+    }
+}
+
+fn csharp_receiver_is_interface(
+    def_idx: &DefinitionIndex,
+    shape: &CSharpCallSiteShape,
+) -> bool {
+    let CSharpTypeEvidence::Exact(receiver) = shape.receiver else {
+        return false;
+    };
+    let Some(receiver) = def_idx.csharp_semantics.strings.get(receiver) else {
+        return false;
+    };
+    let receiver_short = receiver.rsplit('.').next().unwrap_or(receiver).to_lowercase();
+    is_interface_type(def_idx, &receiver_short)
+}
+
+
+fn csharp_candidate_has_base_receiver(
+    def_idx: &DefinitionIndex,
+    candidate: u32,
+    shape: &CSharpCallSiteShape,
+) -> bool {
+    let CSharpTypeEvidence::Exact(receiver) = shape.receiver else {
+        return false;
+    };
+    let Some(receiver) = def_idx.csharp_semantics.strings.get(receiver) else {
+        return false;
+    };
+    let receiver_short = receiver.rsplit('.').next().unwrap_or(receiver);
+    let Some(method) = def_idx.definitions.get(candidate as usize) else {
+        return false;
+    };
+    let Some(file_definitions) = def_idx.file_index.get(&method.file_id) else {
+        return false;
+    };
+    file_definitions.iter().any(|&definition_index| {
+        let Some(definition) = def_idx.definitions.get(definition_index as usize) else {
+            return false;
+        };
+        matches!(
+            definition.kind,
+            DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record
+        )
+            && definition.line_start <= method.line_start
+            && definition.line_end >= method.line_end
+            && definition.base_types.iter().any(|base_type| {
+                base_type.split('<').next().unwrap_or(base_type)
+                    .rsplit('.').next().unwrap_or(base_type)
+                    == receiver_short
+            })
+    })
+}
+
+fn csharp_callable_matches_candidate(
+    def_idx: &DefinitionIndex,
+    selected: u32,
+    candidate: &CSharpCallableRecord,
+) -> bool {
+    def_idx.csharp_semantics.callable_for_definition(selected)
+        .is_some_and(|selected| csharp_callable_member_shapes_match(selected, candidate))
+}
+
+fn csharp_callable_member_shapes_match(
+    left: &CSharpCallableRecord,
+    right: &CSharpCallableRecord,
+) -> bool {
+    left.generic_arity == right.generic_arity
+        && left.parameters.len() == right.parameters.len()
+        && left.parameters.iter().zip(&right.parameters).all(|(left, right)| {
+            left.ty == right.ty
+                && csharp_identity_ref_kind(left.ref_kind)
+                    == csharp_identity_ref_kind(right.ref_kind)
+        })
+}
+
+
+fn csharp_candidates_share_shape(def_idx: &DefinitionIndex, candidates: &[u32]) -> bool {
+    let Some(first) = candidates.first()
+        .and_then(|&candidate| def_idx.csharp_semantics.callable_for_definition(candidate))
+    else {
+        return false;
+    };
+    candidates.iter().skip(1).all(|&candidate| {
+        let Some(other) = def_idx.csharp_semantics.callable_for_definition(candidate) else {
+            return false;
+        };
+        first.qualified_parent == other.qualified_parent
+            && first.explicit_interface == other.explicit_interface
+            && csharp_callable_member_shapes_match(first, other)
+    })
+}
+
+fn csharp_identity_ref_kind(ref_kind: CSharpRefKind) -> bool {
+    ref_kind != CSharpRefKind::None
+}
+
+fn csharp_resolution_candidates(def_idx: &DefinitionIndex, candidates: &[u32]) -> Vec<Value> {
+    let mut candidates = candidates.to_vec();
+    candidates.sort_by_key(|candidate| {
+        def_idx.csharp_semantics.symbol_id_for_definition(*candidate)
+            .map(|symbol_id| symbol_id.0)
+            .unwrap_or([0; 32])
+    });
+    candidates.dedup();
+    candidates.into_iter()
+        .take(10)
+        .filter_map(|candidate| csharp_resolution_candidate(def_idx, candidate))
+        .collect()
+}
+
+
+fn csharp_resolution_candidate(def_idx: &DefinitionIndex, candidate: u32) -> Option<Value> {
+    let definition = def_idx.definitions.get(candidate as usize)?;
+    let callable = def_idx.csharp_semantics.callable_for_definition(candidate)?;
+    let qualified_type = def_idx.csharp_semantics.strings.get(callable.qualified_parent)?;
+    let explicit_interface = callable.explicit_interface
+        .and_then(|qualifier| def_idx.csharp_semantics.strings.get(qualifier));
+    let file = def_idx.files.get(definition.file_id as usize)
+        .and_then(|path| Path::new(path).file_name())
+        .and_then(|name| name.to_str());
+    Some(json!({
+        "symbolId": callable.symbol_id.as_public_id(),
+        "qualifiedType": qualified_type,
+        "explicitInterface": explicit_interface,
+        "signature": definition.signature,
+        "file": file,
+        "line": definition.line_start,
+    }))
+}
+
+
 pub(crate) fn resolve_call_site(
     call: &CallSite,
     def_idx: &DefinitionIndex,

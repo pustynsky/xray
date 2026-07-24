@@ -1,6 +1,7 @@
 //! Definition index: AST-based code structure extraction using tree-sitter.
 
 mod types;
+mod csharp_semantics;
 #[cfg(any(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-rust", feature = "lang-xml"))]
 mod tree_sitter_utils;
 #[cfg(feature = "lang-csharp")]
@@ -21,6 +22,7 @@ mod incremental;
 
 // Re-export all public types and functions
 pub use types::*;
+pub use csharp_semantics::*;
 pub use storage::*;
 pub use incremental::*;
 
@@ -110,6 +112,7 @@ pub(crate) fn collect_source_files(
 ///
 /// Used by both `build_definition_index()` (bulk build) and
 /// `update_file_definitions()` (incremental update) to eliminate duplication.
+#[cfg(test)]
 pub(crate) fn index_file_defs(
     index: &mut DefinitionIndex,
     file_id: u32,
@@ -117,7 +120,26 @@ pub(crate) fn index_file_defs(
     file_calls: Vec<(usize, Vec<CallSite>)>,
     file_stats: Vec<(usize, CodeStats)>,
 ) -> usize {
+    index_file_defs_with_semantics(
+        index,
+        file_id,
+        file_defs,
+        file_calls,
+        file_stats,
+        CSharpFileContribution::default(),
+    )
+}
+
+pub(crate) fn index_file_defs_with_semantics(
+    index: &mut DefinitionIndex,
+    file_id: u32,
+    file_defs: Vec<DefinitionEntry>,
+    file_calls: Vec<(usize, Vec<CallSite>)>,
+    file_stats: Vec<(usize, CodeStats)>,
+    file_csharp_semantics: CSharpFileContribution,
+) -> usize {
     let base_def_idx = index.definitions.len() as u32;
+    let definition_count = file_defs.len();
     let mut call_sites_added = 0usize;
 
     for def in file_defs {
@@ -170,6 +192,13 @@ pub(crate) fn index_file_defs(
         let global_idx = base_def_idx + local_idx as u32;
         index.code_stats.insert(global_idx, stats);
     }
+
+    index.csharp_semantics.apply_file_contribution(
+        base_def_idx,
+        file_id,
+        definition_count,
+        file_csharp_semantics,
+    );
 
     call_sites_added
 }
@@ -245,7 +274,6 @@ fn merge_chunk_result(
     errors: usize,
     lossy_files: Vec<String>,
     empty_files: Vec<(u32, u64)>,
-    chunk_ext_methods: HashMap<String, Vec<String>>,
 ) -> usize {
     index.parse_errors += errors;
     for f in &lossy_files {
@@ -255,13 +283,18 @@ fn merge_chunk_result(
     index.empty_file_ids.extend(empty_files);
 
     let mut call_sites = 0usize;
-    for (file_id, file_defs, file_calls, file_stats) in chunk_defs {
-        call_sites += index_file_defs(index, file_id, file_defs, file_calls, file_stats);
+    for (file_id, file_defs, file_calls, file_stats, file_csharp_semantics) in chunk_defs {
+        call_sites += index_file_defs_with_semantics(
+            index,
+            file_id,
+            file_defs,
+            file_calls,
+            file_stats,
+            file_csharp_semantics,
+        );
     }
 
-    for (method_name, classes) in chunk_ext_methods {
-        index.extension_methods.entry(method_name).or_default().extend(classes);
-    }
+    index.extension_methods = index.csharp_semantics.merged_extension_methods();
 
     call_sites
 }
@@ -376,8 +409,6 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                     let mut rs_parser: Option<tree_sitter::Parser> = None;
 
                     let mut chunk_defs: Vec<DefChunk> = Vec::new();
-                    #[cfg(feature = "lang-csharp")]
-                    let mut chunk_ext_methods: HashMap<String, Vec<String>> = HashMap::new();
                     let mut errors = 0usize;
                     let mut lossy_files: Vec<String> = Vec::new();
                     let mut empty_files: Vec<(u32, u64)> = Vec::new();
@@ -408,13 +439,13 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                             .unwrap_or("");
 
                         let parse_start = Instant::now();
+                        #[cfg_attr(not(feature = "lang-csharp"), allow(unused_mut))]
+                        let mut file_csharp_semantics = CSharpFileContribution::default();
                         let (file_defs, file_calls, file_stats) = match ext.to_lowercase().as_str() {
                             #[cfg(feature = "lang-csharp")]
                             "cs" => {
-                                let (defs, calls, stats, ext_methods) = parser_csharp::parse_csharp_definitions(&mut cs_parser, &content, *file_id);
-                                for (method_name, classes) in ext_methods {
-                                    chunk_ext_methods.entry(method_name).or_default().extend(classes);
-                                }
+                                let (defs, calls, stats, _, semantics) = parser_csharp::parse_csharp_definitions_with_semantics(&mut cs_parser, &content, *file_id);
+                                file_csharp_semantics = semantics;
                                 (defs, calls, stats)
                             }
                             #[cfg(feature = "lang-typescript")]
@@ -456,31 +487,34 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                         parse_nanos.fetch_add(parse_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
 
                         if !file_defs.is_empty() {
-                            chunk_defs.push((*file_id, file_defs, file_calls, file_stats));
+                            chunk_defs.push((
+                                *file_id,
+                                file_defs,
+                                file_calls,
+                                file_stats,
+                                file_csharp_semantics,
+                            ));
                         } else {
                             empty_files.push((*file_id, content_len));
                         }
                     }
 
-                    #[cfg(feature = "lang-csharp")]
-                    { (chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods) }
-                    #[cfg(not(feature = "lang-csharp"))]
-                    { (chunk_defs, errors, lossy_files, empty_files, HashMap::<String, Vec<String>>::new()) }
+                    (chunk_defs, errors, lossy_files, empty_files)
                 })
             }).collect();
 
             // ─── Join-based streaming merge ─────────────────────
             for (sub_idx, handle) in handles.into_iter().enumerate() {
-                let (chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods) =
+                let (chunk_defs, errors, lossy_files, empty_files) =
                     handle.join().unwrap_or_else(|_| {
                         eprintln!("[WARN] Worker thread panicked during definition index building");
                         index.worker_panics += 1;
-                        (Vec::new(), 0, Vec::new(), Vec::new(), HashMap::new())
+                        (Vec::new(), 0, Vec::new(), Vec::new())
                     });
 
                 let merge_start = Instant::now();
                 let chunk_call_sites = merge_chunk_result(
-                    &mut index, chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods,
+                    &mut index, chunk_defs, errors, lossy_files, empty_files,
                 );
                 merge_elapsed = merge_elapsed.saturating_add(merge_start.elapsed());
                 total_call_sites += chunk_call_sites;

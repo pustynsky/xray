@@ -309,3 +309,129 @@ fn test_remove_file_definitions_clears_empty_file_ids() {
     assert_eq!(idx.empty_file_ids[0].0, 1, "unrelated file_id must remain");
 }
 
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn test_csharp_semantics_round_trip_and_file_removal() {
+    use crate::definitions::{CSharpTypeEvidence, DEFINITION_INDEX_VERSION};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let source_file = root.join("D20Storage.cs");
+    std::fs::write(
+        &source_file,
+        r#"namespace Demo {
+public sealed class Router {
+    public void Route(int value) { }
+    public void CallInt() => Route(1);
+}
+}
+"#,
+    )
+    .unwrap();
+
+    let root_text = root.to_string_lossy().to_string();
+    let mut index = DefinitionIndex {
+        root: root_text.clone(),
+        format_version: DEFINITION_INDEX_VERSION,
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    crate::definitions::update_file_definitions(&mut index, &source_file);
+
+    let route = index.name_index["route"][0];
+    let call_int = index.name_index["callint"][0];
+    let index_base = root.join("index");
+    save_definition_index(&index, &index_base).unwrap();
+
+    let mut loaded = load_definition_index(&root_text, "cs", &index_base).unwrap();
+    let callable = loaded.csharp_semantics.callable_for_definition(route).unwrap();
+    let symbol_id = callable.symbol_id.as_public_id();
+    assert_eq!(symbol_id.len(), 70);
+    assert_eq!(
+        crate::definitions::CSharpSymbolId::parse(&symbol_id),
+        Some(callable.symbol_id)
+    );
+    assert_eq!(loaded.csharp_semantics.definitions_for_symbol(callable.symbol_id), &[route]);
+    assert_eq!(
+        loaded.csharp_semantics.strings.get(callable.qualified_parent),
+        Some("Demo.Router")
+    );
+    assert_eq!(callable.parameters.len(), 1);
+    assert_eq!(
+        loaded.csharp_semantics.strings.get(callable.parameters[0].ty),
+        Some("System.Int32")
+    );
+
+    let call_shape = loaded.csharp_semantics.call_shape(call_int, 0).unwrap();
+    let CSharpTypeEvidence::Exact(argument_type) = call_shape.arguments[0].ty else {
+        panic!("expected exact argument type");
+    };
+    assert_eq!(
+        loaded.csharp_semantics.strings.get(argument_type),
+        Some("System.Int32")
+    );
+
+    let file_id = *loaded.path_to_id.get(&crate::path_identity_key(&source_file)).unwrap();
+    crate::definitions::remove_file_definitions(&mut loaded, file_id);
+    assert!(loaded.csharp_semantics.call_shapes_by_owner.is_empty());
+    assert!(loaded.csharp_semantics.def_to_callable.iter().all(|&value| value == 0));
+}
+
+
+#[cfg(feature = "lang-csharp")]
+fn csharp_semantic_storage_fixture(
+    root: &std::path::Path,
+) -> (DefinitionIndex, std::path::PathBuf, u32) {
+    let source_file = root.join("D20Corrupt.cs");
+    std::fs::write(
+        &source_file,
+        r#"namespace Demo {
+public sealed class Router {
+    public void Route(int value) { }
+    public void CallInt() => Route(1);
+}
+}
+"#,
+    )
+    .unwrap();
+    let mut index = DefinitionIndex {
+        root: root.to_string_lossy().to_string(),
+        format_version: crate::definitions::DEFINITION_INDEX_VERSION,
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    crate::definitions::update_file_definitions(&mut index, &source_file);
+    let call_int = index.name_index["callint"][0];
+    (index, source_file, call_int)
+}
+
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn test_csharp_semantics_rejects_call_shape_ordinal_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let (mut index, _, call_int) = csharp_semantic_storage_fixture(&root);
+    index.csharp_semantics.call_shapes_by_owner.get_mut(&call_int).unwrap().clear();
+
+    let index_base = root.join("index");
+    save_definition_index(&index, &index_base).unwrap();
+    let result = load_definition_index(&index.root, "cs", &index_base);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("semantic index inconsistent"));
+}
+
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn test_csharp_semantics_rejects_symbol_hash_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let (mut index, _, _) = csharp_semantic_storage_fixture(&root);
+    index.csharp_semantics.callables[0].symbol_id = crate::definitions::CSharpSymbolId([0; 32]);
+
+    let index_base = root.join("index");
+    save_definition_index(&index, &index_base).unwrap();
+    let result = load_definition_index(&index.root, "cs", &index_base);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("semantic index inconsistent"));
+}
+
