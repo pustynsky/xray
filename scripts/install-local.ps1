@@ -33,6 +33,10 @@ if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
 
 New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
 $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+$version = (& $source --version) -join [Environment]::NewLine
+if ($LASTEXITCODE -ne 0) {
+    throw "Staged binary failed version check with exit code $LASTEXITCODE."
+}
 $deploymentError = $null
 for ($attempt = 1; $attempt -le 5; $attempt++) {
     $processes = @(Get-Process -Name xray -ErrorAction SilentlyContinue)
@@ -46,10 +50,6 @@ for ($attempt = 1; $attempt -le 5; $attempt++) {
         $tempHash = (Get-FileHash -LiteralPath $tempDestination -Algorithm SHA256).Hash
         if ($sourceHash -ne $tempHash) {
             throw 'Staged binary hash mismatch.'
-        }
-        $null = & $tempDestination --version
-        if ($LASTEXITCODE -ne 0) {
-            throw "Staged binary failed version check with exit code $LASTEXITCODE."
         }
         Move-Item -LiteralPath $tempDestination -Destination $destination -Force
         $deploymentError = $null
@@ -73,10 +73,6 @@ if ($sourceHash -ne $destinationHash) {
     throw 'Installed binary hash mismatch.'
 }
 
-$version = (& $destination --version) -join [Environment]::NewLine
-if ($LASTEXITCODE -ne 0) {
-    throw "Installed binary failed version check with exit code $LASTEXITCODE."
-}
 $installed = Get-Item -LiteralPath $destination
 [pscustomobject]@{
     Path = $installed.FullName
