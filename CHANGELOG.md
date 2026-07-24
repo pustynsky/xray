@@ -3,6 +3,8 @@
 
 ## Unreleased
 
+- **Added `scripts/install-local.ps1` for local source deployments.** It builds the current checkout and installs `xray.exe` to `%LOCALAPPDATA%\xray` with hash verification.
+
 - **`xray_edit` now preserves NTFS alternate data streams on Windows.** Existing files are committed with `ReplaceFileW`, retaining binary, empty, Unicode-named, and `Zone.Identifier` streams byte-for-byte while changing only the unnamed stream. Direct requests targeting an ADS path remain rejected.
 
 - **MCP response diagnostics now distinguish argument handling from edit execution.** Unknown arguments are described as ignored, rejected, or present in a failed request according to the actual outcome. Bounded and byte-truncated `xray_edit` diff footers no longer imply preview or commit status; existing response fields and write behavior are unchanged.

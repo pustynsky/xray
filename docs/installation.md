@@ -89,6 +89,18 @@ After setup, **reopen the repo folder in VS Code** to activate the MCP server.
 
 ---
 
+## Local Source Deployment
+
+Use this after changing source in a local clone. It builds and deploys the binary only; run `setup-xray.ps1` separately to configure an MCP client or target repository.
+
+```powershell
+.\scripts\install-local.ps1
+```
+
+The script performs a locked release build, terminates all running `xray.exe` processes, verifies the staged binary, retries transient deployment locks, deploys to `%LOCALAPPDATA%\xray\xray.exe`, and verifies the installed hash and version. Restart the MCP host after it completes.
+
+---
+
 ## Shared repo with a tracked `.mcp.json` (smudge/clean filter)
 
 When the target repo already tracks `.mcp.json` upstream (the common case for shared engineering repos that publish team-wide MCP servers like a notes store, an issue-tracker bridge, Playwright, etc.), running the installer with `-EnableCopilotCli` wires a **per-clone git smudge/clean filter** instead of using `skip-worktree`.
