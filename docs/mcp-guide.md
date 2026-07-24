@@ -1219,6 +1219,8 @@ Force rebuild the AST definition index (tree-sitter) and reload it into the serv
 
 Edit files by line-range operations or text-match replacements. Works on any text file (not limited to `--dir`). Supports multi-file editing, insert after/before, safety checks, and returns unified diff.
 
+On Windows, edits to an existing file preserve named NTFS data streams, including `Zone.Identifier`. Paths that directly address a named stream remain unsupported.
+
 ### Response Fields
 
 | Response field     | When present                              | Description                                              |

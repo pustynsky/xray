@@ -3778,72 +3778,120 @@ mod audit_regression_tests {
 
     #[cfg(windows)]
     #[test]
-    fn test_base_file_with_ntfs_alternate_data_stream_is_rejected_without_artifacts() {
+    fn test_base_file_with_ntfs_alternate_data_streams_is_preserved() {
         let tmp = tempfile::tempdir().unwrap();
         let root = crate::canonicalize_test_root(tmp.path());
-        let target = root.join("base-with-stream.txt");
-        let stream = std::path::PathBuf::from(format!("{}:xraystream", target.display()));
-        let empty_target = root.join("base-with-empty-stream.txt");
-        let empty_stream =
-            std::path::PathBuf::from(format!("{}:emptystream", empty_target.display()));
+        let target = root.join("base-with-streams.txt");
+        let binary_stream = std::path::PathBuf::from(format!("{}:binary", target.display()));
+        let empty_stream = std::path::PathBuf::from(format!("{}:empty", target.display()));
+        let zone_stream =
+            std::path::PathBuf::from(format!("{}:Zone.Identifier", target.display()));
+        let unicode_stream = std::path::PathBuf::from(format!(
+            "{}:\u{6d41}\u{8bd5}",
+            target.display()
+        ));
+        let large_stream = std::path::PathBuf::from(format!("{}:large", target.display()));
         let peer = root.join("peer.txt");
+        let binary_bytes = b"stream\0payload";
+        let zone_bytes = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+        let unicode_bytes = b"unicode-name";
+        let large_bytes = vec![0xa5; 128 * 1024 + 17];
         std::fs::write(&target, b"main\n").unwrap();
-        std::fs::write(&stream, b"stream\0payload").unwrap();
-        std::fs::write(&empty_target, b"main\n").unwrap();
+        std::fs::write(&binary_stream, binary_bytes).unwrap();
         std::fs::write(&empty_stream, b"").unwrap();
-        std::fs::write(&peer, b"main\n").unwrap();
+        std::fs::write(&zone_stream, zone_bytes).unwrap();
+        std::fs::write(&unicode_stream, unicode_bytes).unwrap();
+        std::fs::write(&large_stream, &large_bytes).unwrap();
+        std::fs::write(&peer, b"peer\n").unwrap();
         let ctx = make_ctx(&root);
 
-        for request in [
-            json!({
-                "path": "base-with-stream.txt",
-                "edits": [{ "search": "main", "replace": "changed" }],
-            }),
-            json!({
-                "path": "base-with-stream.txt",
+        let dry_run = handle_xray_edit(
+            &ctx,
+            &json!({
+                "path": "base-with-streams.txt",
                 "dryRun": true,
                 "edits": [{ "search": "main", "replace": "changed" }],
             }),
-            json!({
-                "path": "base-with-empty-stream.txt",
-                "edits": [{ "search": "main", "replace": "changed" }],
-            }),
-            json!({
-                "paths": ["peer.txt", "base-with-stream.txt"],
-                "dryRun": true,
-                "edits": [{ "search": "main", "replace": "changed" }],
-            }),
-            json!({
-                "paths": ["peer.txt", "base-with-stream.txt"],
-                "edits": [{ "search": "main", "replace": "changed" }],
-            }),
-        ] {
-            let result = handle_xray_edit(&ctx, &request);
+        );
+        assert!(!dry_run.is_error, "unexpected dry-run error: {}", dry_run.content[0].text);
+        assert_eq!(std::fs::read(&target).unwrap(), b"main\n");
+        assert_eq!(std::fs::read(&binary_stream).unwrap(), binary_bytes);
+        assert_eq!(std::fs::read(&empty_stream).unwrap(), b"");
+        assert_eq!(std::fs::read(&zone_stream).unwrap(), zone_bytes);
+        assert_eq!(std::fs::read(&unicode_stream).unwrap(), unicode_bytes);
+        assert_eq!(std::fs::read(&large_stream).unwrap(), large_bytes);
 
-            assert!(result.is_error, "base file with ADS must be rejected");
-            assert!(
-                result.content[0]
-                    .text
-                    .contains("contains NTFS alternate data streams; editing is disabled to prevent data loss"),
-                "unexpected error: {}",
-                result.content[0].text
-            );
-            assert_eq!(std::fs::read(&target).unwrap(), b"main\n");
-            assert_eq!(std::fs::read(&stream).unwrap(), b"stream\0payload");
-            assert_eq!(std::fs::read(&empty_target).unwrap(), b"main\n");
-            assert_eq!(std::fs::read(&empty_stream).unwrap(), b"");
-            assert_eq!(std::fs::read(&peer).unwrap(), b"main\n");
-            let leaked_staging_files: Vec<_> = std::fs::read_dir(&root)
-                .unwrap()
-                .filter_map(Result::ok)
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .filter(|name| name.contains(".xray_tmp") || name.contains(".xray_backup"))
-                .collect();
-            assert!(
-                leaked_staging_files.is_empty(),
-                "failed ADS edit leaked staging files: {leaked_staging_files:?}"
-            );
-        }
+        let result = handle_xray_edit(
+            &ctx,
+            &json!({
+                "path": "base-with-streams.txt",
+                "edits": [{ "search": "main", "replace": "changed" }],
+            }),
+        );
+        assert!(!result.is_error, "unexpected edit error: {}", result.content[0].text);
+        assert_eq!(std::fs::read(&target).unwrap(), b"changed\n");
+        assert_eq!(std::fs::read(&binary_stream).unwrap(), binary_bytes);
+        assert_eq!(std::fs::read(&empty_stream).unwrap(), b"");
+        assert_eq!(std::fs::read(&zone_stream).unwrap(), zone_bytes);
+        assert_eq!(std::fs::read(&unicode_stream).unwrap(), unicode_bytes);
+        assert_eq!(std::fs::read(&large_stream).unwrap(), large_bytes);
+
+        let batch_result = handle_xray_edit(
+            &ctx,
+            &json!({
+                "paths": ["peer.txt", "base-with-streams.txt"],
+                "operations": [{ "startLine": 1, "endLine": 1, "content": "batch" }],
+            }),
+        );
+        assert!(
+            !batch_result.is_error,
+            "unexpected multi-file edit error: {}",
+            batch_result.content[0].text
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"batch\n");
+        assert_eq!(std::fs::read(&peer).unwrap(), b"batch\n");
+        assert_eq!(std::fs::read(&binary_stream).unwrap(), binary_bytes);
+        assert_eq!(std::fs::read(&empty_stream).unwrap(), b"");
+        assert_eq!(std::fs::read(&zone_stream).unwrap(), zone_bytes);
+        assert_eq!(std::fs::read(&unicode_stream).unwrap(), unicode_bytes);
+        assert_eq!(std::fs::read(&large_stream).unwrap(), large_bytes);
+
+        let leaked_staging_files: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".xray_tmp") || name.contains(".xray_backup"))
+            .collect();
+        assert!(
+            leaked_staging_files.is_empty(),
+            "successful ADS edit leaked staging files: {leaked_staging_files:?}"
+        );
+    }
+
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_backup_restore_preserves_content_and_streams() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let target = root.join("rollback-target.txt");
+        let staged = root.join("rollback-staged.txt");
+        let stream = std::path::PathBuf::from(format!("{}:xray", target.display()));
+        let stream_bytes = b"stream\0payload";
+        std::fs::write(&target, b"before\n").unwrap();
+        std::fs::write(&stream, stream_bytes).unwrap();
+        std::fs::write(&staged, b"after\n").unwrap();
+
+        let backup = rename_replace_windows(&staged, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"after\n");
+        assert_eq!(std::fs::read(&stream).unwrap(), stream_bytes);
+
+        restore_windows_backup(&backup, &target, &staged).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"before\n");
+        assert_eq!(std::fs::read(&stream).unwrap(), stream_bytes);
+        assert_eq!(std::fs::read(&staged).unwrap(), b"after\n");
+        assert!(!backup.exists());
     }
 
     #[cfg(windows)]
@@ -5644,6 +5692,37 @@ fn test_hard_link_edit_requires_explicit_break_opt_in() {
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "before\n");
     assert_eq!(std::fs::read_to_string(&alias).unwrap(), "after\n");
     let response: serde_json::Value = serde_json::from_str(&allowed.content[0].text).unwrap();
+    assert_eq!(response["hardLinkBroken"], true);
+}
+
+
+#[cfg(windows)]
+#[test]
+fn test_hard_link_edit_with_alternate_data_streams_preserves_both_links() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let target = root.join("target-with-stream.txt");
+    let alias = root.join("alias-with-stream.txt");
+    let target_stream = std::path::PathBuf::from(format!("{}:xray", target.display()));
+    let alias_stream = std::path::PathBuf::from(format!("{}:xray", alias.display()));
+    let stream_bytes = b"stream\0payload";
+    std::fs::write(&target, b"before\n").unwrap();
+    std::fs::write(&target_stream, stream_bytes).unwrap();
+    std::fs::hard_link(&target, &alias).unwrap();
+    let ctx = make_ctx(&root);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "alias-with-stream.txt",
+        "allowBreakHardLinks": true,
+        "edits": [{ "search": "before", "replace": "after" }],
+    }));
+
+    assert!(!result.is_error, "explicit hard-link break should succeed: {}", result.content[0].text);
+    assert_eq!(std::fs::read(&target).unwrap(), b"before\n");
+    assert_eq!(std::fs::read(&alias).unwrap(), b"after\n");
+    assert_eq!(std::fs::read(&target_stream).unwrap(), stream_bytes);
+    assert_eq!(std::fs::read(&alias_stream).unwrap(), stream_bytes);
+    let response: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(response["hardLinkBroken"], true);
 }
 
