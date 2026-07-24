@@ -3,6 +3,8 @@
 
 ## Unreleased
 
+- **MCP response diagnostics now distinguish argument handling from edit execution.** Unknown arguments are described as ignored, rejected, or present in a failed request according to the actual outcome. Bounded and byte-truncated `xray_edit` diff footers no longer imply preview or commit status; existing response fields and write behavior are unchanged.
+
 - **C# call graphs now distinguish overloads and namespace-colliding types.** `xray_definitions` returns stable `symbolId`/`qualifiedType` metadata, and `xray_callers` accepts an exact `targets: [{"symbolId": "cs:v1:..."}]` root. Literal, named, `ref`-kind, direct `this`/`base`, file-scoped namespace, and array `params` evidence narrow overloads conservatively; unresolved ties return explicit ambiguity nodes instead of merged exact subtrees. Legacy fan-out remains available only through `ambiguityPolicy="legacy"` and is marked unsafe. The definition-index format is now v7, so v6 indexes rebuild automatically.
 
 - **Scoped grep queries now resolve their content-index file scope once per request.** Normal token, substring, phrase, line-regex, coverage, and invert paths reuse a compact query-local membership mask. No on-disk index format change is required.
