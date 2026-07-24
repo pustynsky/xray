@@ -8695,18 +8695,49 @@ fn test_generate_unified_diff_caps_at_2000_lines() {
     let elapsed = started.elapsed();
 
     assert!(!result.is_error, "edit must succeed: {}", &result.content[0].text);
-    let text = &result.content[0].text;
-    assert!(text.contains("diff bounded"), "missing bounded marker: {}", &text[..text.len().min(400)]);
-    assert!(text.contains("not patch-applicable"));
-    assert!(text.contains("-old line 1") && text.contains("+new line 1"),
-        "bounded diff must contain actual changes: {}", &text[..text.len().min(800)]);
-    assert!(!text.contains("diff omitted"), "large-file diff must not be fully omitted");
-    assert!(text.contains("\"linesAdded\":") && text.contains("\"linesRemoved\":"),
-        "line counts must remain on response, got: {}", &text[..text.len().min(400)]);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["dryRun"], true);
+    assert!(output.get("writeStatus").is_none());
+    let diff = output["diff"].as_str().expect("diff");
+    assert!(diff.contains("diff bounded"), "missing bounded marker: {diff}");
+    assert!(diff.contains("not patch-applicable"));
+    assert!(diff.contains("does not indicate edit status"));
+    assert!(!diff.contains("Preview only"));
+    assert!(diff.contains("-old line 1") && diff.contains("+new line 1"),
+        "bounded diff must contain actual changes: {diff}");
+    assert!(!diff.contains("diff omitted"), "large-file diff must not be fully omitted");
+    assert!(output.get("linesAdded").is_some() && output.get("linesRemoved").is_some(),
+        "line counts must remain on response");
     assert!(
         elapsed < std::time::Duration::from_secs(5),
         "bounded diff must be fast: took {:?}", elapsed
     );
+}
+
+#[test]
+fn test_committed_bounded_diff_does_not_report_preview_only() {
+    let original: String = (1..=2_500).map(|i| format!("line {i}\n")).collect();
+    let (tmp, filename, path) = create_temp_file(&original);
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{
+            "search": "line 1250",
+            "replace": "changed 1250",
+            "expectedMatchCount": 1
+        }]
+    }));
+
+    assert!(!result.is_error, "edit must succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["dryRun"], false);
+    assert_eq!(output["writeStatus"], "committed");
+    let diff = output["diff"].as_str().expect("diff");
+    assert!(diff.contains("diff bounded"), "{diff}");
+    assert!(diff.contains("does not indicate edit status"), "{diff}");
+    assert!(!diff.contains("Preview only"), "{diff}");
+    assert!(std::fs::read_to_string(path).unwrap().contains("changed 1250\n"));
 }
 
 #[test]
@@ -8726,6 +8757,8 @@ fn test_generate_unified_diff_keeps_sparse_large_file_hunks() {
     assert!(diff.contains("-line 10\n+changed near start\n"));
     assert!(diff.contains("-line 4990\n+changed near end\n"));
     assert!(diff.contains("across 2 of 2 hunks; omitted 0 diff lines"));
+    assert!(diff.contains("does not indicate edit status"));
+    assert!(!diff.contains("Preview only"));
     assert!(!diff.contains("diff omitted"));
     assert!(diff.len() <= UNIFIED_DIFF_MAX_BYTES);
 }
@@ -8747,6 +8780,8 @@ fn test_generate_unified_diff_reports_large_file_hunk_cap() {
 
     assert!(diff.contains("across 16 of 20 hunks"), "{diff}");
     assert!(diff.contains("omitted 32 diff lines"), "{diff}");
+    assert!(diff.contains("does not indicate edit status"), "{diff}");
+    assert!(!diff.contains("Preview only"), "{diff}");
     assert!(diff.len() <= UNIFIED_DIFF_MAX_BYTES);
 }
 
@@ -8773,6 +8808,9 @@ fn test_generate_unified_diff_truncates_oversize_byte_payload() {
         "diff plus footer must respect byte cap: {}",
         direct_diff.len()
     );
+    assert!(direct_diff.contains("payload cap, not an edit-status signal"));
+    assert!(direct_diff.contains("Use dryRun/writeStatus for the outcome"));
+    assert!(!direct_diff.contains("was applied"));
 
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,

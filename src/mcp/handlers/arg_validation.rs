@@ -214,15 +214,38 @@ fn build_hint(unknown_key: &str, allowed: &HashSet<String>) -> String {
     "Unknown argument; no close match in the tool's schema.".to_string()
 }
 
-/// Compose a one-line warning suitable for `summary.unknownArgsWarning`.
-pub(crate) fn warning_text(report: &UnknownArgsReport) -> String {
+#[derive(Clone, Copy)]
+enum UnknownArgsMessageKind {
+    Ignored,
+    Rejected,
+    FailedRequest,
+}
+
+fn format_unknown_args_message(
+    report: &UnknownArgsReport,
+    kind: UnknownArgsMessageKind,
+) -> String {
     let parts: Vec<String> = report
         .unknown
         .iter()
         .map(|u| format!("'{}': {}", u.key, u.hint))
         .collect();
+    let (prefix, suffix) = match kind {
+        UnknownArgsMessageKind::Ignored => (
+            "Unknown args silently ignored",
+            "Set XRAY_STRICT_ARGS=1 to make this an error.",
+        ),
+        UnknownArgsMessageKind::Rejected => (
+            "Unknown args rejected",
+            "Unset XRAY_STRICT_ARGS or set it to '0' to downgrade these to warnings.",
+        ),
+        UnknownArgsMessageKind::FailedRequest => (
+            "Unknown args were present in a failed request",
+            "The primary error remains authoritative.",
+        ),
+    };
     format!(
-        "Unknown args silently ignored ({}): {}. Set XRAY_STRICT_ARGS=1 to make this an error.",
+        "{prefix} ({}): {}. {suffix}",
         report.unknown.len(),
         parts.join("; ")
     )
@@ -242,7 +265,7 @@ pub(crate) fn strict_error_response(tool_name: &str, report: &UnknownArgsReport)
     let body = json!({
         "error": "UNKNOWN_ARGS",
         "tool": tool_name,
-        "message": warning_text(report),
+        "message": format_unknown_args_message(report, UnknownArgsMessageKind::Rejected),
         "unknownArgs": report.unknown.iter().map(|u| json!({
             "key": u.key,
             "hint": u.hint,
@@ -257,6 +280,11 @@ pub(crate) fn strict_error_response(tool_name: &str, report: &UnknownArgsReport)
 /// result unchanged (defensive — never break a successful response).
 pub(crate) fn inject_warning(result: ToolCallResult, report: &UnknownArgsReport) -> ToolCallResult {
     let was_error = result.is_error;
+    let message_kind = if was_error {
+        UnknownArgsMessageKind::FailedRequest
+    } else {
+        UnknownArgsMessageKind::Ignored
+    };
     let text = match result.content.first() {
         Some(c) => c.text.clone(),
         None => return result,
@@ -274,7 +302,7 @@ pub(crate) fn inject_warning(result: ToolCallResult, report: &UnknownArgsReport)
         if let Some(summary) = obj.get_mut("summary").and_then(|v| v.as_object_mut()) {
             summary.insert(
                 "unknownArgsWarning".to_string(),
-                json!(warning_text(report)),
+                json!(format_unknown_args_message(report, message_kind)),
             );
             summary.insert(
                 "unknownArgs".to_string(),
@@ -298,7 +326,11 @@ pub(crate) fn inject_warning(result: ToolCallResult, report: &UnknownArgsReport)
     // hint is not silently lost on the error path. This is critical for
     // LLM/agent flows where the unknown-arg hint is often the only signal
     // explaining why the request was malformed.
-    let appended = format!("{}\n\n⚠ {}", text.trim_end(), warning_text(report));
+    let appended = format!(
+        "{}\n\n⚠ {}",
+        text.trim_end(),
+        format_unknown_args_message(report, message_kind)
+    );
     let new_result = ToolCallResult::success(appended);
     if was_error {
         ToolCallResult { is_error: true, ..new_result }
@@ -500,20 +532,32 @@ mod tests {
         assert!(keys.contains(&"qwertyuiop"));
     }
 
-    // ─── warning_text() format ───────────────────────────
+    // ─── Unknown-args message format ─────────────────────
 
     #[test]
-    fn warning_text_mentions_count_and_strict_env() {
+    fn unknown_args_message_matches_request_outcome() {
         let report = UnknownArgsReport {
             unknown: vec![UnknownArg {
                 key: "isRegexp".to_string(),
                 hint: "Use 'regex' instead.".to_string(),
             }],
         };
-        let text = warning_text(&report);
-        assert!(text.contains("Unknown args silently ignored (1)"));
-        assert!(text.contains("'isRegexp'"));
-        assert!(text.contains("XRAY_STRICT_ARGS=1"));
+
+        let ignored = format_unknown_args_message(&report, UnknownArgsMessageKind::Ignored);
+        assert!(ignored.contains("Unknown args silently ignored (1)"));
+        assert!(ignored.contains("'isRegexp'"));
+        assert!(ignored.contains("XRAY_STRICT_ARGS=1"));
+
+        let rejected = format_unknown_args_message(&report, UnknownArgsMessageKind::Rejected);
+        assert!(rejected.contains("Unknown args rejected (1)"));
+        assert!(rejected.contains("Unset XRAY_STRICT_ARGS"));
+        assert!(!rejected.contains("silently ignored"));
+
+        let failed = format_unknown_args_message(&report, UnknownArgsMessageKind::FailedRequest);
+        assert!(failed.contains("present in a failed request (1)"));
+        assert!(failed.contains("primary error remains authoritative"));
+        assert!(!failed.contains("silently ignored"));
+        assert!(!failed.contains("rejected"));
     }
 
     // ─── strict_args_enabled() — env parsing ───────────────────────────
@@ -586,6 +630,10 @@ mod tests {
         };
         let injected = inject_warning(result, &report);
         assert!(injected.is_error, "is_error must be preserved across injection");
+        let output: Value = serde_json::from_str(&injected.content[0].text).unwrap();
+        let warning = output["summary"]["unknownArgsWarning"].as_str().unwrap();
+        assert!(warning.contains("present in a failed request"));
+        assert!(!warning.contains("silently ignored"));
     }
 
     #[test]
@@ -625,6 +673,8 @@ mod tests {
         assert!(text.starts_with("workspace not initialised"), "original error text preserved. Got: {}", text);
         assert!(text.contains("'isRegexp'"), "alias hint must be present. Got: {}", text);
         assert!(text.contains("regex"), "alias target must be present. Got: {}", text);
+        assert!(text.contains("present in a failed request"), "outcome must be neutral. Got: {}", text);
+        assert!(!text.contains("silently ignored"), "failed request must not claim ignore. Got: {}", text);
     }
 
     #[test]

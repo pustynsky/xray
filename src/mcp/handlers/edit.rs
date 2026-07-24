@@ -4488,8 +4488,9 @@ fn render_bounded_unified_diff<'a>(
     let footer = format!(
         "# diff bounded: file has {source_lines} lines; rendered {rendered_lines} of \
          {total_diff_lines} diff lines across {rendered_hunks} of {total_hunks} hunks; \
-         omitted {omitted_lines} diff lines. Preview only: bounded hunks are not patch-applicable. \
-         Authoritative counts: linesAdded / linesRemoved / newLineCount. Re-run dryRun on a narrower \
+         omitted {omitted_lines} diff lines. Bounded diff output is not patch-applicable and does \
+         not indicate edit status; use dryRun/writeStatus for the outcome. Authoritative counts: \
+         linesAdded / linesRemoved / newLineCount. Re-run dryRun on a narrower \
          range to inspect omitted changes.\n"
     );
     debug_assert!(footer.len() <= UNIFIED_DIFF_FOOTER_RESERVE_BYTES);
@@ -4521,8 +4522,9 @@ fn generate_unified_diff(path: &str, original: &str, modified: &str) -> String {
         let cut = diff.floor_char_boundary(prefix_budget);
         let footer = format!(
             "\n# diff truncated: rendered diff is {} bytes, exceeds UNIFIED_DIFF_MAX_BYTES ({}). \
-             This is a payload cap, not an edit-size cap — the edit is valid (and was applied unless `dryRun: true`). \
-             Authoritative counts: linesAdded / linesRemoved / newLineCount. The portion of the \
+             This is a payload cap, not an edit-status signal; it does not limit edit size. \
+             Use dryRun/writeStatus for the outcome. Authoritative counts: linesAdded / linesRemoved / \
+             newLineCount. The portion of the \
              diff above is the leading {} bytes; the remainder was discarded. To inspect the \
              tail, re-run `dryRun: true` on a narrower line range.",
             diff.len(),

@@ -211,9 +211,46 @@ fn test_dispatch_grep_unknown_arg_strict_mode_hard_errors() {
     assert!(result.is_error, "strict mode should hard-error on unknown arg");
     let body: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(body["error"], "UNKNOWN_ARGS");
+    let message = body["message"].as_str().unwrap();
+    assert!(message.contains("Unknown args rejected (1)"));
+    assert!(!message.contains("silently ignored"));
     let unknown = body["unknownArgs"].as_array().unwrap();
     assert_eq!(unknown.len(), 1);
     assert_eq!(unknown[0]["key"], "includePattern");
+}
+
+#[test]
+fn test_dispatch_edit_failed_unknown_arg_is_not_reported_as_ignored() {
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _strict_env = EnvVarGuard::remove("XRAY_STRICT_ARGS");
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(
+        &ctx,
+        "xray_edit",
+        &json!({
+            "path": "unused.txt",
+            "dryRun": true,
+            "expectedMatchCount": 1,
+            "edits": [{
+                "search": "old",
+                "replace": "new",
+                "expectedMatchCount": 1
+            }]
+        }),
+    );
+
+    assert!(result.is_error);
+    let body: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let error = body["error"].as_str().expect("primary error");
+    assert!(error.contains("Unknown parameter 'expectedMatchCount'"), "{error}");
+    let summary = body["summary"].as_object().expect("summary");
+    let warning = summary["unknownArgsWarning"].as_str().expect("warning");
+    assert!(warning.contains("present in a failed request"), "{warning}");
+    assert!(!warning.contains("silently ignored"), "{warning}");
+    let unknown = summary["unknownArgs"].as_array().expect("unknownArgs");
+    assert_eq!(unknown.len(), 1);
+    assert_eq!(unknown[0]["key"], "expectedMatchCount");
+    assert!(!unknown[0]["hint"].as_str().unwrap().is_empty());
 }
 
 use super::arg_validation::STRICT_ARGS_ENV_LOCK;
