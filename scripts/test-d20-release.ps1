@@ -537,6 +537,53 @@ function Wait-D20Observation {
     throw "Timed out waiting for observable lifecycle outcome '$Name' after $attempts attempts. Last error: $lastError"
 }
 
+function Wait-McpIndexReady {
+    param(
+        [Parameter(Mandatory)][object]$Session,
+        [Parameter(Mandatory)][ValidateSet('content', 'definition')][string]$IndexType,
+        [Parameter(Mandatory)][string]$MeasurementName
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $attempts = 0
+    $lastState = "no '$IndexType' index entry"
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $attempts++
+        try {
+            $info = Invoke-McpTool -Session $Session -ToolName 'xray_info' -MeasurementName $MeasurementName -Arguments @{}
+        }
+        catch {
+            $stopwatch.Stop()
+            $script:QueryTimings[$MeasurementName] = $stopwatch.ElapsedMilliseconds
+            throw "Failed while waiting for '$IndexType' index readiness after $attempts attempts: $($_.Exception.Message)"
+        }
+
+        $matchingIndexes = @($info.indexes | Where-Object { $_.type -eq $IndexType })
+        if ($matchingIndexes.Count -eq 1) {
+            $status = $matchingIndexes[0].PSObject.Properties['status']
+            if ($null -eq $status) {
+                $stopwatch.Stop()
+                $script:QueryTimings[$MeasurementName] = $stopwatch.ElapsedMilliseconds
+                return [pscustomobject]@{
+                    value = $matchingIndexes[0]
+                    attempts = $attempts
+                    durationMs = $stopwatch.ElapsedMilliseconds
+                }
+            }
+            $lastState = "status=$($status.Value)"
+        }
+        else {
+            $lastState = "expected one '$IndexType' index entry, found $($matchingIndexes.Count)"
+        }
+        [Threading.Tasks.Task]::Delay(25).GetAwaiter().GetResult()
+    }
+
+    $stopwatch.Stop()
+    $script:QueryTimings[$MeasurementName] = $stopwatch.ElapsedMilliseconds
+    throw "Timed out waiting for '$IndexType' index readiness after $attempts attempts. Last index state: $lastState"
+}
+
 function Invoke-IncrementalLifecycleSmoke {
     param(
         [Parameter(Mandatory)][string]$BinaryPath,
@@ -842,6 +889,7 @@ function Invoke-MigrationSmoke {
         }
         Assert-D20 -Condition ($initialize.result.protocolVersion -eq '2025-03-26') -Message 'Migration MCP initialize failed'
         Send-McpNotification -Session $firstSession -Method 'notifications/initialized'
+        $firstDefinitionReady = Wait-McpIndexReady -Session $firstSession -IndexType 'definition' -MeasurementName 'migrationDefinitionReadyMs'
 
         $definitions = Invoke-McpTool -Session $firstSession -ToolName 'xray_definitions' -MeasurementName 'migrationDefinitionsMs' -Arguments @{
             name = @('Route')
@@ -878,6 +926,7 @@ function Invoke-MigrationSmoke {
         }
         Assert-D20 -Condition ($initializeSecond.result.protocolVersion -eq '2025-03-26') -Message 'Post-migration MCP initialize failed'
         Send-McpNotification -Session $secondSession -Method 'notifications/initialized'
+        $reloadDefinitionReady = Wait-McpIndexReady -Session $secondSession -IndexType 'definition' -MeasurementName 'migrationReloadDefinitionReadyMs'
         $reloadExact = Invoke-McpTool -Session $secondSession -ToolName 'xray_callers' -MeasurementName 'migrationReloadExactMs' -Arguments @{
             targets = @(@{ symbolId = $ExpectedIntSymbolId })
             direction = 'down'
@@ -901,6 +950,10 @@ function Invoke-MigrationSmoke {
             v7Bytes = $v7Bytes
             v7Sha256 = $v7Sha256
             stableSymbolId = $ExpectedIntSymbolId
+            firstDefinitionReadyAttempts = $firstDefinitionReady.attempts
+            firstDefinitionReadyMs = $firstDefinitionReady.durationMs
+            reloadDefinitionReadyAttempts = $reloadDefinitionReady.attempts
+            reloadDefinitionReadyMs = $reloadDefinitionReady.durationMs
             reloadPassed = $true
         }
     }
