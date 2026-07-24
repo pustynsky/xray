@@ -3,6 +3,8 @@
 
 ## Unreleased
 
+- **`xray_git_history` now distinguishes fast cached history from full followed history.** Default requests use the repo-scoped literal-path cache and report `source="git-cache"`, `lineage="direct-path"`, and `safeForFullHistory=false`; `noCache=true` bypasses cache for `git --follow` and reports `source="git-cli"`, `lineage="follow"`, and `safeForFullHistory=true`. `firstCommit` and `xray_git_diff` remain CLI-only, and authors/activity no longer use a workspace cache for another repository. The Git cache format remains version 2.
+
 - **`xray_callers` now finds DI callers through non-conventionally named interfaces.** Short implementation names and exact implementation `symbolId` roots include callers whose receivers use the implementation's declared base types, matching interface-root and fully-qualified queries.
 
 - **Added `scripts/install-local.ps1` for local source deployments.** It builds the current checkout and installs `xray.exe` to `%LOCALAPPDATA%\xray` with hash verification.

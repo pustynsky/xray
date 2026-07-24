@@ -1036,6 +1036,39 @@ fn cache_with_fp(fp: Option<&str>) -> crate::git::cache::GitHistoryCache {
     cache
 }
 
+
+#[test]
+fn test_repo_matches_workspace_uses_canonical_identity() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let repo = crate::canonicalize_test_root(temp.path());
+    let ctx = HandlerContext::default();
+    ctx.workspace
+        .write()
+        .unwrap()
+        .set_dir(repo.to_string_lossy().into_owned());
+
+    assert!(repo_matches_workspace(&ctx, repo.to_str().unwrap()));
+}
+
+#[test]
+fn test_repo_matches_workspace_rejects_other_or_missing_repo() {
+    let workspace_temp = tempfile::TempDir::new().expect("tempdir");
+    let workspace = crate::canonicalize_test_root(workspace_temp.path());
+    let other_temp = tempfile::TempDir::new().expect("tempdir");
+    let other = crate::canonicalize_test_root(other_temp.path());
+    let ctx = HandlerContext::default();
+    ctx.workspace
+        .write()
+        .unwrap()
+        .set_dir(workspace.to_string_lossy().into_owned());
+
+    assert!(!repo_matches_workspace(&ctx, other.to_str().unwrap()));
+    assert!(!repo_matches_workspace(
+        &ctx,
+        workspace.join("missing").to_str().unwrap()
+    ));
+}
+
 #[test]
 fn test_cache_is_fresh_when_both_none_for_full_repo() {
     crate::git::shallow_cache_clear();

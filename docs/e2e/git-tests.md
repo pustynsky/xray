@@ -12,9 +12,30 @@ Tests for `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_act
 
 - `commits` array (non-empty), each with `hash`, `date`, `author`, `email`, `message`
 - `summary.totalCommits` ≥ 1, `summary.returned` ≤ maxResults
+- Default cache: `source="git-cache"`, `lineage="direct-path"`, `safeForFullHistory=false`
+- `noCache=true`: `source="git-cli"`, `lineage="follow"`, `safeForFullHistory=true`
 - No `patch` field (history mode)
 
 **Unit tests:** `test_file_history_returns_commits`, `test_commit_info_has_all_fields`
+
+---
+
+### T-GIT-01A: Direct-path cache versus followed rename history
+
+Create `original.txt`, rename it to `middle.txt`, rename that to `final.txt`, then delete `final.txt`.
+
+**Expected:**
+
+- Default cached history for existing `final.txt`: only `rename middle to final`
+- Default cached history after deletion: `delete final`, `rename middle to final`
+- Cached hint: `Fast direct-path cache; may omit history before renames/copies. Set noCache=true for git --follow.`
+- `noCache=true`, `maxResults=0`: all four commits through `add original`
+- `noCache=true`, `maxResults=3`: newest three commits after lineage resolution
+- Author/message filters select commits from the followed chain
+- `firstCommit=true` returns `add original`
+- A never-renamed file has the same commit hashes in both modes, while metadata still differs
+
+**Unit test:** `test_git_history_rename_direct_path_and_follow_contracts`
 
 ---
 
@@ -210,18 +231,20 @@ Tests for `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_act
 
 ## noCache Parameter
 
-### T-NOCACHE: `noCache` bypasses git history cache
+### T-NOCACHE: `noCache` selects followed CLI history
 
 **Expected:**
 
-- `noCache: true` → CLI path (no `"(from cache)"` in hint)
-- Without `noCache` + cache available → `"(from cache)"` in hint
+- `xray_git_history noCache=true` bypasses cache and uses `git --follow`
+- Default history uses the direct-path cache when it is ready, fresh, and repo-scoped
+- Renamed files are not expected to have parity between default and `noCache=true`
+- Authors/activity also bypass cache when `noCache=true`
 
 **Applies to:** `xray_git_history`, `xray_git_authors`, `xray_git_activity`
 
 **Note:** `xray_git_diff` deliberately bypasses the cache — patches are never cached (the cache stores `CommitMeta` only, no diff text). The `noCache` parameter is therefore not exposed on `xray_git_diff`; the handler always shells out to `git log -p`.
 
-**Unit tests:** `test_git_history_no_cache_bypasses_cache`, `test_git_history_default_uses_cache`
+**Unit tests:** `test_git_history_rename_direct_path_and_follow_contracts`, `test_git_history_no_cache_bypasses_cache`, `test_git_history_default_uses_cache`
 
 ---
 
@@ -436,22 +459,24 @@ for large repos.
 
 ## Cache Integration
 
-### T-CACHE-FALLBACK: Git handlers fall back to CLI when cache is None
+### T-CACHE-FALLBACK: Git handlers fall back to CLI when cache is unavailable
 
-**Validates:** Cache-or-fallback routing with zero behavioural regression — when `ctx.git_cache_ready` is `false`, the handlers shell out to `git` directly and the response hint omits `(from cache)`.
+**Validates:** When the cache is unavailable, stale, disabled, or belongs to another canonical workspace, history/authors/activity use Git CLI.
 
-**Unit tests:** `test_git_history_no_cache_bypasses_cache`, `test_git_authors_no_cache_bypasses_cache`, `test_git_activity_no_cache_bypasses_cache`
+**Unit tests:** `test_git_history_no_cache_bypasses_cache`, `test_git_authors_no_cache_bypasses_cache`, `test_git_activity_no_cache_bypasses_cache`, `test_git_cache_is_scoped_to_workspace_repo`
 
 ---
 
-### T-CACHE-ROUTING: Git handlers use cache when populated
+### T-CACHE-ROUTING: Git handlers use the repo-scoped cache
 
 **Expected:**
 
-- `xray_git_history`, `xray_git_authors`, `xray_git_activity`: `"(from cache)"` in hint
-- `xray_git_diff`: always CLI (no cache for patches)
+- Default `xray_git_history`: fast literal-path cache with honest direct-path metadata
+- `xray_git_authors`, `xray_git_activity`: cache only when requested `repo` canonically matches the bound workspace
+- Another real repo returns that repo's CLI history/authors/activity, never workspace cache data
+- `xray_git_diff`: always CLI and retains patches
 
-**Unit tests:** `test_git_history_cached_returns_commits`, `test_git_authors_cached_has_first_and_last_change`, `test_git_activity_cached_returns_files`, `test_git_diff_does_not_use_cache`, `test_git_history_default_uses_cache`, `test_git_history_no_cache_false_uses_cache`
+**Unit tests:** `test_git_history_cached_direct_path_contract`, `test_git_history_rename_direct_path_and_follow_contracts`, `test_git_authors_cached_has_first_and_last_change`, `test_git_activity_cached_returns_files`, `test_git_cache_is_scoped_to_workspace_repo`, `test_git_diff_does_not_use_cache`, `test_git_history_handler_bypasses_cache_when_shallow_drift`, `test_git_history_handler_uses_cache_when_shallow_state_matches`
 
 ---
 

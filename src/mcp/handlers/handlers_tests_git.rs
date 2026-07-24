@@ -2,6 +2,7 @@
 
 use super::*;
 use super::handlers_test_utils::make_empty_ctx;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 // ═══════════════════════════════════════════════════════════════════════
@@ -45,6 +46,129 @@ fn make_ctx_with_git_cache() -> HandlerContext {
     ctx
 }
 
+fn run_fixture_git(repo: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git command");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn commit_fixture(repo: &Path, name: &str, email: &str, message: &str) {
+    run_fixture_git(repo, &["add", "-A"]);
+    let name_config = format!("user.name={name}");
+    let email_config = format!("user.email={email}");
+    run_fixture_git(
+        repo,
+        &[
+            "-c",
+            &name_config,
+            "-c",
+            &email_config,
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+    );
+}
+
+fn make_rename_history_repo() -> (tempfile::TempDir, std::path::PathBuf) {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let repo = crate::canonicalize_test_root(temp.path());
+    run_fixture_git(&repo, &["init", "-q", "-b", "main"]);
+
+    std::fs::write(repo.join("original.txt"), "content\n").unwrap();
+    std::fs::write(repo.join("stable.txt"), "stable\n").unwrap();
+    commit_fixture(
+        &repo,
+        "Original Author",
+        "original@example.com",
+        "add original",
+    );
+
+    run_fixture_git(&repo, &["mv", "original.txt", "middle.txt"]);
+    commit_fixture(
+        &repo,
+        "Rename Author",
+        "rename@example.com",
+        "rename original to middle",
+    );
+
+    run_fixture_git(&repo, &["mv", "middle.txt", "final.txt"]);
+    commit_fixture(
+        &repo,
+        "Rename Author",
+        "rename@example.com",
+        "rename middle to final",
+    );
+
+    (temp, repo)
+}
+
+fn refresh_fixture_cache(ctx: &HandlerContext, repo: &Path) {
+    let cache = crate::git::cache::GitHistoryCache::build(repo, "main")
+        .expect("build git cache");
+    *ctx.git_cache.write().unwrap() = Some(cache);
+}
+
+fn make_fixture_ctx(repo: &Path) -> HandlerContext {
+    let mut ctx = make_empty_ctx();
+    ctx.workspace
+        .write()
+        .unwrap()
+        .set_dir(repo.to_string_lossy().into_owned());
+    refresh_fixture_cache(&ctx, repo);
+    ctx.git_cache_ready = Arc::new(AtomicBool::new(true));
+    ctx
+}
+
+fn dispatch_git_json(ctx: &HandlerContext, tool: &str, args: Value) -> Value {
+    let result = dispatch_tool(ctx, tool, &args);
+    assert!(!result.is_error, "{tool} failed: {}", result.content[0].text);
+    serde_json::from_str(&result.content[0].text).unwrap()
+}
+
+fn history_messages(output: &Value) -> Vec<String> {
+    output["commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|commit| commit["message"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn history_hashes(output: &Value) -> Vec<String> {
+    output["commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|commit| commit["hash"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn assert_cached_history_contract(output: &Value) {
+    assert_eq!(output["summary"]["source"], "git-cache");
+    assert_eq!(output["summary"]["lineage"], "direct-path");
+    assert_eq!(output["summary"]["safeForFullHistory"], false);
+    assert_eq!(
+        output["summary"]["hint"],
+        "Fast direct-path cache; may omit history before renames/copies. Set noCache=true for git --follow."
+    );
+}
+
+fn assert_followed_history_contract(output: &Value) {
+    assert_eq!(output["summary"]["source"], "git-cli");
+    assert_eq!(output["summary"]["lineage"], "follow");
+    assert_eq!(output["summary"]["safeForFullHistory"], true);
+}
+
 /// xray_git_authors with populated cache returns non-empty firstChange and lastChange.
 #[test]
 fn test_git_authors_cached_has_first_and_last_change() {
@@ -81,7 +205,7 @@ fn test_git_authors_cached_has_first_and_last_change() {
 
 /// xray_git_history with populated cache returns commits from cache.
 #[test]
-fn test_git_history_cached_returns_commits() {
+fn test_git_history_cached_direct_path_contract() {
     let ctx = make_ctx_with_git_cache();
     let result = dispatch_tool(&ctx, "xray_git_history", &json!({
         "repo": ".",
@@ -91,8 +215,13 @@ fn test_git_history_cached_returns_commits() {
     assert!(!result.is_error, "xray_git_history should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
 
-    let hint = output["summary"]["hint"].as_str().unwrap_or("");
-    assert!(hint.contains("cache"), "Should use cache path, hint: {}", hint);
+    assert_eq!(output["summary"]["source"], "git-cache");
+    assert_eq!(output["summary"]["lineage"], "direct-path");
+    assert_eq!(output["summary"]["safeForFullHistory"], false);
+    assert_eq!(
+        output["summary"]["hint"],
+        "Fast direct-path cache; may omit history before renames/copies. Set noCache=true for git --follow."
+    );
 
     let commits = output["commits"].as_array().unwrap();
     assert_eq!(commits.len(), 3, "src/main.rs should have 3 commits");
@@ -101,6 +230,218 @@ fn test_git_history_cached_returns_commits() {
     let ts0 = commits[0]["date"].as_str().unwrap();
     let ts2 = commits[2]["date"].as_str().unwrap();
     assert!(ts0 > ts2, "Commits should be sorted newest first");
+}
+
+
+#[test]
+fn test_git_history_rename_direct_path_and_follow_contracts() {
+    let (_temp, repo) = make_rename_history_repo();
+    let ctx = make_fixture_ctx(&repo);
+    let repo_arg = repo.to_string_lossy();
+
+    let existing_cached = dispatch_git_json(
+        &ctx,
+        "xray_git_history",
+        json!({ "repo": repo_arg, "file": "final.txt", "maxResults": 0 }),
+    );
+    assert_eq!(history_messages(&existing_cached), vec!["rename middle to final"]);
+    assert_cached_history_contract(&existing_cached);
+
+    run_fixture_git(&repo, &["rm", "-q", "final.txt"]);
+    commit_fixture(
+        &repo,
+        "Delete Author",
+        "delete@example.com",
+        "delete final",
+    );
+    refresh_fixture_cache(&ctx, &repo);
+
+    let deleted_cached = dispatch_git_json(
+        &ctx,
+        "xray_git_history",
+        json!({ "repo": repo_arg, "file": "final.txt", "maxResults": 0 }),
+    );
+    assert_eq!(
+        history_messages(&deleted_cached),
+        vec!["delete final", "rename middle to final"]
+    );
+    assert_cached_history_contract(&deleted_cached);
+
+    let unlimited = dispatch_git_json(
+        &ctx,
+        "xray_git_history",
+        json!({
+            "repo": repo_arg,
+            "file": "final.txt",
+            "maxResults": 0,
+            "noCache": true
+        }),
+    );
+    assert_eq!(
+        history_messages(&unlimited),
+        vec![
+            "delete final",
+            "rename middle to final",
+            "rename original to middle",
+            "add original"
+        ]
+    );
+    assert_eq!(unlimited["summary"]["totalCommits"], 4);
+    assert_followed_history_contract(&unlimited);
+
+    let limited = dispatch_git_json(
+        &ctx,
+        "xray_git_history",
+        json!({
+            "repo": repo_arg,
+            "file": "final.txt",
+            "maxResults": 3,
+            "noCache": true
+        }),
+    );
+    assert_eq!(
+        history_messages(&limited),
+        vec![
+            "delete final",
+            "rename middle to final",
+            "rename original to middle"
+        ]
+    );
+    assert_eq!(limited["summary"]["totalCommits"], 4);
+    assert_followed_history_contract(&limited);
+
+    let author_filtered = dispatch_git_json(
+        &ctx,
+        "xray_git_history",
+        json!({
+            "repo": repo_arg,
+            "file": "final.txt",
+            "author": "Original Author",
+            "maxResults": 0,
+            "noCache": true
+        }),
+    );
+    assert_eq!(history_messages(&author_filtered), vec!["add original"]);
+    assert_followed_history_contract(&author_filtered);
+
+    let limited_author = dispatch_git_json(
+        &ctx,
+        "xray_git_history",
+        json!({
+            "repo": repo_arg,
+            "file": "final.txt",
+            "author": "Rename Author",
+            "maxResults": 1,
+            "noCache": true
+        }),
+    );
+    assert_eq!(history_messages(&limited_author), vec!["rename middle to final"]);
+    assert_eq!(limited_author["summary"]["totalCommits"], 2);
+    assert_followed_history_contract(&limited_author);
+
+    let message_filtered = dispatch_git_json(
+        &ctx,
+        "xray_git_history",
+        json!({
+            "repo": repo_arg,
+            "file": "final.txt",
+            "message": "original to middle",
+            "maxResults": 0,
+            "noCache": true
+        }),
+    );
+    assert_eq!(
+        history_messages(&message_filtered),
+        vec!["rename original to middle"]
+    );
+    assert_followed_history_contract(&message_filtered);
+
+    let first = dispatch_git_json(
+        &ctx,
+        "xray_git_history",
+        json!({ "repo": repo_arg, "file": "final.txt", "firstCommit": true }),
+    );
+    assert_eq!(first["firstCommit"]["message"], "add original");
+    assert_followed_history_contract(&first);
+
+    let stable_cached = dispatch_git_json(
+        &ctx,
+        "xray_git_history",
+        json!({ "repo": repo_arg, "file": "stable.txt", "maxResults": 0 }),
+    );
+    let stable_cli = dispatch_git_json(
+        &ctx,
+        "xray_git_history",
+        json!({
+            "repo": repo_arg,
+            "file": "stable.txt",
+            "maxResults": 0,
+            "noCache": true
+        }),
+    );
+    assert_eq!(history_hashes(&stable_cached), history_hashes(&stable_cli));
+    assert_cached_history_contract(&stable_cached);
+    assert_followed_history_contract(&stable_cli);
+}
+
+#[test]
+fn test_git_cache_is_scoped_to_workspace_repo() {
+    let (_workspace_temp, workspace_repo) = make_rename_history_repo();
+    let ctx = make_fixture_ctx(&workspace_repo);
+
+    let other_temp = tempfile::TempDir::new().expect("tempdir");
+    let other_repo = crate::canonicalize_test_root(other_temp.path());
+    run_fixture_git(&other_repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(other_repo.join("stable.txt"), "other\n").unwrap();
+    commit_fixture(
+        &other_repo,
+        "Second Author",
+        "second@example.com",
+        "second repo commit",
+    );
+    let repo_arg = other_repo.to_string_lossy();
+
+    let history = dispatch_git_json(
+        &ctx,
+        "xray_git_history",
+        json!({ "repo": repo_arg, "file": "stable.txt", "maxResults": 0 }),
+    );
+    assert_eq!(history_messages(&history), vec!["second repo commit"]);
+    assert_followed_history_contract(&history);
+
+    let authors = dispatch_git_json(
+        &ctx,
+        "xray_git_authors",
+        json!({ "repo": repo_arg, "path": "stable.txt" }),
+    );
+    let author_names: Vec<&str> = authors["authors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|author| author["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(author_names, vec!["Second Author"]);
+    assert!(!authors["summary"]["hint"]
+        .as_str()
+        .unwrap_or("")
+        .contains("cache"));
+
+    let activity = dispatch_git_json(
+        &ctx,
+        "xray_git_activity",
+        json!({ "repo": repo_arg }),
+    );
+    let activity_paths: Vec<&str> = activity["activity"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(activity_paths, vec!["stable.txt"]);
+    assert!(!activity["summary"]["hint"]
+        .as_str()
+        .unwrap_or("")
+        .contains("cache"));
 }
 
 /// xray_git_activity with populated cache returns activity from cache.
@@ -123,22 +464,24 @@ fn test_git_activity_cached_returns_files() {
 /// xray_git_diff always uses CLI, never cache (cache has no patch data).
 #[test]
 fn test_git_diff_does_not_use_cache() {
-    let ctx = make_ctx_with_git_cache();
-    // xray_git_diff with a fake repo will fail (no real git repo at "."),
-    // but the key test is that it does NOT use the cache path
-    let result = dispatch_tool(&ctx, "xray_git_diff", &json!({
-        "repo": ".",
-        "file": "src/main.rs",
-        "maxResults": 1
-    }));
-    // It may succeed (if we're in a real git repo) or fail (if not),
-    // but if it succeeds, it should NOT have "(from cache)" in hint
-    if !result.is_error {
-        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-        let hint = output["summary"]["hint"].as_str().unwrap_or("");
-        assert!(!hint.contains("cache"),
-            "xray_git_diff should never use cache, hint: {}", hint);
-    }
+    let (_temp, repo) = make_rename_history_repo();
+    let ctx = make_fixture_ctx(&repo);
+    let output = dispatch_git_json(
+        &ctx,
+        "xray_git_diff",
+        json!({
+            "repo": repo.to_string_lossy(),
+            "file": "stable.txt",
+            "maxResults": 1
+        }),
+    );
+
+    assert_eq!(output["summary"]["source"], "git-cli");
+    assert_eq!(output["summary"]["lineage"], "follow");
+    assert_eq!(output["summary"]["safeForFullHistory"], true);
+    let commits = output["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 1);
+    assert!(commits[0]["patch"].as_str().is_some_and(|patch| !patch.is_empty()));
 }
 /// noCache: xray_git_history with noCache=true bypasses cache and uses CLI.
 #[test]
@@ -272,9 +615,7 @@ fn test_git_history_empty_cache_with_stale_head_falls_through_to_cli() {
     }));
     if !result.is_error {
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-        let hint = output["summary"]["hint"].as_str().unwrap_or("");
-        assert!(!hint.contains("(from cache)"),
-            "Empty cache result with stale HEAD must fall through to CLI, got hint: {}", hint);
+        assert_eq!(output["summary"]["source"], "git-cli");
     }
     // Error path is also acceptable — CLI fallback may legitimately fail in some
     // sandboxed test environments. Either way, the bug-killer is the absence of
@@ -356,10 +697,7 @@ fn test_git_history_known_path_author_filter_empty_with_stale_head_falls_through
     }));
     if !result.is_error {
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-        let hint = output["summary"]["hint"].as_str().unwrap_or("");
-        assert!(!hint.contains("(from cache)"),
-            "Empty cache result for known path with author filter and stale HEAD must \
-             fall through to CLI, got hint: {}", hint);
+        assert_eq!(output["summary"]["source"], "git-cli");
     }
     // CLI fallback may legitimately error in sandboxed envs \u2014 absence of stale
     // cached empty is what we assert.
@@ -435,10 +773,7 @@ fn test_git_history_empty_cache_with_fresh_head_serves_cached_empty() {
     }));
     assert!(!result.is_error, "should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    let hint = output["summary"]["hint"].as_str().unwrap_or("");
-    assert!(hint.contains("(from cache)"),
-        "Fresh-HEAD empty cache result MUST be served from cache (gate must NOT \
-         fire when HEAD matches), got hint: {}", hint);
+    assert_eq!(output["summary"]["source"], "git-cache");
     assert_eq!(output["commits"].as_array().unwrap().len(), 0);
 }
 
@@ -721,6 +1056,10 @@ fn test_git_history_handler_bypasses_cache_when_shallow_drift() {
     crate::git::shallow_cache_clear();
     let dir = make_real_git_repo_with_one_commit();
     let ctx = make_ctx_with_git_cache();
+    ctx.workspace
+        .write()
+        .unwrap()
+        .set_dir(dir.path().to_string_lossy().into_owned());
 
     // Force the in-memory cache to look as if it was built from a shallow
     // repo. The live repo is NOT shallow (no `.git/shallow` file), so the
@@ -746,11 +1085,7 @@ fn test_git_history_handler_bypasses_cache_when_shallow_drift() {
         result.content[0].text
     );
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    let hint = output["summary"]["hint"].as_str().unwrap_or("");
-    assert!(
-        !hint.contains("from cache"),
-        "shallow drift must force CLI fall-through; instead got cache hint: {hint}"
-    );
+    assert_eq!(output["summary"]["source"], "git-cli");
 }
 
 #[test]
@@ -758,6 +1093,10 @@ fn test_git_history_handler_uses_cache_when_shallow_state_matches() {
     crate::git::shallow_cache_clear();
     let dir = make_real_git_repo_with_one_commit();
     let ctx = make_ctx_with_git_cache();
+    ctx.workspace
+        .write()
+        .unwrap()
+        .set_dir(dir.path().to_string_lossy().into_owned());
 
     // Cache built as non-shallow (default), live repo is non-shallow too.
     // Freshness gate must NOT block: handler should use the cache.
@@ -771,10 +1110,6 @@ fn test_git_history_handler_uses_cache_when_shallow_state_matches() {
     );
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    let hint = output["summary"]["hint"].as_str().unwrap_or("");
-    assert!(
-        hint.contains("from cache"),
-        "matching shallow state must allow cache use; got hint: {hint}"
-    );
+    assert_eq!(output["summary"]["source"], "git-cache");
 }
 

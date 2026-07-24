@@ -70,7 +70,7 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 | `xray_reindex_definitions` | Force rebuild + reload definition index. Requires `--definitions`                                                                       |
 | `xray_edit`                | Edit files by line-range operations or text-match replacements. Auto-creates new files. Supports multi-file (`paths`), insert after/before, expectedContext. Atomic, returns unified diff |
 | `xray_help`                | Best practices guide, strategy recipes, performance tiers                                                                               |
-| `xray_git_history`         | Commit history for a file. Uses in-memory cache when available (sub-millisecond), falls back to CLI (~2–6 sec)                          |
+| `xray_git_history`         | Fast direct-path history from the workspace cache by default; use `noCache=true` for exact `git --follow` lineage                      |
 | `xray_git_diff`            | Commit history with full diff/patch. Always uses CLI (cache has no patch data)                                                          |
 | `xray_git_authors`         | Top authors for a file ranked by commit count. Uses in-memory cache when available (sub-millisecond), falls back to CLI                  |
 | `xray_git_activity`        | Activity (changed files) for a date range, optionally filtered by path. Uses in-memory cache when available (sub-millisecond), falls back to CLI |
@@ -1310,9 +1310,9 @@ For full parameter documentation, see `xray_help` → `parameterExamples` → `x
 
 ## Git history tools
 
-Six MCP tools for querying git history. Always available — no flags needed. When the in-memory git history cache is ready (built automatically in the background on server startup), `xray_git_history`, `xray_git_authors`, and `xray_git_activity` use sub-millisecond cache lookups. When the cache is not ready (first ~60 sec on cold start), these tools transparently fall back to CLI `git log` commands (~2–6 sec). `xray_git_diff` and `xray_git_blame` always use CLI.
+Six MCP tools for querying git history. Always available — no flags needed. When the background Git cache is ready and the requested repository canonically matches the bound workspace, `xray_git_history`, `xray_git_authors`, and `xray_git_activity` use sub-millisecond cache lookups. Cache-unavailable, stale, mismatched-repo, and `noCache=true` requests fall back to Git CLI. `xray_git_diff` and `xray_git_blame` are always CLI-only.
 
-Cache responses include a `"(from cache)"` hint in the `summary` field so the AI agent knows the data source.
+Default cached history is intentionally direct-path, not rename-followed history. Its summary reports `source="git-cache"`, `lineage="direct-path"`, and `safeForFullHistory=false`. CLI history reports `source="git-cli"`, `lineage="follow"`, and `safeForFullHistory=true`.
 
 ### Parameters (shared across git tools)
 
@@ -1328,22 +1328,25 @@ Cache responses include a `"(from cache)"` hint in the `summary` field so the AI
 | `top`        | number | — | Maximum authors to return (default: 10, `xray_git_authors` only) |
 | `author`     | string | — | Filter by author name or email (case-insensitive substring match). Available on `xray_git_history`, `xray_git_diff`, `xray_git_activity` |
 | `message`    | string | — | Filter by commit message (case-insensitive substring match). Available on `xray_git_history`, `xray_git_diff`, `xray_git_activity`, `xray_git_authors` |
-| `noCache`    | boolean | — | If true, bypass the in-memory git history cache and query git CLI directly. Useful when cache may be stale. Available on `xray_git_history`, `xray_git_authors`, `xray_git_activity` |
+| `noCache`    | boolean | — | Bypass the workspace cache. For `xray_git_history`, use `git --follow` to recover rename/copy lineage; for authors/activity, query Git CLI directly. Available on `xray_git_history`, `xray_git_authors`, `xray_git_activity` |
 | `includeDeleted` | boolean | — | If true, restrict `xray_git_activity` results to files that are NOT in the current HEAD (i.e. deleted files). The activity list itself is unchanged — only the post-filter differs. Implementation uses a single `git ls-files` spawn (HashSet lookup), so it scales O(1) per result regardless of repo size. Available on `xray_git_activity`. |
 
 ### Cache behavior
 
 | Scenario | Behavior |
 |---|---|
-| Server just started, no `.git-history` on disk | Cache builds in background (~59 sec). Tools use CLI fallback during build. |
-| Server restart, `.git-history` exists on disk | Cache loads from disk (~100 ms). Tools use cache almost immediately. |
-| HEAD changed since cache was built | Cache rebuilds in background. Old cache (if loaded from disk) serves queries during rebuild. |
+| Server just started, no `.git-history` on disk | Cache builds in background (~59 sec). History/authors/activity use CLI during the build. |
+| Server restart, `.git-history` exists on disk | Cache loads from disk (~100 ms) and serves eligible requests for the canonical bound workspace. |
+| HEAD changed since cache was built | Cache rebuilds in background. Existing HEAD-pinning and shallow-state gates still apply. |
+| Default `xray_git_history` | Fast literal-path cache lookup; rename/copy ancestry may be omitted. |
+| `xray_git_history noCache=true` | Bypasses cache and uses `git log --follow` for full lineage. |
+| Requested `repo` differs from the bound workspace | History/authors/activity bypass the workspace cache and use CLI. |
 | `xray_git_diff` | Always uses CLI — diff data is too large and variable to cache. |
 | No `.git` directory in `--dir` | Git tools return errors. No cache is built. |
 
 ### xray_git_history
 
-Get commit history for a specific file. Returns commit hash, date, author, email, and message. Uses in-memory cache when available (sub-millisecond), falls back to `git log` CLI (~2–6 sec).
+Get commit history for a specific existing or deleted file. The default sub-millisecond cache indexes commits by literal path, so it may omit history before a rename or copy. Use `noCache=true` for `git log --follow`; author/message filters and `maxResults` are then applied to the resolved lineage. `firstCommit=true` is always CLI-only and followed.
 
 ```json
 // Request
@@ -1354,7 +1357,7 @@ Get commit history for a specific file. Returns commit hash, date, author, email
   "commits": [
     {"hash":"abc123...","date":"2025-01-15 10:30:00 +0000","author":"Alice","email":"alice@example.com","message":"Fix null check in main"}
   ],
-  "summary": {"totalCommits":1,"returned":1,"file":"src/main.rs","elapsedMs":0.15,"hint":"(from cache)","tool":"xray_git_history"}
+  "summary": {"totalCommits":1,"returned":1,"file":"src/main.rs","elapsedMs":0.15,"hint":"Fast direct-path cache; may omit history before renames/copies. Set noCache=true for git --follow.","tool":"xray_git_history","source":"git-cache","lineage":"direct-path","safeForFullHistory":false}
 }
 ```
 
