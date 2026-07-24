@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "generatorVersion": 1,
+  "seed": "0xd20c5",
+  "profile": "Release",
+  "methodsPerCorpus": 100000,
+  "classesPerFile": 64,
+  "fixtureManifestSha256": "b3eccfabd3f215341a694a70eac1df7bf71986f027894dc724f9ef4dfa8b24ab",
+  "corpora": [
+    {
+      "name": "synthetic-overloads",
+      "methodCount": 100000,
+      "sourceFileCount": 254,
+      "overloadGroupCounts": {
+        "1": 3225,
+        "2": 3225,
+        "4": 3226,
+        "8": 3226,
+        "16": 3225
+      },
+      "incrementalProbe": {
+        "relativePath": "overloads-probe.cs",
+        "initialState": "exact",
+        "mutatedState": "ambiguous",
+        "baselineSha256": "c64f9e65bed0c94cebf9379ee89762ffccc19d86be7993f3ebc24f04257c1644"
+      }
+    },
+    {
+      "name": "synthetic-namespaces",
+      "methodCount": 100000,
+      "sourceFileCount": 266,
+      "namespaceCollisionCount": 16664
+    }
+  ]
+}

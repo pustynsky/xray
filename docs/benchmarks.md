@@ -4,6 +4,34 @@ All numbers in this document are **measured**, not estimated. Criterion benchmar
 
 > **Last measured: 2026-03.** Refactors landed since then (April 2026: complexity reduction in `apply_text_edits` / `handle_xray_fast` / `handle_xray_reindex_inner` / `cmd_serve`, periodic watcher rescan, Rust parser via `lang-rust`; May 2026: lock-order RAII enforcement in `mcp::lock_order`, on-demand XML parser via `lang-xml`, doc-audit pass) have **not** been re-benchmarked against the production C# corpus. Treat the absolute numbers as a March baseline; relative comparisons (xray vs ripgrep, index vs live walk) remain representative.
 
+## D20 C# Semantic Scale Baseline
+
+The D20 scale harness generates two deterministic C# corpora from seed `0xD20C5`: 100,000 methods with overload-group sizes 1/2/4/8/16 and 100,000 methods spread across namespace-colliding types. The compact expected manifest is stored in `benches/fixtures/d20-corpus-manifest.json`; generated source and machine-specific results remain under `target/`.
+
+Quick development check:
+
+```powershell
+pwsh scripts/bench-d20-csharp-semantics.ps1 `
+  -BenchmarkProfile Development `
+  -MethodsPerCorpus 1000 `
+  -BuildRelease `
+  -ColdBuildCount 1 `
+  -WarmQueryCount 5
+```
+
+Formal baseline recording:
+
+```powershell
+pwsh scripts/bench-d20-csharp-semantics.ps1 `
+  -BenchmarkProfile Release `
+  -BuildRelease `
+  -ResultPath target/d20-scale-result.json
+```
+
+The release profile performs seven independent cold definition-index builds per corpus, one unmeasured MCP warm-up per fixed query, 100 measured warm queries, and 20 observable watcher transitions in each direction for an overload add/remove probe. The JSON result includes raw build/query/incremental samples, persisted index bytes, CLI/server RSS, candidate counts, corpus and binary hashes, toolchain/machine metadata, source-restoration evidence, and cleanup status.
+
+A standalone run has `budgetEvaluation.status = "baselineRecorded"`. It is not evidence that the D20 performance budgets pass. Comparative claims require matching corpus hash, `Cargo.lock`, Rust toolchain, release profile, hardware, and Defender/indexing policy.
+
 ## Test environments
 
 Benchmarks were measured on two machines to show hardware-dependent variability:
