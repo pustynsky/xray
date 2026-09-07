@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Pinned the VirusTotal badge to the scanned release binary.** The README badge and report link both use the SHA256 of the `v0.8.1` executable instead of combining a latest-release badge with an older report.
+
 ## 0.8.1 (2026-09-07)
 
 - **Exact parameter-count definition filter.** `xray_definitions` accepts `paramCount` (`0..=254`) to filter C#, TypeScript/TSX, and Rust callables by their indexed parameter count, with automatic code-stats output. The filter combines with `minParams` using AND and is preserved in executable follow-up queries. Invalid inputs, saturated counts, and XML on-demand/`containsLine`/`audit` combinations return errors; SQL placeholder counts are excluded. SQL parameter parsing is tracked in [#458](https://github.com/pustynsky/xray/issues/458).
