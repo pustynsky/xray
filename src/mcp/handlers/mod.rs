@@ -410,7 +410,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "includeCodeStats": {
                         "type": "boolean",
-                        "description": "Include complexity metrics (cyclomatic, cognitive, nesting, params, returns, calls, lambdas). Auto-enabled by sortBy/min*. (default: false)"
+                        "description": "Include complexity metrics (cyclomatic, cognitive, nesting, params, returns, calls, lambdas). Auto-enabled by sortBy/min*/paramCount. (default: false)"
                     },
                     "sortBy": {
                         "type": "string",
@@ -428,6 +428,12 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "minNesting": {
                         "type": "integer",
                         "description": "Min nesting depth. Auto-enables includeCodeStats."
+                    },
+                    "paramCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 254,
+                        "description": "Exact C#/TS/TSX/Rust parameter count. Search-only; enables includeCodeStats."
                     },
                     "minParams": {
                         "type": "integer",

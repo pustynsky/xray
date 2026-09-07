@@ -405,7 +405,7 @@ mod tests {
                 "kind": ["function", "method"], "parent": ["Container", "Other"],
                 "attribute": "Marker", "baseType": "Base", "baseTypeTransitive": true,
                 "excludeDir": ["excluded"], "minComplexity": 2, "minCognitive": 2,
-                "minNesting": 2, "minParams": 2, "minReturns": 2, "minCalls": 2,
+                "minNesting": 2, "paramCount": 3, "minParams": 2, "minReturns": 2, "minCalls": 2,
                 "sortBy": "cognitiveComplexity", "includeCodeStats": true, "includeUsageCount": true,
                 "bodyLineStart": 5, "bodyLineEnd": 25, "includeDocComments": false,
                 "maxBodyLines": 4, "maxTotalBodyLines": 6, "maxResults": 2,
@@ -424,7 +424,7 @@ mod tests {
             assert_eq!(next["kind"], json!(["function"]));
             assert!(next.get("regex").is_none());
             for key in ["attribute", "baseType", "baseTypeTransitive", "excludeDir", "minComplexity",
-                "minCognitive", "minNesting", "minParams", "minReturns", "minCalls", "sortBy", "includeCodeStats",
+                "minCognitive", "minNesting", "paramCount", "minParams", "minReturns", "minCalls", "sortBy", "includeCodeStats",
                 "includeUsageCount", "bodyLineStart", "bodyLineEnd", "includeDocComments", "maxBodyLines", "maxTotalBodyLines", "maxResults"] {
                 assert_eq!(next[key], request[key], "{key}");
             }

@@ -88,6 +88,7 @@ pub(crate) struct DefinitionSearchArgs {
     pub min_complexity: Option<u16>,
     pub min_cognitive: Option<u16>,
     pub min_nesting: Option<u8>,
+    pub param_count: Option<u8>,
     pub min_params: Option<u8>,
     pub min_returns: Option<u8>,
     pub min_calls: Option<u16>,
@@ -110,12 +111,13 @@ pub(crate) struct DefinitionSearchArgs {
 }
 
 impl DefinitionSearchArgs {
-    /// Returns true if any code stats filter (sortBy or min*) is active.
+    /// Returns true if sorting or any code stats filter is active.
     pub fn has_stats_filter(&self) -> bool {
         self.sort_by.is_some()
             || self.min_complexity.is_some()
             || self.min_cognitive.is_some()
             || self.min_nesting.is_some()
+            || self.param_count.is_some()
             || self.min_params.is_some()
             || self.min_returns.is_some()
             || self.min_calls.is_some()
@@ -218,6 +220,15 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
     let min_complexity = parse_bounded_u16(args, "minComplexity")?;
     let min_cognitive = parse_bounded_u16(args, "minCognitive")?;
     let min_nesting = parse_bounded_u8(args, "minNesting")?;
+    let param_count = args.get("paramCount").map(|value| {
+        value.as_u64()
+            .and_then(|count| u8::try_from(count).ok())
+            .filter(|count| *count < u8::MAX)
+            .ok_or_else(|| "paramCount must be an integer in 0..=254; 255 is a saturated index count".to_string())
+    }).transpose()?;
+    if param_count.is_some() && (contains_line.is_some() || audit) {
+        return Err("paramCount is a search filter and cannot be combined with containsLine or audit".to_string());
+    }
     let min_params = parse_bounded_u8(args, "minParams")?;
     let min_returns = parse_bounded_u8(args, "minReturns")?;
     let min_calls = parse_bounded_u16(args, "minCalls")?;
@@ -227,6 +238,7 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
         || min_complexity.is_some()
         || min_cognitive.is_some()
         || min_nesting.is_some()
+        || param_count.is_some()
         || min_params.is_some()
         || min_returns.is_some()
         || min_calls.is_some();
@@ -296,6 +308,7 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
         min_complexity,
         min_cognitive,
         min_nesting,
+        param_count,
         min_params,
         min_returns,
         min_calls,
@@ -486,6 +499,9 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
             ctx,
             &index.files,
         ) {
+            if parsed.param_count.is_some() {
+                return ToolCallResult::error("paramCount is not supported for XML definitions".to_string());
+            }
             return if xml_page_query {
                 paginate_xml_on_demand_result(result, &parsed, &page_request)
             } else {
@@ -1434,10 +1450,10 @@ fn apply_stats_filters(
         return Ok(StatsFilterInfo { applied: false, before_count });
     }
 
-    // sortBy='lines' works without code_stats, but min* filters always need code_stats
+    // sortBy='lines' works without code_stats, but metric filters always need code_stats
     let has_min_filters = args.min_complexity.is_some() || args.min_cognitive.is_some()
-        || args.min_nesting.is_some() || args.min_params.is_some()
-        || args.min_returns.is_some() || args.min_calls.is_some();
+        || args.min_nesting.is_some() || args.param_count.is_some()
+        || args.min_params.is_some() || args.min_returns.is_some() || args.min_calls.is_some();
     let needs_code_stats = has_min_filters || args.sort_by.as_deref() != Some("lines");
 
     if needs_code_stats && index.code_stats.is_empty() {
@@ -1447,7 +1463,7 @@ fn apply_stats_filters(
     }
 
     if needs_code_stats {
-        results.retain(|(def_idx, _def)| {
+        results.retain(|(def_idx, def)| {
             let stats = match index.code_stats.get(def_idx) {
                 Some(s) => s,
                 None => return false,
@@ -1459,6 +1475,14 @@ fn apply_stats_filters(
                 && stats.cognitive_complexity < min { return false; }
             if let Some(min) = args.min_nesting
                 && stats.max_nesting_depth < min { return false; }
+            if let Some(exact) = args.param_count {
+                let supports_param_count = index.files.get(def.file_id as usize)
+                    .and_then(|path| std::path::Path::new(path).extension())
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| ["cs", "ts", "tsx", "rs"].iter()
+                        .any(|supported| extension.eq_ignore_ascii_case(supported)));
+                if !supports_param_count || stats.param_count != exact { return false; }
+            }
             if let Some(min) = args.min_params
                 && stats.param_count < min { return false; }
             if let Some(min) = args.min_returns
