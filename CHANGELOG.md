@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.1 (2026-09-07)
 
 - **Exact parameter-count definition filter.** `xray_definitions` accepts `paramCount` (`0..=254`) to filter C#, TypeScript/TSX, and Rust callables by their indexed parameter count, with automatic code-stats output. The filter combines with `minParams` using AND and is preserved in executable follow-up queries. Invalid inputs, saturated counts, and XML on-demand/`containsLine`/`audit` combinations return errors; SQL placeholder counts are excluded. SQL parameter parsing is tracked in [#458](https://github.com/pustynsky/xray/issues/458).
 
