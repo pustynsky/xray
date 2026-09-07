@@ -1250,6 +1250,7 @@ fn test_parse_args_all_code_stats_filters() {
         "minComplexity": 5,
         "minCognitive": 10,
         "minNesting": 3,
+        "paramCount": 1,
         "minParams": 4,
         "minReturns": 2,
         "minCalls": 8
@@ -1258,6 +1259,7 @@ fn test_parse_args_all_code_stats_filters() {
     assert_eq!(parsed.min_complexity, Some(5u16));
     assert_eq!(parsed.min_cognitive, Some(10u16));
     assert_eq!(parsed.min_nesting, Some(3u8));
+    assert_eq!(parsed.param_count, Some(1u8));
     assert_eq!(parsed.min_params, Some(4u8));
     assert_eq!(parsed.min_returns, Some(2u8));
     assert_eq!(parsed.min_calls, Some(8u16));
@@ -2439,6 +2441,136 @@ fn test_apply_stats_filters_min_params_filters() {
     // GetUser has param_count=3, GetOrder has param_count=1
     assert_eq!(results.len(), 1, "Only GetUser passes minParams=2");
     assert_eq!(results[0].1.name, "GetUser");
+}
+
+#[test]
+fn test_apply_stats_filters_param_count_exact() {
+    let index = make_index_with_stats();
+    for (query, expected) in [
+        (json!({"paramCount": 1}), vec!["GetOrder"]),
+        (json!({"paramCount": 2}), vec![]),
+        (json!({"paramCount": 3}), vec!["GetUser"]),
+        (json!({"paramCount": 1, "minParams": 2}), vec![]),
+        (json!({"paramCount": 3, "minParams": 2, "sortBy": "lines"}), vec!["GetUser"]),
+    ] {
+        let mut results: Vec<_> = index.definitions.iter().enumerate()
+            .map(|(position, definition)| (position as u32, definition)).collect();
+        let args = parse_definition_args(&query).unwrap();
+        let info = apply_stats_filters(&index, &mut results, &args).unwrap();
+        assert!(info.applied);
+        assert_eq!(results.iter().map(|(_, definition)| definition.name.as_str()).collect::<Vec<_>>(), expected, "{query}");
+    }
+}
+
+#[test]
+fn test_apply_stats_filters_param_count_excludes_sql() {
+    let mut index = make_index_with_stats();
+    index.code_stats.get_mut(&3).unwrap().param_count = 0;
+    for extension in ["cs", "ts", "tsx", "rs", "CS", "sql", "xml"] {
+        index.files[1] = format!("src/OrderService.{extension}");
+        let mut results: Vec<_> = index.definitions.iter().enumerate()
+            .map(|(position, definition)| (position as u32, definition)).collect();
+        let args = parse_definition_args(&json!({"paramCount": 0})).unwrap();
+        let info = apply_stats_filters(&index, &mut results, &args).unwrap();
+        assert!(info.applied);
+        assert_eq!(results.len(), usize::from(!matches!(extension, "sql" | "xml")), "{extension}");
+    }
+}
+
+#[test]
+fn test_parse_args_param_count_validation() {
+    assert_eq!(parse_definition_args(&json!({})).unwrap().param_count, None);
+    for count in [0, 1, 254] {
+        let args = parse_definition_args(&json!({"paramCount": count})).unwrap();
+        assert_eq!(args.param_count, Some(count));
+        assert!(args.has_stats_filter());
+        assert!(args.include_code_stats);
+    }
+    for value in [json!(-1), json!(255), json!(256), json!(1.5), json!("1"), json!(true), json!(null), json!([])] {
+        let error = parse_definition_args(&json!({"paramCount": value})).unwrap_err();
+        assert!(error.contains("paramCount"), "{error}");
+    }
+}
+
+#[test]
+fn test_apply_stats_filters_param_count_requires_stats_even_with_line_sort() {
+    let index = make_test_def_index();
+    let mut results: Vec<_> = index.definitions.iter().enumerate()
+        .map(|(position, definition)| (position as u32, definition)).collect();
+    let args = parse_definition_args(&json!({"paramCount": 0, "sortBy": "lines"})).unwrap();
+    let error = apply_stats_filters(&index, &mut results, &args).unwrap_err();
+    assert!(error.contains("Code stats not available"), "{error}");
+}
+
+#[test]
+fn test_parse_args_param_count_rejects_non_search_modes() {
+    for query in [
+        json!({"paramCount": 0, "audit": true}),
+        json!({"paramCount": 0, "containsLine": 1, "file": ["sample.rs"]}),
+    ] {
+        assert!(parse_definition_args(&query).unwrap_err().contains("cannot be combined"));
+    }
+}
+
+#[cfg(all(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-rust"))]
+#[test]
+fn test_param_count_real_language_signatures() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    for (filename, source) in [
+        ("sample.cs", "public class Counter { public void Compute() {} public void Compute(int first) {} public void Compute(int first, int second = 0) {} public void Compute(int first, int second, int third) {} }"),
+        ("sample.ts", "class Counter { ComputeZero() {} ComputeOne(first: number) {} ComputeTwo(first: number, second = 0) {} ComputeThree(first: number, second: number, ...rest: number[]) {} }"),
+        ("component.tsx", "function ComputeZero() {} function ComputeOne(first: number) {} function ComputeTwo(first: number, second = 0) {} function ComputeThree(first: number, second: number, ...rest: number[]) {}"),
+        ("sample.rs", "struct Counter; impl Counter { fn ComputeZero(&self) {} fn ComputeOne(&self, first: u32) {} fn ComputeTwo(&mut self, first: u32, second: u32) {} fn ComputeThree(first: u32, second: u32, third: u32) {} }"),
+    ] {
+        std::fs::write(root.join(filename), source).unwrap();
+    }
+    let root_str = crate::clean_path(&root.to_string_lossy());
+    let index = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+        dir: root_str.clone(), ext: "cs,ts,tsx,rs".to_string(), threads: 1, respect_git_exclude: false,
+    });
+    let ctx = HandlerContext {
+        def_index: Some(Arc::new(RwLock::new(index))),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(root_str))),
+        ..Default::default()
+    };
+    for filename in ["sample.cs", "sample.ts", "component.tsx", "sample.rs"] {
+        for count in 0..=4 {
+            let result = super::super::dispatch_tool(&ctx, "xray_definitions", &json!({
+                "file": [filename], "name": ["Compute"], "paramCount": count, "autoCorrect": false,
+            }));
+            assert!(!result.is_error, "{}", result.content[0].text);
+            let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+            let definitions = output["definitions"].as_array().unwrap();
+            assert_eq!(definitions.len(), usize::from(count < 4), "{filename}: {output}");
+            if count < 4 {
+                assert_eq!(definitions[0]["codeStats"]["paramCount"], count, "{filename}: {output}");
+            }
+        }
+    }
+    let mut page_files = std::collections::HashSet::new();
+    for offset in 0..=4 {
+        let result = super::super::dispatch_tool(&ctx, "xray_definitions", &json!({
+            "name": ["Compute"], "paramCount": 2, "autoCorrect": false, "maxResults": 1, "offset": offset,
+        }));
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["resultStatus"]["page"]["total"], 4, "{output}");
+        assert_eq!(output["definitions"].as_array().unwrap().len(), usize::from(offset < 4), "{output}");
+        if offset < 4 {
+            assert_eq!(output["definitions"][0]["codeStats"]["paramCount"], 2);
+            assert!(page_files.insert(output["definitions"][0]["file"].as_str().unwrap().to_string()));
+        }
+    }
+    #[cfg(feature = "lang-xml")]
+    {
+        std::fs::write(root.join("sample.xml"), "<Project><ItemGroup /></Project>").unwrap();
+        let result = super::super::dispatch_tool(&ctx, "xray_definitions", &json!({
+            "file": ["sample.xml"], "name": ["Project"], "paramCount": 0,
+        }));
+        assert!(result.is_error);
+        assert!(result.content[0].text.contains("paramCount is not supported for XML"), "{}", result.content[0].text);
+    }
 }
 
 #[test]

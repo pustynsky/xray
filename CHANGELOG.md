@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Exact parameter-count definition filter.** `xray_definitions` accepts `paramCount` (`0..=254`) to filter C#, TypeScript/TSX, and Rust callables by their indexed parameter count, with automatic code-stats output. The filter combines with `minParams` using AND and is preserved in executable follow-up queries. Invalid inputs, saturated counts, and XML on-demand/`containsLine`/`audit` combinations return errors; SQL placeholder counts are excluded. SQL parameter parsing is tracked in [#458](https://github.com/pustynsky/xray/issues/458).
+
 ## 0.8.0 (2026-09-06)
 
 - **Executable scoped follow-up hints.** Definition discovery offers bounded, snapshot-bound reads of selected definitions with schema-shaped arrays and retained filters/budgets. Search alternatives explicitly report semantic changes; cross-tool hints preserve expressible restrictions or explain why no equivalent query exists. Byte-fitted pages drop optional hints when that retains strictly more result entries, keep hints on ties, and preserve or omit structured queries atomically. UTF-16 hint decoding uses fixed-size array chunks for Clippy compatibility.
