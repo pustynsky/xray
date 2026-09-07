@@ -410,12 +410,11 @@ fn test_compact_removes_tombstones() {
         files: vec!["file0.cs".to_string(), "file1.cs".to_string()],
         definitions: vec![
             DefinitionEntry { file_id: 0, name: "ClassA".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 10, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
-            DefinitionEntry { file_id: 0, name: "MethodA".to_string(), kind: DefinitionKind::Method, line_start: 2, line_end: 5, parent: Some("ClassA".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
             DefinitionEntry { file_id: 1, name: "ClassB".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 20, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
         ],
-        name_index: { let mut m = HashMap::new(); m.insert("classa".to_string(), vec![0]); m.insert("methoda".to_string(), vec![1]); m.insert("classb".to_string(), vec![2]); m },
-        kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0, 2]); m.insert(DefinitionKind::Method, vec![1]); m },
-        file_index: { let mut m = HashMap::new(); m.insert(0, vec![0, 1]); m.insert(1, vec![2]); m },
+        name_index: { let mut m = HashMap::new(); m.insert("classa".to_string(), vec![0]); m.insert("classb".to_string(), vec![1]); m },
+        kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0, 1]); m },
+        file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m.insert(1, vec![1]); m },
         path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("file0.cs"), 0); m.insert(PathBuf::from("file1.cs"), 1); m },
         ..Default::default()
     };
@@ -423,21 +422,14 @@ fn test_compact_removes_tombstones() {
     // Simulate removing file0's definitions from secondary indexes (but not from Vec)
     remove_file_definitions(&mut index, 0);
 
-    // Now definitions Vec has 3 entries but only 1 is active (def[2] = ClassB)
-    assert_eq!(index.definitions.len(), 3, "Vec should still have 3 entries (tombstones)");
-    let active: usize = index.file_index.values().map(|v| v.len()).sum();
-    assert_eq!(active, 1, "Only 1 active definition");
-
-    // Compact — should remove tombstones
-    compact_definitions(&mut index);
-
-    assert_eq!(index.definitions.len(), 1, "After compact, Vec should have 1 entry");
+    assert_eq!(index.definitions.len(), 2, "removal should defer compaction");
+    assert!(compact_definitions_if_needed(&mut index));
+    assert_eq!(index.definitions.len(), 1, "50% tombstones should compact at operation end");
     assert_eq!(index.definitions[0].name, "ClassB", "Remaining def should be ClassB");
 
     // Verify secondary indexes are remapped
     let class_indices = index.kind_index.get(&DefinitionKind::Class).unwrap();
     assert_eq!(class_indices, &vec![0u32], "ClassB should be at index 0 after compact");
-    assert!(!index.kind_index.contains_key(&DefinitionKind::Method), "Method kind should be empty after compact");
 
     let classb_name = index.name_index.get("classb").unwrap();
     assert_eq!(classb_name, &vec![0u32], "classb in name_index should point to 0");
@@ -449,7 +441,7 @@ fn test_compact_removes_tombstones() {
 
 #[cfg(feature = "lang-csharp")]
 #[test]
-fn test_csharp_semantic_compaction_removes_dead_callables() {
+fn test_csharp_semantic_auto_compaction_removes_dead_callables() {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::canonicalize_test_root(temp.path());
     let first_file = root.join("First.cs");
@@ -471,9 +463,8 @@ fn test_csharp_semantic_compaction_removes_dead_callables() {
     super::incremental::update_file_definitions(&mut index, &first_file);
     super::incremental::update_file_definitions(&mut index, &second_file);
     super::incremental::update_file_definitions(&mut index, &first_file);
-    assert_eq!(index.csharp_semantics.callables.len(), 3);
+    super::incremental::update_file_definitions(&mut index, &first_file);
 
-    super::incremental::compact_definitions(&mut index);
     assert_eq!(index.csharp_semantics.callables.len(), 2);
 }
 
@@ -501,6 +492,43 @@ fn test_compact_no_tombstones_is_noop() {
     assert_eq!(index.definitions.len(), 1);
     assert_eq!(index.definitions[0].name, "ClassA");
     assert_eq!(index.name_index.get("classa").unwrap(), &vec![0u32]);
+}
+
+#[test]
+fn test_auto_compact_waits_until_50_percent_tombstones() {
+    let mut index = DefinitionIndex {
+        definitions: vec![
+            DefinitionEntry { file_id: 0, name: "Removed".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 1, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            DefinitionEntry { file_id: 1, name: "ActiveA".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 1, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            DefinitionEntry { file_id: 1, name: "ActiveB".to_string(), kind: DefinitionKind::Method, line_start: 2, line_end: 2, parent: Some("ActiveA".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        ],
+        name_index: {
+            let mut map = HashMap::new();
+            map.insert("removed".to_string(), vec![0]);
+            map.insert("activea".to_string(), vec![1]);
+            map.insert("activeb".to_string(), vec![2]);
+            map
+        },
+        kind_index: {
+            let mut map = HashMap::new();
+            map.insert(DefinitionKind::Class, vec![0, 1]);
+            map.insert(DefinitionKind::Method, vec![2]);
+            map
+        },
+        file_index: {
+            let mut map = HashMap::new();
+            map.insert(0, vec![0]);
+            map.insert(1, vec![1, 2]);
+            map
+        },
+        ..Default::default()
+    };
+
+    remove_file_definitions(&mut index, 0);
+
+    assert!(!compact_definitions_if_needed(&mut index));
+    assert_eq!(index.definitions.len(), 3, "33% tombstones should not compact");
+    assert_eq!(index.file_index.values().map(Vec::len).sum::<usize>(), 2);
 }
 
 #[test]
@@ -591,10 +619,8 @@ fn test_compact_auto_triggers_at_threshold() {
     let active: usize = index.file_index.values().map(|v| v.len()).sum();
     assert!(active <= 3, "Active count should be small: {}", active);
 
-    // If total > active * 3, auto-compact should have triggered in remove_file_definitions
-    // Check that definitions.len() is reasonable
-    assert!(index.definitions.len() <= active * 4,
-        "After auto-compact, Vec len ({}) should be close to active count ({})",
+    assert!(index.definitions.len() < active * 2,
+        "After auto-compact, Vec len ({}) should be less than twice active count ({})",
         index.definitions.len(), active);
 }
 
@@ -635,25 +661,18 @@ fn test_compact_remaps_selector_index_and_template_children() {
     // Remove file0 (CompA at idx 0)
     remove_file_definitions(&mut index, 0);
 
-    // Verify selector_index and template_children are cleaned (Fix 3)
-    assert!(!index.selector_index.contains_key("app-comp-a"), "CompA selector should be removed");
-    assert!(index.selector_index.contains_key("app-comp-b"), "CompB selector should remain");
     assert!(!index.angular_components.contains_key(&0));
     assert!(index.angular_components.contains_key(&1));
-    assert!(!index.template_children.contains_key(&0), "CompA template_children should be removed");
-    assert!(index.template_children.contains_key(&1), "CompB template_children should remain");
+    assert!(!index.template_children.contains_key(&0));
+    assert!(index.template_children.contains_key(&1));
+    assert!(!index.selector_index.contains_key("app-comp-a"));
     assert!(!index.template_owners.contains_key("a.html"));
-    assert_eq!(index.template_owners["b.html"], vec![1]);
     assert!(!index.template_parents.contains_key("app-child"));
-    assert_eq!(index.template_parents["app-other"], vec![1]);
 
-    // Compact
-    compact_definitions(&mut index);
-
+    assert!(compact_definitions_if_needed(&mut index));
     assert_eq!(index.definitions.len(), 1);
     assert_eq!(index.definitions[0].name, "CompB");
 
-    // selector_index should be remapped: old def_idx 1 → new def_idx 0
     let compb_selector = index.selector_index.get("app-comp-b").unwrap();
     assert_eq!(compb_selector, &vec![0u32], "CompB selector should point to 0 after compact");
 

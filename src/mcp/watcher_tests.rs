@@ -1969,7 +1969,9 @@ fn test_definition_parse_failure_tombstones_path_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::canonicalize_test_root(temp.path());
     let path = root.join("Disappeared.cs");
+    let stable_path = root.join("Stable.cs");
     std::fs::write(&path, "public sealed class DisappearedMarker {}\n").unwrap();
+    std::fs::write(&stable_path, "public sealed class StableMarker {}\n").unwrap();
 
     let mut index = crate::definitions::DefinitionIndex {
         root: root.to_string_lossy().to_string(),
@@ -1977,6 +1979,7 @@ fn test_definition_parse_failure_tombstones_path_metadata() {
         ..Default::default()
     };
     crate::definitions::update_file_definitions(&mut index, &path);
+    crate::definitions::update_file_definitions(&mut index, &stable_path);
     let path_key = crate::path_identity_key(&path);
     let file_id = *index.path_to_id.get(&path_key).unwrap();
     let index = Some(Arc::new(RwLock::new(index)));
@@ -1990,7 +1993,11 @@ fn test_definition_parse_failure_tombstones_path_metadata() {
     assert!(!index.path_to_id.contains_key(&path_key));
     assert!(index.files[file_id as usize].is_empty());
     assert!(!index.name_index.contains_key("disappearedmarker"));
+    assert!(index.name_index.contains_key("stablemarker"));
     assert!(!index.file_index.contains_key(&file_id));
+    let active_definitions = index.file_index.values().map(Vec::len).sum::<usize>();
+    assert_eq!(active_definitions, 1);
+    assert_eq!(index.definitions.len(), active_definitions);
 }
 
 #[cfg(feature = "lang-typescript")]

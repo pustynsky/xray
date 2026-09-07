@@ -221,6 +221,10 @@ fn format_phase_fields(fields: &[(&str, String)]) -> String {
         .join(" ")
 }
 
+pub fn debug_log_enabled() -> bool {
+    DEBUG_LOG_ENABLED.load(Ordering::Acquire)
+}
+
 pub fn log_phase(label: &str, fields: &[(&str, String)]) {
     if !DEBUG_LOG_ENABLED.load(Ordering::Acquire) {
         return;

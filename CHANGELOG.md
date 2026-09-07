@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Definition tombstones compact at 50% retained waste.** Stable update and reconciliation batches now bound definition-index memory earlier and, under `--debug-log`, emit a `definitionCompact` phase with elapsed time, before/after counts, removed entries, waste percentage, and Windows process-memory counters.
+
 - **Pinned the VirusTotal badge to the scanned release binary.** The README badge and report link both use the SHA256 of the `v0.8.1` executable instead of combining a latest-release badge with an older report.
 
 ## 0.8.1 (2026-09-07)

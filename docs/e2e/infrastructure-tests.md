@@ -431,9 +431,9 @@ protection uses a separate `content_building` flag with `compare_exchange`.
 **Expected:**
 
 - `totalDefinitions` reflects active definitions only (not Vec length with tombstones)
-- Auto-compaction when tombstone ratio exceeds 3×
+- Auto-compaction after stable batches when tombstones reach 50% of retained definitions
 
-**Unit tests:** `test_compact_removes_tombstones`, `test_compact_auto_triggers_at_threshold`
+**Unit tests:** `test_compact_removes_tombstones`, `test_auto_compact_waits_until_50_percent_tombstones`
 
 ---
 
