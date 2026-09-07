@@ -1727,6 +1727,7 @@ fn update_definition_index_batch(
                 &mut index,
                 std::mem::take(&mut angular_updates),
             );
+            definitions::compact_definitions_if_needed(&mut index);
 
             if applied_changes {
                 index.created_at = std::time::SystemTime::now()

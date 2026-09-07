@@ -284,9 +284,11 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
             }
         }
     }
+    compact_definitions_if_needed(index);
 }
 
-/// Remove all definitions for a file from the index
+/// Remove all definitions for a file from the index.
+/// Call `compact_definitions_if_needed` after the surrounding update batch completes.
 pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
     // DEF-S-002: clear stale `empty_file_ids` entry FIRST, before the early
     // return below. A file that was previously empty has no `file_index` entry,
@@ -406,18 +408,6 @@ pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
         index.code_stats.shrink_to_fit();
     }
 
-    // Auto-compact when tombstone ratio exceeds 3× (67% waste)
-    let active_count: usize = index.file_index.values().map(|v| v.len()).sum();
-    let total_count = index.definitions.len();
-    if total_count > 0 && total_count > active_count * 3 {
-        info!(
-            total = total_count,
-            active = active_count,
-            waste_pct = ((total_count - active_count) * 100) / total_count,
-            "Definition index tombstone threshold exceeded, compacting"
-        );
-        compact_definitions(index);
-    }
 }
 
 /// Remove a file entirely from the definition index
@@ -497,6 +487,24 @@ pub(crate) fn resolve_transient_definition_inputs(
     }
 }
 
+pub fn compact_definitions_if_needed(index: &mut DefinitionIndex) -> bool {
+    let active_count: usize = index.file_index.values().map(Vec::len).sum();
+    let total_count = index.definitions.len();
+    let tombstone_count = total_count.saturating_sub(active_count);
+    if total_count == 0 || tombstone_count < active_count {
+        return false;
+    }
+
+    info!(
+        total = total_count,
+        active = active_count,
+        waste_pct = (tombstone_count * 100) / total_count,
+        "Definition index tombstone threshold exceeded, compacting"
+    );
+    compact_definitions(index);
+    true
+}
+
 /// Compact the definition index by removing tombstoned entries from the Vec
 /// and remapping all secondary indexes to the new positions.
 ///
@@ -508,6 +516,7 @@ pub(crate) fn resolve_transient_definition_inputs(
 /// ⚠️ When adding new indexes with def_idx references to DefinitionIndex,
 /// update this function to remap the new index as well.
 pub fn compact_definitions(index: &mut DefinitionIndex) {
+    let started = std::time::Instant::now();
     let active_set: HashSet<u32> = index.file_index.values()
         .flat_map(|v| v.iter().copied()).collect();
 
@@ -556,12 +565,30 @@ pub fn compact_definitions(index: &mut DefinitionIndex) {
     let after = new_defs.len();
     index.definitions = new_defs;
 
-    info!(
-        before,
-        after,
-        removed = before - after,
-        "Definition index compacted"
-    );
+    let removed = before - after;
+    let compact_ms = started.elapsed().as_secs_f64() * 1000.0;
+    info!(before, after, removed, compact_ms, "Definition index compacted");
+
+    if crate::index::debug_log_enabled() {
+        let mut fields = vec![
+            ("compactMs", format!("{:.1}", compact_ms)),
+            ("before", before.to_string()),
+            ("after", after.to_string()),
+            ("removed", removed.to_string()),
+            ("wastePct", format!("{:.1}", removed as f64 * 100.0 / before as f64)),
+        ];
+        let memory = crate::index::get_process_memory_info();
+        if let Some(ws) = memory.get("workingSetMB").and_then(|v| v.as_f64()) {
+            fields.push(("wsMB", format!("{:.1}", ws)));
+        }
+        if let Some(peak) = memory.get("peakWorkingSetMB").and_then(|v| v.as_f64()) {
+            fields.push(("peakWsMB", format!("{:.1}", peak)));
+        }
+        if let Some(commit) = memory.get("commitMB").and_then(|v| v.as_f64()) {
+            fields.push(("commitMB", format!("{:.1}", commit)));
+        }
+        crate::index::log_phase("definitionCompact", &fields);
+    }
 }
 
 /// Remap def_idx values in a HashMap<K, Vec<u32>> secondary index.
@@ -1259,6 +1286,7 @@ pub(crate) fn reconcile_definition_index_nonblocking_with_angular_paths(
                 .remove(&crate::path_identity_key(path));
         }
         super::apply_prepared_angular_template_updates(&mut idx, angular_updates);
+        compact_definitions_if_needed(&mut idx);
 
         // Update created_at if anything changed (use walk_start, not now(), to avoid race condition)
         if added > 0 || modified > 0 || removed > 0 {

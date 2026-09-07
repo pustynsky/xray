@@ -362,7 +362,7 @@ The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserS
 
 ## 12. Incremental Updates: Tombstones + Auto-Compaction
 
-### Chosen: Leave stale `DefinitionEntry` as tombstones in Vec, auto-compact when waste exceeds 67%
+### Chosen: Leave stale `DefinitionEntry` as tombstones in Vec, auto-compact after stable batches when waste reaches 50%
 
 **Why:**
 
@@ -381,11 +381,11 @@ The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserS
 
 **Known limitations:**
 
-- Between compactions, `definitions.len()` can be up to 3× the active definition count.
+- After each stable update or reconciliation batch, `definitions.len()` stays below 2× the active definition count.
 - All 9 secondary indexes must be remapped during compaction (atomic operation, not interruptible).
 - Compaction holds a write lock for ~100ms, blocking concurrent reads during this time.
 
-**When to reconsider:** If watch-mode sessions exceed 24 hours with continuous high-churn changes, the auto-compaction threshold (67% waste) may need tuning. In practice, VS Code restarts rebuild the index cleanly.
+**When to reconsider:** If 50% compaction pauses become noticeable on large, high-churn workspaces, incremental tombstone-slot reuse may be needed.
 
 ## 13. Code Complexity: AST Walker vs External Tools
 
