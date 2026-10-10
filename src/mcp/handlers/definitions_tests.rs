@@ -576,6 +576,166 @@ fn test_audit_cross_validate_with_file_index() {
 
 // ─── baseTypeTransitive tests ─────────────────────────────────────
 
+#[test]
+fn test_base_type_matches_only_outer_names() {
+    for (declared, query, expected) in [
+        ("IFoo<int>", "IFoo", true),
+        ("IFoo<int>", "ifoo", true),
+        ("IFoo", "Foo", false),
+        ("IFooFactory", "IFoo", false),
+        ("PrefixIFoo", "IFoo", false),
+        ("Base<IFoo<int>>", "IFoo", false),
+        ("Base<IFoo<int>>", "IFoo<int>", false),
+        ("Contracts.IFoo<int>", "IFoo", true),
+        ("Contracts.IFoo<int>", "Contracts.IFoo", true),
+        ("Other.IFoo<int>", "Contracts.IFoo", false),
+        ("global::Contracts.IFoo<int>", "Contracts.IFoo", true),
+        ("Contracts.IFoo<int>", "global::Contracts.IFoo", true),
+        ("IFoo<Models.Item>", "IFoo", true),
+        ("IFoo<Models.Item>", "Models.Item", false),
+        ("IFoo<int>", "IFoo<int>", true),
+        ("IFoo<int>", "IFoo<string>", false),
+        ("Contracts.IFoo<int>", "IFoo<int>", true),
+        ("Contracts.IFoo<int>", "Contracts.IFoo<int>", true),
+        ("Contracts.IFoo<int>", "Other.IFoo<int>", false),
+        (" Contracts . IFoo < Pair < int , string > > ", " IFoo<Pair<int,string>> ", true),
+        ("Outer<IFoo<int>>.Inner<string>", "IFoo", false),
+        ("Outer<IFoo<int>>.Inner<string>", "Outer", false),
+        ("Outer<IFoo<int>>.Inner<string>", "Inner", true),
+        ("Outer<IFoo<int>>.Inner<string>", "Inner<string>", true),
+        ("Outer<IFoo<int>>.Inner<string>", "Outer<IFoo<int>>.Inner", true),
+        ("contracts::IFoo<Item>", "IFoo", true),
+        ("contracts::IFoo<Item>", "contracts::IFoo", true),
+        ("contracts::IFoo<Item>", "other::IFoo", false),
+        ("IFoo<Model<int>>", "IFoo<Model>", false),
+    ] {
+        assert_eq!(
+            base_type_matches(&normalize_base_type(declared), &normalize_base_type(query)),
+            expected,
+            "{declared} queried with {query}",
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-csharp")]
+fn test_base_type_real_csharp_outer_names_and_transitive_edges() {
+    use super::super::handlers_test_utils::HandlerContextBuilder;
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    std::fs::write(root.join("Inheritance.cs"), r#"
+using Contracts;
+namespace Contracts {
+    public interface IFoo<T> { }
+    public interface IFooFactory { }
+}
+namespace Other {
+    public interface IFoo<T> { }
+}
+namespace Implementation {
+    public class Base<T> { }
+    public class Direct : Contracts.IFoo<int> { }
+    public class Unqualified : IFoo<string> { }
+    public class GlobalQualified : global::Contracts.IFoo<int> { }
+    public class GenericArgument : Base<IFoo<int>> { }
+    public class SimilarName : IFooFactory { }
+    public class Derived : Direct { }
+    public class QualifiedDerived : Implementation.Direct { }
+    public class GenericDirect<T> : IFoo<T> { }
+    public class GenericDerived : Implementation.GenericDirect<int> { }
+    public class Deeper : GenericDerived { }
+    public class ArgumentDerived : Base<Direct> { }
+    public class DirectFactory { }
+    public class SimilarDerived : DirectFactory { }
+    public class FalseDescendant : GenericArgument { }
+    public class OtherQualified : Other.IFoo<int> { }
+    public interface IChild<T> : IFoo<T> { }
+    public class ViaInterface : IChild<int> { }
+}
+"#).unwrap();
+    let root_str = crate::clean_path(&root.to_string_lossy());
+    let index = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+        dir: root_str.clone(), ext: "cs".to_string(), threads: 1, respect_git_exclude: false,
+    });
+    let ctx = HandlerContextBuilder::new()
+        .with_def_index(index)
+        .with_server_dir(root_str)
+        .build();
+    for (query, transitive, expected) in [
+        ("IFoo", false, vec!["Direct", "GenericDirect", "GlobalQualified", "OtherQualified", "Unqualified"]),
+        ("IFoo", true, vec!["Deeper", "Derived", "Direct", "GenericDerived", "GenericDirect", "GlobalQualified", "OtherQualified", "QualifiedDerived", "Unqualified", "ViaInterface"]),
+        ("IFoo<int>", false, vec!["Direct", "GlobalQualified", "OtherQualified"]),
+        ("IFoo<int>", true, vec!["Derived", "Direct", "GlobalQualified", "OtherQualified", "QualifiedDerived"]),
+        ("Contracts.IFoo", false, vec!["Direct", "GlobalQualified"]),
+        ("Contracts.IFoo", true, vec!["Derived", "Direct", "GlobalQualified", "QualifiedDerived"]),
+        ("global::Contracts.IFoo<int>", false, vec!["Direct", "GlobalQualified"]),
+        ("IFOO", true, vec!["Deeper", "Derived", "Direct", "GenericDerived", "GenericDirect", "GlobalQualified", "OtherQualified", "QualifiedDerived", "Unqualified", "ViaInterface"]),
+        ("Foo", false, vec![]),
+    ] {
+        let result = handle_xray_definitions(&ctx, &json!({
+            "baseType": query, "baseTypeTransitive": transitive,
+            "kind": ["class"], "maxResults": 100, "autoCorrect": false,
+        }));
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let mut names: Vec<&str> = output["definitions"].as_array().unwrap().iter()
+            .map(|definition| definition["name"].as_str().unwrap()).collect();
+        names.sort_unstable();
+        assert_eq!(names, expected, "{query}, transitive={transitive}: {output}");
+        assert_eq!(output["resultStatus"]["complete"], true, "{output}");
+        assert_eq!(output["summary"]["totalResults"], expected.len(), "{output}");
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn test_base_type_real_typescript_outer_names_and_transitive_edges() {
+    use super::super::handlers_test_utils::HandlerContextBuilder;
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    std::fs::write(root.join("Inheritance.ts"), r#"
+namespace Contracts {
+    export interface IFoo<T> { }
+}
+class Base<T> { }
+class Direct implements Contracts.IFoo<number> { }
+class GenericArgument extends Base<Contracts.IFoo<number>> { }
+interface IFooFactory { }
+class SimilarName implements IFooFactory { }
+class Derived extends Direct { }
+class GenericDirect<T> implements Contracts.IFoo<T> { }
+class GenericDerived extends GenericDirect<number> { }
+class ArgumentDerived extends Base<Direct> { }
+class FalseDescendant extends GenericArgument { }
+"#).unwrap();
+    let root_str = crate::clean_path(&root.to_string_lossy());
+    let index = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+        dir: root_str.clone(), ext: "ts".to_string(), threads: 1, respect_git_exclude: false,
+    });
+    let ctx = HandlerContextBuilder::new()
+        .with_def_index(index)
+        .with_server_dir(root_str)
+        .build();
+    for (query, transitive, expected) in [
+        ("IFoo", false, vec!["Direct", "GenericDirect"]),
+        ("Contracts.IFoo", false, vec!["Direct", "GenericDirect"]),
+        ("IFoo", true, vec!["Derived", "Direct", "GenericDerived", "GenericDirect"]),
+        ("IFoo<number>", false, vec!["Direct"]),
+    ] {
+        let result = handle_xray_definitions(&ctx, &json!({
+            "baseType": query, "baseTypeTransitive": transitive,
+            "kind": ["class"], "maxResults": 100, "autoCorrect": false,
+        }));
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let mut names: Vec<&str> = output["definitions"].as_array().unwrap().iter()
+            .map(|definition| definition["name"].as_str().unwrap()).collect();
+        names.sort_unstable();
+        assert_eq!(names, expected, "{query}, transitive={transitive}: {output}");
+        assert_eq!(output["resultStatus"]["complete"], true, "{output}");
+    }
+}
+
 /// Helper to create a context with a 3-level inheritance chain:
 /// BaseService → MiddleService → ConcreteService
 fn make_transitive_inheritance_ctx() -> HandlerContext {
@@ -716,7 +876,7 @@ fn test_base_type_empty_string_rejected() {
 }
 
 #[test]
-fn test_base_type_substring_matches_generic_interface() {
+fn test_base_type_outer_name_matches_generic_interface() {
     use crate::definitions::*;
 
     let definitions = vec![
@@ -781,7 +941,7 @@ fn test_base_type_substring_matches_generic_interface() {
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = v["definitions"].as_array().unwrap();
-    assert_eq!(defs.len(), 2, "baseType='IRepository' should find both IRepository<Model> and IRepository<Report> via substring. Got: {:?}",
+    assert_eq!(defs.len(), 2, "baseType='IRepository' should find both IRepository<Model> and IRepository<Report> by outer name. Got: {:?}",
         defs.iter().map(|d| d["name"].as_str().unwrap()).collect::<Vec<_>>());
 
     let result2 = handle_xray_definitions(&ctx, &serde_json::json!({
@@ -975,11 +1135,11 @@ fn test_base_type_transitive_generics_still_work_at_seed_level() {
     let names: Vec<&str> = defs.iter().map(|d| d["name"].as_str().unwrap()).collect();
 
     assert!(names.contains(&"GenericImpl"),
-        "Should find GenericImpl (IRepository<Model> matched via seed substring). Got: {:?}", names);
+        "Should find GenericImpl (IRepository<Model> matched by outer name). Got: {:?}", names);
     assert!(names.contains(&"AnotherImpl"),
-        "Should find AnotherImpl (IRepository<Report> matched via seed substring). Got: {:?}", names);
+        "Should find AnotherImpl (IRepository<Report> matched by outer name). Got: {:?}", names);
     assert!(names.contains(&"SubImpl"),
-        "Should find SubImpl (inherits GenericImpl, found via level 1 exact match). Got: {:?}", names);
+        "Should find SubImpl (inherits GenericImpl, found via level 1 outer-name match). Got: {:?}", names);
 }
 
 // ─── F-2 Hint for large transitive hierarchy test ─────────────────
@@ -7161,4 +7321,3 @@ fn test_scope_diagnostic_dispatch_transport_budget() {
         }
     }
 }
-

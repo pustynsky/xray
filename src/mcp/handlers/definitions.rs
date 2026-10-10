@@ -9,6 +9,7 @@
 //! 6. Sorting ([`sort_results`])
 //! 7. Output formatting ([`format_search_output`])
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -1221,13 +1222,13 @@ fn collect_candidates_in_scope(
 
     // Filter by base type (with optional transitive BFS traversal)
     if let Some(ref bt) = args.base_type_filter {
-        let bt_lower = bt.to_lowercase();
+        let bt_lower = normalize_base_type(bt);
         let matching_indices = if args.base_type_transitive {
             collect_transitive_base_type_indices(index, &bt_lower)
         } else {
             let mut indices = Vec::new();
             for (key, idx_list) in &index.base_type_index {
-                if key.contains(&bt_lower) {
+                if base_type_matches(&compact_base_type(key), &bt_lower) {
                     indices.extend(idx_list);
                 }
             }
@@ -2539,24 +2540,57 @@ fn cross_validate_indexes(
     })
 }
 
-/// BFS traversal of the inheritance hierarchy to collect all definition indices
-/// that transitively inherit from a given base type.
-///
-/// Starting from `base_type_name`, finds all classes/structs that directly inherit it,
-/// then finds all classes that inherit from THOSE, etc., up to `MAX_BFS_DEPTH` levels.
-///
-/// Returns a combined Vec of definition indices from all levels.
-///
-/// Level 0 (seed): uses substring matching on base_type_index keys to support
-/// generic types (e.g., "IAccessTable" matches "iaccesstable<model>").
-///
-/// Levels 1+: uses EXACT HashMap lookup (`base_type_index.get(&name)`) to prevent
-/// cascade bugs where a short descendant name (e.g., "service") would substring-match
-/// many unrelated base_type keys ("iservice", "webservice", "serviceprovider", etc.),
-/// pulling thousands of unrelated definitions into the result set.
-///
-/// Known limitation: matching is by name only (no namespace resolution).
-/// Classes with the same name in different namespaces will be conflated.
+fn normalize_base_type(type_name: &str) -> String {
+    compact_base_type(&type_name.to_lowercase()).into_owned()
+}
+
+fn compact_base_type(type_name: &str) -> Cow<'_, str> {
+    if type_name.chars().any(char::is_whitespace) {
+        let mut compacted: String = type_name.chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        if compacted.starts_with("global::") {
+            compacted.drain(..8);
+        }
+        Cow::Owned(compacted)
+    } else {
+        Cow::Borrowed(type_name.strip_prefix("global::").unwrap_or(type_name))
+    }
+}
+
+fn base_type_simple_name(type_name: &str) -> &str {
+    let mut depth = 0_usize;
+    let mut start = 0;
+    for (offset, character) in type_name.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            '.' | ':' if depth == 0 => start = offset + character.len_utf8(),
+            _ => {}
+        }
+    }
+    &type_name[start..]
+}
+
+fn base_type_matches(declared_type: &str, query: &str) -> bool {
+    if !declared_type.contains(query) {
+        return false;
+    }
+    let query_simple = base_type_simple_name(query);
+    let declared_simple = base_type_simple_name(declared_type);
+    let candidate = if query_simple == query { declared_simple } else { declared_type };
+    let candidate = if query_simple.contains('<') {
+        candidate
+    } else {
+        let generic_suffix_len = declared_simple.find('<')
+            .map_or(0, |offset| declared_simple.len() - offset);
+        &candidate[..candidate.len() - generic_suffix_len]
+    };
+    candidate == query
+}
+
+/// Traverse outer base-type names only, with a maximum of 10 inheritance edges.
+/// Descendant lookup is name-only: namespaces and generic substitutions are not resolved.
 fn collect_transitive_base_type_indices(
     index: &crate::definitions::DefinitionIndex,
     base_type_name: &str,
@@ -2566,11 +2600,15 @@ fn collect_transitive_base_type_indices(
     let mut result: Vec<u32> = Vec::new();
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let mut descendants: HashMap<String, Vec<u32>> = HashMap::new();
 
-    // Seed (level 0): substring match to support generic types
-    visited.insert(base_type_name.to_string());
+    let seed_name = base_type_simple_name(base_type_name).split('<').next().unwrap();
+    visited.insert(seed_name.to_string());
     for (key, indices) in &index.base_type_index {
-        if key.contains(base_type_name) {
+        let declared_type = compact_base_type(key);
+        let outer_name = base_type_simple_name(&declared_type).split('<').next().unwrap();
+        descendants.entry(outer_name.to_string()).or_default().extend(indices);
+        if base_type_matches(&declared_type, base_type_name) {
             result.extend(indices);
             for &def_idx in indices {
                 if let Some(def) = index.definitions.get(def_idx as usize) {
@@ -2583,13 +2621,12 @@ fn collect_transitive_base_type_indices(
         }
     }
 
-    // BFS levels 1+: EXACT key matching — prevents cascade bug
     let mut depth = 1;
     while !queue.is_empty() && depth < MAX_BFS_DEPTH {
         let level_size = queue.len();
         for _ in 0..level_size {
             let current_type = queue.pop_front().unwrap();
-            if let Some(indices) = index.base_type_index.get(&current_type) {
+            if let Some(indices) = descendants.get(&current_type) {
                 result.extend(indices);
                 for &def_idx in indices {
                     if let Some(def) = index.definitions.get(def_idx as usize) {
