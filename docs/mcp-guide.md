@@ -690,6 +690,8 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 | `bodyLineStart`     | integer | —       | Clip bodies to start at this absolute file line (1-based, inclusive). Pair with `bodyLineEnd` to slice a large body without truncation |
 | `bodyLineEnd`       | integer | —       | Clip bodies to end at this absolute file line (1-based, inclusive)                        |
 
+`baseType` does not resolve TypeScript base classes produced by function calls, such as `extends mixin(Base)`. Neither `mixin` nor its `Base` argument is treated as a declared base-type name.
+
 ### `containsLine` — Find Containing Method
 
 Find which method/class contains a given line number. No more `read_file` just to figure out "what method is on line 812".
