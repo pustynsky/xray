@@ -2904,18 +2904,23 @@ fn try_reserve_graph_node(
     max_total_nodes: usize,
     total_limit_hit: &mut bool,
 ) -> bool {
-    let reserved = node_count.fetch_update(
-        std::sync::atomic::Ordering::Relaxed,
-        std::sync::atomic::Ordering::Relaxed,
-        |current| (current < max_total_nodes).then_some(current + 1),
-    );
-    if reserved.is_err() {
-        // Set only after an eligible node is found beyond the budget. Merely
-        // filling the cap remains an exact-fit complete result.
-        *total_limit_hit = true;
-        return false;
+    let mut current = node_count.load(std::sync::atomic::Ordering::Relaxed);
+    loop {
+        if current >= max_total_nodes {
+            // Filling the cap remains complete until another eligible node is found.
+            *total_limit_hit = true;
+            return false;
+        }
+        match node_count.compare_exchange_weak(
+            current,
+            current + 1,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        ) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
     }
-    true
 }
 
 /// Shared context for caller/callee tree building.

@@ -5,6 +5,45 @@ use crate::definitions::{
 use std::collections::HashMap;
 
 #[test]
+fn test_reserve_graph_node_exact_fit_and_overflow_boundary() {
+    for (start, cap) in [(0, 0), (0, 2), (usize::MAX - 1, usize::MAX)] {
+        let count = AtomicUsize::new(start);
+        let mut limit_hit = false;
+        for expected in start..cap {
+            assert!(try_reserve_graph_node(&count, cap, &mut limit_hit));
+            assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), expected + 1);
+            assert!(!limit_hit);
+        }
+        assert!(!try_reserve_graph_node(&count, cap, &mut limit_hit));
+        assert!(limit_hit);
+        assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), cap);
+    }
+}
+
+#[test]
+fn test_reserve_graph_node_concurrent_budget() {
+    let count = AtomicUsize::new(0);
+    let cap = 100;
+    let reserved = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8).map(|_| {
+            scope.spawn(|| {
+                let mut successes = 0;
+                let mut limit_hit = false;
+                while try_reserve_graph_node(&count, cap, &mut limit_hit) {
+                    successes += 1;
+                    assert!(!limit_hit);
+                }
+                assert!(limit_hit);
+                successes
+            })
+        }).collect();
+        handles.into_iter().map(|handle| handle.join().unwrap()).sum::<usize>()
+    });
+    assert_eq!(reserved, cap);
+    assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), cap);
+}
+
+#[test]
 fn test_unresolved_status_preserves_existing_resolution_uncertainty() {
     let mut output = json!({ "summary": {} });
     let mut result_status = json!({
