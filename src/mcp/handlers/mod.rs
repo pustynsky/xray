@@ -312,11 +312,11 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "baseType": {
                         "type": "string",
-                        "description": "Filter by base type or implemented interface (substring match — 'IAccessTable' finds IAccessTable<Model>, IAccessTable<Report>, etc.). Omit this parameter when unset; empty strings are invalid."
+                        "description": "Filter by exact outer base-type/interface name, case-insensitive. 'IFoo' matches IFoo<T>/Contracts.IFoo<T>, not Base<IFoo<T>>/IFooFactory. Qualified queries use written qualification; explicit generic arguments must match. Omit this parameter when unset; empty strings are invalid."
                     },
                     "baseTypeTransitive": {
                         "type": "boolean",
-                        "description": "When true with baseType, traverses inheritance chain transitively (BFS, max depth 10). Finds classes that inherit from classes that inherit from the specified baseType. Known limitation: name-only matching (no namespace resolution). (default: false)"
+                        "description": "With baseType, follow outer-type inheritance edges (BFS, max depth 10). Generic arguments create no edges. Descendant lookup is name-only, without namespace resolution or generic substitution. Default: false."
                     },
                     "file": {
                         "type": "array",

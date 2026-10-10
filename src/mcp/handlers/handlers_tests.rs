@@ -398,6 +398,8 @@ fn test_xray_definitions_has_contains_line() {
         base_type_description.contains("Omit this parameter when unset; empty strings are invalid"),
         "baseType schema should tell callers to omit unset optional strings; got: {base_type_description}"
     );
+    assert!(base_type_description.contains("exact outer base-type"), "{base_type_description}");
+    assert!(!base_type_description.contains("substring"), "{base_type_description}");
 
     let contains_line_description = props["containsLine"]["description"].as_str().unwrap();
     assert!(

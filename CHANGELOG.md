@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Kept caller node-budget reservation compatible with the Rust minimum.** An explicit compare-exchange loop replaces the newly deprecated atomic `fetch_update` API without requiring its newer replacement. Exact-fit results remain complete; rejected reservations mark truncation. Boundary and concurrent reservation tests cover the limit.
+
+- **Changed `baseType` to match the outer base-type name exactly.** `xray_definitions baseType="IFoo"` still finds `IFoo<T>` and namespace-qualified declarations, but no longer includes `Base<IFoo<T>>` or `IFooFactory`. Transitive traversal uses outer base-type names at every level, including qualified and generic bases. Matching remains case-insensitive; explicit generic arguments still narrow direct matches. This replaces substring matching without adding a mode switch. Descendant lookup remains name-only, without namespace resolution or generic substitution. TypeScript base classes produced by function calls, such as `extends mixin(Base)`, are not resolved. MCP descriptions stay within the existing token budget.
+
 - **Definition tombstones compact at 50% retained waste.** Stable update and reconciliation batches now bound definition-index memory earlier and, under `--debug-log`, emit a `definitionCompact` phase with elapsed time, before/after counts, removed entries, waste percentage, and Windows process-memory counters.
 
 - **Pinned the VirusTotal badge to the scanned release binary.** The README badge and report link both use the SHA256 of the `v0.8.1` executable instead of combining a latest-release badge with an older report.

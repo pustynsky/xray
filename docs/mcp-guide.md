@@ -659,8 +659,8 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 | `name`              | array&lt;string&gt;  | —       | Substring or multi-element array OR search (e.g., `["AppComponent"]` or `["Foo", "Bar"]`). **BREAKING 2026-04-25:** array required |
 | `kind`              | array&lt;string&gt;  | —       | Filter by definition kind. Multi-element array for multi-kind OR (e.g., `["class", "interface", "enum"]`). Valid: class, interface, method, property, field, enum, struct, record, constructor, delegate, event, enumMember, function, typeAlias, variable, storedProcedure, table, view, sqlFunction, userDefinedType, column, sqlIndex, xmlElement. **BREAKING 2026-04-25:** array required |
 | `attribute`         | string  | —       | Filter by C# attribute or TypeScript decorator                                           |
-| `baseType`          | string  | —       | Filter by base type/interface (substring match — `IAccessTable` finds `IAccessTable<Model>`, etc.) |
-| `baseTypeTransitive`| boolean | false   | With `baseType`, traverses inheritance chain transitively (BFS, max depth 10). Finds classes that inherit from classes that inherit from the specified baseType |
+| `baseType`          | string  | —       | Exact outer base-type/interface name, case-insensitive. `IAccessTable` matches `IAccessTable<Model>` and `Contracts.IAccessTable<Model>`, not `Wrapper<IAccessTable<Model>>` or `IAccessTableFactory`. Qualified queries match the written qualification; explicit generic arguments must match |
+| `baseTypeTransitive`| boolean | false   | With `baseType`, traverses outer base-type names transitively (BFS, max depth 10). Generic arguments do not create inheritance edges. Descendant lookup is name-only, without namespace resolution or generic substitution |
 | `file`              | array&lt;string&gt;  | —       | Filter by file path. Directories resolving under the canonical index root use boundary matching; aliases, unresolved paths, and other terms use substring matching. Multi-element array for OR. **BREAKING 2026-04-25:** array required |
 | `parent`            | array&lt;string&gt;  | —       | Filter by parent class name. Multi-element array for OR. **BREAKING 2026-04-25:** array required |
 | `containsLine`      | integer | —       | Find definition containing a line number (requires `file`). With `includeBody=true`, body is emitted only for innermost definition; parents get `bodyOmitted` |
@@ -689,6 +689,8 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 | `includeUsageCount` | boolean | false   | Add `usageCount` per definition — how many files contain that name in the content index (not a call count; includes comments and strings). Useful for dead-code scans |
 | `bodyLineStart`     | integer | —       | Clip bodies to start at this absolute file line (1-based, inclusive). Pair with `bodyLineEnd` to slice a large body without truncation |
 | `bodyLineEnd`       | integer | —       | Clip bodies to end at this absolute file line (1-based, inclusive)                        |
+
+`baseType` does not resolve TypeScript base classes produced by function calls, such as `extends mixin(Base)`. Neither `mixin` nor its `Base` argument is treated as a declared base-type name.
 
 ### `containsLine` — Find Containing Method
 

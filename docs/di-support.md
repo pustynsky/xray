@@ -135,7 +135,7 @@ local) is not resolved either, for the same reason.
 | Field with explicit interface type (`private readonly IFoo _foo;`) — `_foo.X()` | ✅ | Receiver resolved from field type |
 | Decorator pattern (`class FooDecorator : IFoo`) | ✅ | The decorator implements `IFoo` so it shows up as one of the implementations |
 | Strategy / chain of handlers | ✅ | `xray_definitions baseType=IFoo baseTypeTransitive=true` enumerates every implementation |
-| Generic interfaces (`IRepository<Order>`, `IRepository<Customer>`) | ✅ | `baseType=IRepository` substring-matches both; with `baseTypeTransitive=true` it also walks the generic chain |
+| Generic interfaces (`IRepository<Order>`, `IRepository<Customer>`) | ✅ | `baseType=IRepository` matches the outer interface name in both; with `baseTypeTransitive=true` it also walks descendants by outer base-type name. Generic arguments alone do not count as implementations |
 | Keyed services / `[FromKeyedServices("a")] IBar b` | ✅ for the call itself | Parameter is still `IBar` so the call site is picked up. The key string itself is invisible. |
 | `IServiceProvider.GetRequiredService<IFoo>()` stored in a field | ✅ if assigned to a field | `_foo = sp.GetRequiredService<IFoo>(); ... _foo.X()` works because `_foo` is typed |
 | Castle DynamicProxy / Autofac interceptors | ✅ when the proxy implements the same interface | The proxy still appears as an implementation of `IFoo` in `base_types` |
