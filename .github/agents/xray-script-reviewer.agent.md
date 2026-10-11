@@ -1,9 +1,9 @@
 ---
 name: xray-script-reviewer
-description: "Review Xray installer, PowerShell/bash/Perl tests, git-filter scripts, and filter-affecting attributes for concrete correctness and user-repository risks. Use for script PR, branch, or working-tree review. Returns SHIP, SHIP-WITH-NITS, or BLOCK with validation evidence."
+description: "Review Xray installer, local MCP setup, legacy Git-filter migration, PowerShell/bash/Perl tests, and script attributes for concrete correctness and user-repository risks. Use for script PR, branch, or working-tree review. Returns SHIP, SHIP-WITH-NITS, or BLOCK with validation evidence."
 tools: [read, execute, xray/xray_branch_status, xray/xray_info, xray/xray_grep, xray/xray_fast, xray/xray_git_diff, xray/xray_git_history, xray/xray_git_blame]
 agents: []
-argument-hint: "Review script/filter changes; specify revision and uncommitted scope. For follow-up, supply prior findings, consolidated fixes, and validation evidence."
+argument-hint: "Review script/setup changes; specify revision and uncommitted scope. For follow-up, supply prior findings, consolidated fixes, and validation evidence."
 model: Claude Opus 5 (copilot)
 user-invocable: true
 disable-model-invocation: false
@@ -16,8 +16,8 @@ Protect their repositories and configuration. Do not implement fixes.
 
 ## Scope
 
-Review `scripts/setup-xray.ps1`, `scripts/mcp-filter/*`, related shell/test code,
-installer documentation, and attributes affecting filters or script line endings.
+Review `scripts/setup-xray.ps1`, related `scripts/test-*.ps1` and shell code,
+installer documentation, local MCP setup, legacy migration, and script line endings.
 For mixed diffs, mark Rust/Cargo surfaces as out of scope for this agent. Do not
 invoke other agents or claim approval of code you did not review.
 

@@ -87,9 +87,9 @@ Built on the same [`ignore`](https://crates.io/crates/ignore) crate that backs [
 
 ### Installation
 
-**Option A — automated setup (recommended).** Run the [setup script](scripts/setup-xray.ps1). It downloads the latest `xray.exe`, detects your project's file extensions, and creates the MCP config for the clients you opt into (VS Code Copilot Chat, GitHub Copilot CLI, or both).
+**Option A — automated setup (recommended).** Run the [setup script](scripts/setup-xray.ps1). It downloads the latest `xray.exe`, detects your project's file extensions, and configures both VS Code and GitHub Copilot CLI. Pass `-EnableVSCode` or `-EnableCopilotCli` to select only those clients.
 
-Requirements: Windows x64 and Windows PowerShell 5.1+ or PowerShell 7+. Public releases download directly over HTTPS, so GitHub CLI is not required. Git is optional for a non-Git folder in Visible mode, but required for Git-managed setup and Hidden mode; `-Restore` remains available without Git. Tracked Hidden installs validate their Git-provided shell runtime before changing MCP config files.
+Requirements: Windows x64 and Windows PowerShell 5.1+ or PowerShell 7+. Public releases download directly over HTTPS, so GitHub CLI is not required. Git-managed operations, including restore, require working Git. Non-Git folders remain supported without exclusion protection. No bash/perl filter runtime is needed.
 
 Three ways to launch it. Pick whichever fits. Same script, same parameters.
 
@@ -131,14 +131,13 @@ The script does this:
 
 1. Downloads the latest `xray.exe` from [GitHub releases](https://github.com/pustynsky/xray/releases) to `%LOCALAPPDATA%\xray\`.
 2. Scans the repo and suggests file extensions to index.
-3. Creates the MCP configs you opt into: `.vscode/mcp.json` for VS Code Copilot Chat, `.mcp.json` for GitHub Copilot CLI, or both. Each is prompted separately, or set via `-EnableVSCode` / `-EnableCopilotCli`.
-4. Protects configs from being clobbered by `git pull` and from leaking your local xray entry into commits:
-   - Tracked `.mcp.json` (shared-repo case): per-clone git smudge/clean filter (`xray-mcp`). Keeps `git status` clean and lets upstream changes apply silently.
-   - Tracked `.vscode/mcp.json` (shared-repo case): identical per-clone filter (`xray-vscode-mcp`), bound to the VS Code-shape `servers` container.
-   - Untracked `.vscode/mcp.json`: `git update-index --skip-worktree`.
-   - Untracked files: added to `.git/info/exclude`.
+3. Creates `.vscode/mcp.json` with `servers.xray` and `.github/mcp.json` with `mcpServers.xray`. Both use the same executable and arguments. Other servers remain intact.
+4. Excludes local configs and backups through Git's local `info/exclude`, including in worktrees. If repository rules re-include a config, an untracked per-directory ignore helper protects it. Tracked target files are skipped, not hidden with index flags or filters.
+5. Offers persistent Copilot CLI folder trust interactively (Enter means Yes). `COPILOT_HOME` is respected; `-Force` and non-interactive hosts never grant trust silently.
 
-See the [Installation guide](docs/installation.md) for the smudge/clean filter design, manual setup, Cline configuration, and the Roo Code note (the `-EnableRoo` switch is currently a no-op).
+Ordinary setup leaves the root `.mcp.json` untouched. Legacy entries and filters require explicit migration consent, either an interactive confirmation or `-MigrateLegacy`. `-GitVisibility` is deprecated and accepted with a warning; it no longer selects an installation strategy.
+
+See the [Installation guide](docs/installation.md) for legacy migration, manual setup, Cline configuration, and the Roo Code note (the `-EnableRoo` switch is currently a no-op).
 
 **Option B — pre-built binary (manual).** Grab `xray.exe` from the [GitHub releases page](https://github.com/pustynsky/xray/releases) ([direct link](https://github.com/pustynsky/xray/releases/latest)), drop it into a folder, and follow the [Installation guide](docs/installation.md) for manual VS Code Copilot Chat / Roo Code / Cline setup.
 

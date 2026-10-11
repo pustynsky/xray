@@ -25,32 +25,31 @@ not proof that the current implementation has a defect.
 - Parenthesize expressions such as `-not ($values -contains 'x')`.
 - Check trailing newlines and encoding. Windows PowerShell 5.1 UTF-8 output can
   include a BOM; file consumers and byte-preservation contracts decide what is valid.
-- Re-serializing upstream-managed JSON can change layout or shape. Tracked config
-  must preserve canonical bytes through the filter contract; untracked JSON edits
-  must preserve other servers and relevant array shapes.
+- Re-serializing upstream-managed JSON can change layout or shape. Ordinary setup
+  must refuse tracked targets; untracked JSON edits must preserve other servers,
+  date-looking strings, nulls, and array shapes.
 - Check variables referenced across disabled blocks and early returns for missing
   initialization. Normalize paths before comparing Git and PowerShell output.
-- Installation should be idempotent. Inspect duplicate filter sections, exclude or
-  attribute entries, backups, partial installs, and explicit rollback behavior.
+- Installation should be idempotent. Inspect duplicate excludes, ignore helpers,
+  backups, partial installs, and explicit restore behavior.
 - For `$MyInvocation`, `$PSScriptRoot`, `$PSCommandPath`, or `$args` changes, inspect
   every relevant use under both file-backed and in-memory invocation.
 
-## Filters And Embedded Perl
+## Local Setup And Legacy Migration
 
-- Preserve `clean(smudge(canonical)) == canonical` byte-for-byte, filter idempotency,
-  and embedded/canonical script consistency. Run applicable regression suites.
-- Check `set -eu`, variable initialization, and `exec`: commands after `exec` do not
-  run. A pipefail change needs evidence for the actual command pipeline.
-- Verify snapshot lookup in normal repos and linked worktrees. Shared metadata
-  belongs under the Git common directory where that is the installer contract.
-- Preserve the documented optional-filter failure behavior (`filter.required=false`)
-  and passthrough fallback. Verify both output bytes and Git's observed exit behavior.
-- Filters need raw stdin/stdout handling for CRLF preservation. Replacing raw Perl
-  processing with text tools needs byte-exact evidence on supported platforms.
-- Check `*.sh text eol=lf`, shell quoting, Perl syntax, and strict/warnings usage.
-- Use absolute end anchors such as `\z` when trimming absolute-end content. Check
-  quoted braces and nested JSON instead of assuming regex brace counting is valid.
-- Line-separator changes need LF and CRLF fixtures, plus relevant no-newline/BOM cases.
+- New installs must not register clean/smudge filters, alter root `.mcp.json`,
+  or set index flags. `Visible` and `Hidden` are deprecated local-only aliases.
+- Verify actual Git ignore behavior, not just appended exclude lines. Tracked
+  negations can require a narrow untracked directory-local ignore helper.
+- Legacy cleanup requires `-MigrateLegacy` or affirmative interactive consent.
+  `-Force` must not grant it. Unresolved legacy state must not look like success.
+- Preserve unrelated servers and attributes. Never restore the entire root config
+  from `HEAD` or a backup to remove one legacy entry.
+- Clear both old index flags only during authorized migration. Shared filter
+  metadata belongs under the Git common directory; refuse shared teardown when
+  multiple worktrees exist.
+- Copilot trust must respect `COPILOT_HOME` and existing parent trust. Noninteractive
+  setup must not grant trust, and uninstall must not revoke it.
 
 ## Public Modes And Postconditions
 
@@ -59,23 +58,24 @@ not the requester's test selection. Mark each as tested, argued, or unverified:
 
 - In-memory scriptblock or `iex` execution: a staged file run is not equivalent;
   command-path variables may be null.
-- Downloaded standalone file without sibling filters: verify embedded fallback.
-- Clone-mode script with sibling filters: verify canonical filter selection.
+- Downloaded standalone file: verify no sibling script dependency.
+- Clone-mode script: verify the same local configuration contract.
 - Install from and run inside a linked worktree: verify common-dir resolution.
 
 For each affected mode, consider clean/prior/legacy/partial installs, tracked and
-untracked configs, both config targets, Visible/Hidden transitions, submodules,
+untracked configs, both config targets, explicit client selection, legacy migration,
+deprecated visibility arguments, trust consent, submodules,
 restore, uninstall, and dry-run only where the changed invariant reaches them.
-Check the promised result: Git cleanliness, canonical content, exclude/attribute
-state, preserved unrelated servers, and successful rollback, not just exit zero.
+Check the promised result: Git cleanliness, exact client schema, exclude/attribute
+state, preserved unrelated servers, and safe restore, not just exit zero.
 
 ## Security And Repository Gates
 
 - Verify download source, asset selection, and integrity where changed. Do not
   execute fetched content during review or silently install after integrity failure.
 - Treat repo/install paths and extension arguments as untrusted command inputs.
-  Check PS 5.1 quoting as well as injection into stored Git filter commands/config.
+  Check PS 5.1 quoting and the generated MCP command/arguments.
 - Recursive deletion must prove containment before acting and handle reparse points.
 - User-facing changes require CHANGELOG coverage and the product-name gate;
   inspect changed files outside that gate's enumerated paths separately.
-  New Markdown needs justification; preserve shell attributes and embedded-copy sync.
+  New Markdown needs justification; preserve script line-ending attributes.

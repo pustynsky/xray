@@ -1,8 +1,16 @@
 # Design: Per-clone xray entry in `.mcp.json` via git smudge/clean filter
 
-Status: proposed
+Status: retired. This is the historical design, not the current installer.
 Owner: setup-xray.ps1
 Audience: maintainers of `setup-xray.ps1` and reviewers
+
+New installations use local `.github/mcp.json` and `.vscode/mcp.json`; they never
+install these filters. Detection and explicitly authorized cleanup remain for
+legacy installations. See [the current installation guide](installation.md#local-mcp-configuration-and-legacy-migration).
+
+The CLI discovery assumptions below are historical too. Current Copilot CLI
+supports both `.mcp.json` and `.github/mcp.json`, with the root definition taking
+precedence when a server name appears in both.
 
 ## Problem
 

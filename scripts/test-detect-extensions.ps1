@@ -135,7 +135,6 @@ function Invoke-InstallerFixture {
         InstallDir = $Install
         SkipDownload = $true
         EnableVSCode = $true
-        GitVisibility = 'Visible'
     }
     if ($Force) { $parameters.Force = $true }
     if ($Extensions) { $parameters.Extensions = $Extensions }
@@ -574,7 +573,7 @@ foreach ($dialogCase in $incompleteDialogCases) {
         Assert-Equal -Actual $dialogResult.ExitCode -Expected 1 -Label "T17 $($dialogCase.Label) exits with error"
         Assert-Equal -Actual $diagnostic.Contains($dialogCase.Message) -Expected $true -Label "T17 $($dialogCase.Label) explains failure"
         Assert-Equal -Actual (Test-Path (Join-Path $fixture.Repo '.vscode/mcp.json')) -Expected $false -Label "T17 $($dialogCase.Label) leaves VS Code unconfigured"
-        Assert-Equal -Actual (Test-Path (Join-Path $fixture.Repo '.mcp.json')) -Expected $false -Label "T17 $($dialogCase.Label) leaves CLI unconfigured"
+        Assert-Equal -Actual (Test-Path (Join-Path $fixture.Repo '.github\mcp.json')) -Expected $false -Label "T17 $($dialogCase.Label) leaves CLI unconfigured"
     }
     finally { Remove-TempDir $fixture.Root }
 }
