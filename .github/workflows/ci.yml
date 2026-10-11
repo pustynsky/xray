@@ -19,8 +19,19 @@ jobs:
         shell: [powershell, pwsh]
     steps:
       - uses: actions/checkout@v4
-      - name: Test local MCP setup and legacy migration
-        shell: ${{ matrix.shell }}
+      - name: Test local MCP setup and legacy migration (PowerShell 5.1)
+        if: matrix.shell == 'powershell'
+        shell: powershell
+        run: |
+          & .\scripts\test-mcp-setup.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\scripts\test-detect-extensions.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\scripts\test-setup-dependencies.ps1
+          exit $LASTEXITCODE
+      - name: Test local MCP setup and legacy migration (PowerShell 7)
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
         run: |
           & .\scripts\test-mcp-setup.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

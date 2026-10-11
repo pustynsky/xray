@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Fixed MCP setup workflow validation.** The Windows matrix now selects conditional steps with explicit PowerShell 5.1 and 7 shells. GitHub does not allow the matrix context in a step's `shell` expression.
+
 - **Hardened local MCP setup and uninstall.** Concurrent config changes now block empty-file deletion and retain the backup. JSON serialization refuses truncation before overwriting configs or backups. New directory-local ignore rules no longer hide nested files with the same name. The dependency test suite explicitly exits successfully when its assertions pass, including when invoked in the same process by CI.
 
 - **Moved MCP setup to local CLI and VS Code configs.** Setup now configures both clients by default, or only those selected with `-EnableVSCode` / `-EnableCopilotCli`. It writes `.github/mcp.json` and `.vscode/mcp.json`, preserves other servers, excludes configs and backups locally, and refuses tracked targets. No new Git clean/smudge filters or index flags are installed. Legacy root entries and Git protection require explicit migration consent (`-MigrateLegacy` or an interactive confirmation); `-Force` does not grant it. `-GitVisibility` is deprecated. Interactive setup offers persistent Copilot CLI trust, respecting `COPILOT_HOME`, preserving settings, and backing up changed config. Isolated setup, trust, migration, extension and dependency tests run on PowerShell 5.1 and 7 in CI.
