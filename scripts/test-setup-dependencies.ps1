@@ -157,7 +157,7 @@ function Invoke-SetupProcess {
 
 $scriptPath = Join-Path $PSScriptRoot 'setup-xray.ps1'
 if (-not (Test-Path $scriptPath)) { throw "setup-xray.ps1 not found: $scriptPath" }
-$Script:GitExe = (Get-Command git -CommandType Application -ErrorAction Stop).Source
+$Script:GitExe = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
 $Script:PowerShellExe = (Get-Process -Id $PID).Path
 $minimalPath = $PSHOME
 $root = New-TempDirectory
@@ -169,6 +169,8 @@ try {
     New-Item -ItemType File -Path $isolatedGlobalConfig -Force | Out-Null
     $env:GIT_CONFIG_GLOBAL = $isolatedGlobalConfig
     $env:GIT_CONFIG_NOSYSTEM = '1'
+
+    Assert-True -Condition ($Script:GitExe -is [string] -and (Test-Path -LiteralPath $Script:GitExe -PathType Leaf)) -Label 'T0 Git resolves to one executable when multiple PATH entries match'
 
     # Load the pure download helpers without executing setup's imperative body.
     $tokens = $null
@@ -319,7 +321,7 @@ finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-$expectedAssertions = 16
+$expectedAssertions = 17
 if (($Script:Passed + $Script:Failed) -ne $expectedAssertions) {
     $Script:Failed++
     Write-Host "FAIL  expected $expectedAssertions assertions, ran $($Script:Passed + $Script:Failed - 1)" -ForegroundColor Red

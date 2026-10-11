@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Fixed MCP setup workflow validation.** The Windows matrix now selects conditional steps with explicit PowerShell 5.1 and 7 shells. GitHub does not allow the matrix context in a step's `shell` expression.
+- **Fixed MCP setup workflow validation.** The Windows matrix now selects conditional steps with explicit PowerShell 5.1 and 7 shells. GitHub does not allow the matrix context in a step's `shell` expression. Dependency fixtures select one Git executable when several runner PATH entries match.
 
 - **Hardened local MCP setup and uninstall.** Concurrent config changes now block empty-file deletion and retain the backup. JSON serialization refuses truncation before overwriting configs or backups. New directory-local ignore rules no longer hide nested files with the same name. The dependency test suite explicitly exits successfully when its assertions pass, including when invoked in the same process by CI.
 
