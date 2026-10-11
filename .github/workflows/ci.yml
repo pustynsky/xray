@@ -10,6 +10,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  setup:
+    name: MCP setup (${{ matrix.shell }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test local MCP setup and legacy migration
+        shell: ${{ matrix.shell }}
+        run: |
+          & .\scripts\test-mcp-setup.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\scripts\test-detect-extensions.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\scripts\test-setup-dependencies.ps1
+          exit $LASTEXITCODE
+
   clippy:
     name: Clippy (${{ matrix.os }})
     strategy:
@@ -101,4 +120,3 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-

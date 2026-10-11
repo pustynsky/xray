@@ -40,20 +40,13 @@ $errors = $null
 Enumerate current `scripts/**/test-*.ps1` suites and reconcile their scope
 before selecting them. This table is a starting map, not a fixed suite count.
 Run suites with `pwsh -NoProfile -File <suite>` after verifying temporary isolation.
+For setup changes, run the applicable suites on Windows PowerShell 5.1 as well.
 
 | Suite | Run when the diff touches |
 | --- | --- |
-| `test-roundtrip.ps1` | Filters, fixtures, line endings, or filter-affecting attributes |
-| `test-e2e.ps1` | Install, restore, uninstall, or `.mcp.json` lifecycle |
-| `test-vscode-tracked.ps1` | Install/restore/uninstall shared by both config targets, VS Code config, or the second filter |
-| `test-standalone-install.ps1` | Standalone bootstrap, embedded fallback, filter installation, or Git-config quoting |
+| `test-mcp-setup.ps1` | Local CLI/VS Code configuration, tracked-file protection, excludes, trust, explicit legacy migration, restore/uninstall, worktrees, or standalone/in-memory setup |
 | `test-detect-extensions.ps1` | Extension detection, suggested lists, confirmation prompts, or manual extension input |
-| `test-setup-dependencies.ps1` | Public download fallback, dependency preflight, Git validation, or filter runtime checks |
-| `test-embedded-sync.ps1` | Canonical or embedded filter edits |
-| `test-worktree.ps1` | Stored filter command or runtime Git-dir resolution |
-| `test-install-from-worktree.ps1` | Common-dir resolution, shared attributes, or filter installation paths |
-| `test-visible-mode.ps1` | Visibility defaults/transitions, excludes, or skip-worktree handling |
-| `test-plain-uninstall.ps1` | Untracked config cleanup or non-filter JSON rewriting |
+| `test-setup-dependencies.ps1` | Public download fallback, dependency preflight, Git validation, or deprecated visibility arguments |
 
 Include new suites whose scope matches the diff. Report only observed pass counts.
 For a changed public invocation contract, test one affected documented launch form

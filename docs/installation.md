@@ -12,8 +12,8 @@ The [`setup-xray.ps1`](../scripts/setup-xray.ps1) script automates the entire in
 
 - Windows x64 with Windows PowerShell 5.1+ or PowerShell 7+.
 - Public releases download directly over HTTPS; GitHub CLI (`gh`) is not required. An authenticated `gh` installation is used only as a fallback for private or restricted repositories supplied through `-GithubRepo`.
-- Git is optional for a non-Git folder in Visible mode. A working Git executable is required for Git-managed setup, `-GitVisibility Hidden`, and uninstall operations that touch Git state. `-Restore` remains available when Git is broken or unavailable.
-- Tracked Hidden configs use a Git clean/smudge filter. Git for Windows supplies its `bash`/`perl` runtime; setup verifies the actual filter through Git and rolls back before changing MCP config if that runtime is unavailable.
+- Git-managed operations, including restore, require working Git. A non-Git folder can still be configured, but setup reports that Git exclusion protection is unavailable.
+- No bash/perl filter runtime is needed. New installations never install Git filters or hide tracked changes with index flags.
 - VS Code and GitHub Copilot CLI do not need to be installed while running setup; the script only writes their selected config files.
 
 Three ways to launch it. Pick whichever fits — they all run the same script and accept the same parameters.
@@ -64,7 +64,7 @@ cd xray
 >
 > **Target a specific repo non-interactively.** Pass `-RepoPath <path>` to skip the path prompt.
 >
-> **Skip the client prompts.** Add `-EnableCopilotCli` and/or `-EnableVSCode` to opt clients in non-interactively.
+> **Select clients.** Both are configured by default. Add `-EnableCopilotCli` or `-EnableVSCode` to configure only the selected clients.
 >
 > **`-UseBasicParsing`.** Required on Windows PowerShell 5.1 (the default `powershell.exe` on Windows) — without it, `Invoke-WebRequest` uses the IE rendering engine which blocks with a security prompt and can dump the script's `.SYNOPSIS` block to the console. It's a no-op on PowerShell 7+.
 
@@ -73,16 +73,13 @@ cd xray
 1. Downloads the latest `xray.exe` from [GitHub releases](https://github.com/pustynsky/xray/releases) to `%LOCALAPPDATA%\xray\`
 2. Scans the target repository and detects file extensions (shows the top 20, selects frequent extensions, and retains detected structural files below the normal threshold)
 3. Creates MCP configuration:
-   - `.vscode/mcp.json` — for **VS Code GitHub Copilot Chat** (agent mode, with `-EnableVSCode`)
-   - `.mcp.json` — for **GitHub Copilot CLI** (with `-EnableCopilotCli`)
+   - `.vscode/mcp.json` — for **VS Code GitHub Copilot Chat**
+   - `.github/mcp.json` — for **GitHub Copilot CLI**
    - Roo Code (`.roo/mcp.json`) — **not** written; see the Roo note below
-4. Protects configs from accidental git push:
-   - Tracked `.mcp.json` (shared repo case) → per-clone **git smudge/clean filter** (`xray-mcp`) so `git status` stays clean and `git pull` succeeds silently when upstream changes the file. See [Shared repo with a tracked `.mcp.json`](#shared-repo-with-a-tracked-mcpjson-smudgeclean-filter) below.
-   - Tracked `.vscode/mcp.json` (shared repo case) → identical per-clone smudge/clean filter (`xray-vscode-mcp`) — same hazard, same fix, just bound to the VS Code-shape `servers` container.
-   - Untracked `.vscode/mcp.json` → `git update-index --skip-worktree` (local edits invisible to git; safe because this file is typically untracked).
-   - Untracked files → `.git/info/exclude` (local gitignore)
+4. Keeps generated configs and backups local through Git's `info/exclude`, resolved with `git rev-parse --git-path info/exclude` for ordinary clones and worktrees. If repository rules re-include a config, setup creates a narrow, untracked per-directory ignore helper. The shared `.gitignore` is never modified.
+5. Offers persistent Copilot CLI folder trust interactively. Enter means Yes. Existing trust and unrelated settings are preserved; `COPILOT_HOME` overrides the default home directory. Non-interactive runs and `-Force` skip granting trust.
 
-All xray tools are enabled by default **except** `xray_edit` (opt-in for safety).
+The CLI definition enables all advertised Xray tools with `tools: ["*"]`. This is separate from CLI tool approval permissions. The VS Code definition has no `tools` field.
 
 **Options:**
 
@@ -96,7 +93,7 @@ All xray tools are enabled by default **except** `xray_edit` (opt-in for safety)
 # Custom install location
 .\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -InstallDir C:\Tools
 
-# Overwrite existing configs without asking
+# Update local configs non-interactively, without granting trust or migration
 .\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -Force
 
 # Use existing xray from a specific location
@@ -107,7 +104,7 @@ After setup, **reopen the repo folder in VS Code** to activate the MCP server.
 
 > **Cline users:** the script creates a config for Copilot by default. For Cline, see [Section 3c](#3c-cline-vs-code-extension--global-config-with-workspace-auto-detection) below for the global config format.
 >
-> **Roo Code users:** the `.roo/mcp.json` install path is currently disabled in `setup-xray.ps1`. The `-EnableRoo` switch is accepted as a no-op for backward compatibility but does nothing. To use xray with Roo, copy the `xray` entry from the generated `.mcp.json` into `.roo/mcp.json` by hand.
+> **Roo Code users:** the `.roo/mcp.json` install path is disabled. `-EnableRoo` is accepted with a warning but does nothing. Use the manual Roo example below; its format differs from the CLI definition.
 
 ---
 
@@ -123,69 +120,122 @@ The script performs a locked release build, terminates all running `xray.exe` pr
 
 ---
 
-## Shared repo with a tracked `.mcp.json` (smudge/clean filter)
+## Local MCP configuration and legacy migration
 
-When the target repo already tracks `.mcp.json` upstream (the common case for shared engineering repos that publish team-wide MCP servers like a notes store, an issue-tracker bridge, Playwright, etc.), running the installer with `-EnableCopilotCli` wires a **per-clone git smudge/clean filter** instead of using `skip-worktree`.
+### Configuration and Git protection
 
-### Install
+CLI uses `mcpServers.xray` in `.github/mcp.json`, with `type: "stdio"` and
+`tools: ["*"]`. VS Code uses `servers.xray` in `.vscode/mcp.json`, with the same
+type, executable and arguments, plus the informational `"//"` string property.
+The VS Code entry has no `tools` field.
+
+Setup rebuilds only the Xray definition. Other servers and root settings remain.
+The installer owns `command` and `args`; manual extra launch flags are replaced
+on rerun. Invalid JSON, an incompatible container, or nesting beyond the
+supported serialization depth of 100 is reported and left untouched, including
+any existing backup. Use JSON rather than JSONC for consistent behavior on PowerShell 5.1
+and 7.
+
+Tracked target configs or backups are skipped, even with `-Force`.
+`info/exclude` does not protect tracked files, and setup never untracks them.
+If any selected client cannot be configured, the summary reports an incomplete
+setup and exits nonzero. Successfully configured clients remain available.
+
+The local ignore helper is needed when a higher-priority repository rule such
+as `!**/.vscode/mcp.json` overrides a per-file exclude. Setup verifies both the
+config and helper are ignored; it refuses a tracked helper or ineffective rule
+instead of writing an unprotected config. New helper rules are anchored to that
+directory, so they do not hide unrelated nested files with the same name.
+
+### Copilot CLI trust
+
+Workspace MCP discovery requires folder trust. Setup checks `trustedFolders`
+in `$HOME\.copilot\config.json`, or under `COPILOT_HOME` when set. Existing trust,
+including a trusted parent directory, needs no prompt. Otherwise interactive
+setup asks with Yes as the default; declining leaves the config unchanged.
+Non-interactive setup never grants trust, including with `-Force`.
+
+Changes preserve unrelated settings, create a backup of an existing config,
+and use an atomic write with a concurrent-change check. Malformed JSON or an
+invalid trust list is reported without overwriting it or logging credentials.
+Trust failure does not fail the MCP installation; the summary reports it
+separately. This is not VS Code Workspace Trust or Git `safe.directory`.
+
+Verify from the target repository:
 
 ```powershell
-pwsh -File C:\path\to\xray\scripts\setup-xray.ps1 `
-    -RepoPath C:\Repos\YourSharedRepo `
-    -EnableCopilotCli `
-    -Extensions cs,csproj,xml,manifestxml,json,md,ps1,sql,yaml,yml
+copilot mcp list
+copilot mcp get xray
 ```
 
-### Behaviour after install
+### Explicit legacy migration
 
-| Operation | Result |
-| --------- | ------ |
-| `git status` | clean — your local `xray` entry is invisible to git |
-| `git pull` (upstream changed `.mcp.json`) | succeeds silently — no "would be overwritten" abort |
-| `git add` / `git commit` of `.mcp.json` | produces an upstream-clean blob; your `xray.exe` path can never leak upstream |
-| `git stash` / `git checkout` / `git reset --hard` / `git rebase` | preserves the entry in the working tree |
+Ordinary setup leaves the root `.mcp.json` untouched. It detects root Xray
+entries, `_xrayMcpMarker`, old filters, attributes, filter directories, and
+index flags. A root definition can override the new CLI entry, so leaving
+legacy state behind produces a warning and an incomplete setup result.
 
-The trade-off: the `xray` entry inside `.mcp.json` is rendered as a single physical line tagged with a `_xrayMcpMarker` field. Other servers in the file keep their original formatting verbatim.
-
-### Files written into the target repo
-
-| Path | Purpose |
-| ---- | ------- |
-| `.git/xray-mcp/clean.sh` | per-clone filter that strips the xray entry on `git add` |
-| `.git/xray-mcp/smudge.sh` | per-clone filter that re-injects it on checkout/pull |
-| `.git/xray-mcp/snapshot.txt` | the byte-exact xray entry to inject |
-| `.git/info/attributes` | `+ ".mcp.json filter=xray-mcp"` |
-| `.git/config` | `+ [filter "xray-mcp"]` section, `required = false` |
-| `.mcp.json` | one-line xray entry inserted as the first `mcpServers` member |
-
-Nothing is written outside `.git/` and the `.mcp.json` working-tree file. No commits, no history rewrites.
-
-### Uninstall — full rollback
+Interactive setup asks before cleanup, with No as the default. Automation must
+authorize it explicitly:
 
 ```powershell
-pwsh -File C:\path\to\xray\scripts\setup-xray.ps1 -RepoPath C:\Repos\YourSharedRepo -Uninstall
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -MigrateLegacy -Force
 ```
 
-| Flag | Effect |
-| ---- | ------ |
-| `-DryRun` | preview the plan without making changes |
-| `-KeepBinary` | leave `xray.exe` in `%LOCALAPPDATA%\xray\` |
-| `-KeepBackups` | keep `.mcp.json.bak` files |
+`-MigrateLegacy` also authorizes removing a manually configured root server
+named `xray`. Read the reported plan before granting consent. `-Force` alone
+does not authorize root edits or clearing index flags.
 
-Uninstall removes every artifact the installer added — the filter scripts, the `.git/config` section, the `.git/info/attributes` line, the xray snapshot inside `.mcp.json`, and (on legacy installs) any `skip-worktree` / `assume-unchanged` flag and `.git/info/exclude` entries. After it runs, `git ls-files -v .mcp.json` shows `H` (no flags) and `git diff HEAD -- .mcp.json` is empty — the file is byte-identical to the upstream blob. The same uninstall flow also tears down xray entries from `.vscode/mcp.json`, `.roo/mcp.json`, and any other MCP host configs the installer touched on prior runs.
+After the selected new configs are ready, migration backs up the legacy config,
+removes only the old Xray entry, clears authorized index flags, and removes
+the corresponding filter registration, attributes and directory. Other
+servers, settings and attributes are preserved. The old single-line snapshot
+form is removed without reformatting the upstream config when possible.
+The script never restores the whole root file from `HEAD` or an old backup.
 
-### Why a filter and not `skip-worktree`?
+New setup supports Git worktrees. **Legacy filter removal is refused while
+multiple worktrees share its metadata.** Coordinate cleanup in a single-worktree
+clone before retrying; setup does not edit other worktrees or tear down a filter
+they may still depend on. Cleanup failures are reported without claiming a
+successful migration.
 
-Earlier versions of the installer used `git update-index --skip-worktree`. That hides the local change from `git status` but causes `git pull` to abort with `error: Your local changes to .mcp.json would be overwritten by merge` whenever upstream touches the file — and recovery requires non-obvious manual steps (lift skip-worktree, stash, pull, pop, re-apply). Full rationale and the alternatives considered: [docs/mcp-filter-design.md](mcp-filter-design.md).
+`-GitVisibility Visible` and `Hidden` are deprecated aliases for the same
+local-only setup, accepted with a warning. Neither recreates the old mechanism.
+The [retired filter design](mcp-filter-design.md) is kept as historical context.
+
+### Restore and uninstall
+
+`-Restore` restores eligible local CLI and VS Code backups, not the root config.
+Unchanged reruns do not rewrite configs or refresh backups.
+
+```powershell
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -Restore
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -Uninstall -DryRun
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -Uninstall -KeepBinary
+```
+
+Uninstall removes local Xray entries, preserves other servers, and deletes
+an otherwise empty generated config. `-KeepBinary` retains the executable;
+`-KeepBackups` retains local backups. Existing configs with other servers stay
+locally excluded. If a config changes during uninstall, setup refuses to delete
+or overwrite it and retains the backup. Directory-local ignore helpers remain
+in place so existing unrelated rules are preserved.
+It does not revoke Copilot trust or modify Roo/global configs.
+Legacy cleanup during uninstall still requires migration consent:
+
+```powershell
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -Uninstall -MigrateLegacy -KeepBinary
+```
 
 ### Regression tests
 
-The filter behaviour is covered by two PowerShell test suites in [scripts/mcp-filter/](../scripts/mcp-filter):
-
-- `test-roundtrip.ps1` — byte-exact `clean → smudge → clean` round-trip across 5 JSON shapes plus a synthetic CRLF case
-- `test-e2e.ps1` — full lifecycle in a temp clone: install → upstream change → pull → stash/pop → reset --hard → branch switch → uninstall, asserting `git status` clean and xray persistence at each step
-
-Both run on Windows with Git for Windows (perl from `C:\Program Files\Git\usr\bin\` is the only external dependency).
+[test-mcp-setup.ps1](../scripts/test-mcp-setup.ps1) exercises local configs,
+Git ignore precedence, tracked and malformed inputs, atomic writes, trust,
+worktrees, standalone execution and explicit legacy cleanup in isolated
+temporary directories. It never modifies actual user or repository configs.
+[Extension](../scripts/test-detect-extensions.ps1) and
+[dependency](../scripts/test-setup-dependencies.ps1) regression tests remain.
+CI runs all three on Windows PowerShell 5.1 and PowerShell 7.
 
 ---
 
