@@ -11,6 +11,8 @@
     4. Excludes generated configs and backups from Git locally. Tracked files
        are never changed by ordinary setup; no Git filters are installed.
     5. Offers persistent Copilot CLI folder trust in interactive mode.
+    6. Creates a local copilot-xray.cmd launcher when a root .mcp.json would
+       take precedence over .github/mcp.json, without changing the root config.
     Legacy root configs and Git protection are cleaned up only with explicit
     migration consent. Roo Code setup remains disabled.
 
@@ -76,6 +78,9 @@
     Use this to undo the most recent setup-xray run.
     Tracked target files are not restored. Ordinary setup creates a backup only
     when changing an existing configuration; an unchanged rerun makes no writes.
+    Removes the managed CLI launcher if the restored CLI config has no Xray entry
+    or the root .mcp.json is gone. Launcher cleanup errors do not prevent the
+    other client from being restored, but restore exits nonzero.
     If no eligible .bak exists when -Restore is invoked,
     the script exits with an error.
 
@@ -87,6 +92,7 @@
         (no upstream content), delete it.
       - Legacy root entries, filters and index flags require migration consent.
       - Delete .bak files (unless -KeepBackups).
+      - Remove the managed, untracked copilot-xray.cmd launcher.
       - Delete the xray.exe binary in -InstallDir (unless -KeepBinary).
     Idempotent: re-running on a clean state is a no-op.
     Does NOT touch:
@@ -425,7 +431,9 @@ $Script:XrayVisibleWarning = 'xray MCP entry added by setup-xray.ps1 (embeds a p
 function ConvertFrom-SetupJson {
     param([Parameter(Mandatory)] [string]$Text, [Parameter(Mandatory)] [string]$Path)
 
-    $parameters = @{ InputObject = $Text; ErrorAction = 'Stop' }
+    # Copilot CLI prefixes its managed config with // header comments.
+    $jsonText = $Text -replace '\A(?:\s*//[^\r\n]*(?:\r\n|\r|\n|\z))*', ''
+    $parameters = @{ InputObject = $jsonText; ErrorAction = 'Stop' }
     if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) {
         $parameters.DateKind = 'String'
     }
@@ -433,7 +441,7 @@ function ConvertFrom-SetupJson {
     try {
         if ($useTokenReader) {
             # PowerShell 7.0-7.4 otherwise converts date-looking strings to dates.
-            $reader = [Newtonsoft.Json.JsonTextReader]::new([IO.StringReader]::new($Text))
+            $reader = [Newtonsoft.Json.JsonTextReader]::new([IO.StringReader]::new($jsonText))
             try {
                 $reader.DateParseHandling = [Newtonsoft.Json.DateParseHandling]::None
                 # The reader counts the root object; the serializer starts at depth zero.
@@ -713,6 +721,92 @@ function Protect-McpPath {
     if (-not (Test-GitIgnoresPath -RepoRoot $RepoRoot -RelativePath $RelativePath)) {
         Add-DirectoryGitignoreOverride -RepoRoot $RepoRoot -RelativePath $RelativePath -ExcludePath $ExcludePath
     }
+}
+
+function Get-CopilotLauncherText {
+    return (@(
+        '@echo off'
+        ('@rem ' + $Script:XrayMcpMarker)
+        'setlocal DisableDelayedExpansion'
+        'if not exist "%~dp0.github\mcp.json" ('
+        '    echo Xray MCP configuration was not found. Run setup-xray.ps1 again. 1>&2'
+        '    exit /b 1'
+        ')'
+        'copilot -C "%~dp0." --additional-mcp-config "@%~dp0.github\mcp.json" %*'
+        'exit /b %errorlevel%'
+    ) -join "`r`n") + "`r`n"
+}
+
+function Set-CopilotLauncher {
+    param([string]$RepoRoot, [bool]$IsGitRepo, [string]$ExcludePath)
+
+    $relative = 'copilot-xray.cmd'
+    $path = Join-Path $RepoRoot $relative
+    if ($IsGitRepo -and (Test-IsTrackedFile -RepoRoot $RepoRoot -RelativePath $relative)) {
+        throw "$relative is tracked by Git. Setup will not modify it or change the index."
+    }
+    $original = if (Test-Path -LiteralPath $path) { [IO.File]::ReadAllText($path) } else { $null }
+    if ($null -ne $original -and $original -notmatch ('(?m)^@rem ' + [Regex]::Escape($Script:XrayMcpMarker) + '\r?$')) {
+        throw "Not overwriting an unrecognized launcher: $path."
+    }
+    if ($IsGitRepo) {
+        Protect-McpPath -RepoRoot $RepoRoot -RelativePath $relative -ExcludePath $ExcludePath
+    }
+    $changed = Write-SetupText -Path $path -Text (Get-CopilotLauncherText) -OriginalText $original
+    if ($IsGitRepo -and -not (Test-GitIgnoresPath -RepoRoot $RepoRoot -RelativePath $relative)) {
+        throw "Git exclusion verification failed for $relative."
+    }
+    return $(if ($changed) { 'Configured' } else { 'Up to date' })
+}
+
+function Remove-CopilotLauncherExclude {
+    param([string]$RepoRoot, [string]$ExcludePath)
+
+    if (-not (Test-Path -LiteralPath $ExcludePath)) { return }
+    $excludeText = [IO.File]::ReadAllText($ExcludePath)
+    if (@($excludeText -split "`r?`n") -cnotcontains '/copilot-xray.cmd') { return }
+
+    $worktrees = Invoke-SetupGit -RepoRoot $RepoRoot -Arguments @('worktree', 'list', '--porcelain', '-z')
+    foreach ($record in (($worktrees.Lines -join "`n") -split "`0")) {
+        if ($record.StartsWith('worktree ')) {
+            $worktreeRoot = $record.Substring(9)
+            if (Test-Path -LiteralPath (Join-Path $worktreeRoot 'copilot-xray.cmd')) {
+                Write-Verbose "Kept the shared launcher exclude rule for worktree: $worktreeRoot"
+                return
+            }
+        }
+    }
+    [void](Remove-TextLineNoBom -Path $ExcludePath -Line '/copilot-xray.cmd')
+}
+
+function Remove-CopilotLauncher {
+    param([string]$RepoRoot, [bool]$IsGitRepo, [string]$ExcludePath, [switch]$DryRun)
+
+    $relative = 'copilot-xray.cmd'
+    $path = Join-Path $RepoRoot $relative
+    if ($IsGitRepo -and (Test-IsTrackedFile -RepoRoot $RepoRoot -RelativePath $relative)) {
+        throw "Not removing a tracked launcher: $path."
+    }
+    if (-not (Test-Path -LiteralPath $path)) {
+        if ($IsGitRepo -and -not $DryRun) {
+            Remove-CopilotLauncherExclude -RepoRoot $RepoRoot -ExcludePath $ExcludePath
+        }
+        return 'Not present'
+    }
+    $original = [IO.File]::ReadAllText($path)
+    if ($original -notmatch ('(?m)^@rem ' + [Regex]::Escape($Script:XrayMcpMarker) + '\r?$')) {
+        Write-Warning "Not removing an unrecognized launcher: $path."
+        return 'Not managed'
+    }
+    if ($DryRun) { return 'Would remove' }
+    if ([IO.File]::ReadAllText($path) -cne $original) {
+        throw "File changed during setup: $path. Retry rather than deleting concurrent changes."
+    }
+    Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+    if ($IsGitRepo) {
+        Remove-CopilotLauncherExclude -RepoRoot $RepoRoot -ExcludePath $ExcludePath
+    }
+    return 'Removed'
 }
 
 function Get-LegacyMcpState {
@@ -1091,6 +1185,7 @@ $excludePath = if ($isGitRepo) { Get-ResolvedGitPath -RepoRoot $RepoPath -Name '
 
 if ($Restore) {
     $restored = $false
+    $restoreFailed = $false
     foreach ($target in $targets) {
         if ($isGitRepo -and ((Test-IsTrackedFile -RepoRoot $RepoPath -RelativePath $target.Relative) -or
             (Test-IsTrackedFile -RepoRoot $RepoPath -RelativePath "$($target.Relative).bak"))) {
@@ -1099,10 +1194,28 @@ if ($Restore) {
         }
         if (Test-Path -LiteralPath "$($target.Path).bak") {
             if ($isGitRepo) { Protect-McpPath -RepoRoot $RepoPath -RelativePath $target.Relative -ExcludePath $excludePath }
-            if (Restore-McpJson -Path $target.Path) { $restored = $true }
+            if (Restore-McpJson -Path $target.Path) {
+                $restored = $true
+                if ($target.Client -eq 'Copilot CLI') {
+                    $document = Read-SetupJson -Path $target.Path
+                    $container = $document.Value.PSObject.Properties['mcpServers']
+                    $hasXray = $container -and $container.Value -is [PSCustomObject] -and $container.Value.PSObject.Properties['xray']
+                    if (-not $hasXray -or -not (Test-Path -LiteralPath (Join-Path $RepoPath '.mcp.json') -PathType Leaf)) {
+                        try {
+                            $status = Remove-CopilotLauncher -RepoRoot $RepoPath -IsGitRepo $isGitRepo -ExcludePath $excludePath
+                            Write-Host "CLI launcher: $status"
+                        }
+                        catch {
+                            Write-Warning ("Could not clean up Copilot CLI launcher during restore: {0}" -f $_.Exception.Message)
+                            $restoreFailed = $true
+                        }
+                    }
+                }
+            }
         }
     }
     if (-not $restored) { Write-Error 'No eligible .bak files found. Nothing was restored.'; exit 1 }
+    if ($restoreFailed) { Write-Warning 'Restore incomplete. Eligible client configs were restored; see launcher cleanup warnings above.'; exit 1 }
     exit 0
 }
 
@@ -1144,6 +1257,10 @@ if ($Uninstall) {
             }
             $status = Remove-XrayServerEntry -Path $target.Path -ContainerKey $target.Container -DryRun:$DryRun
             Write-Host "$($target.Client): $status"
+            if ($target.Client -eq 'Copilot CLI') {
+                $status = Remove-CopilotLauncher -RepoRoot $RepoPath -IsGitRepo $isGitRepo -ExcludePath $excludePath -DryRun:$DryRun
+                Write-Host "CLI launcher: $status"
+            }
             if (-not $KeepBackups -and (Test-Path -LiteralPath "$($target.Path).bak")) {
                 if ($DryRun) { Write-Host "  [DryRun] Would delete $($target.Path).bak" }
                 else { Remove-Item -LiteralPath "$($target.Path).bak" -Force }
@@ -1396,20 +1513,44 @@ foreach ($state in $legacyStates) {
     catch { Write-Warning $_.Exception.Message; $legacyRemaining = $true }
 }
 
+$launcherPath = Join-Path $RepoPath 'copilot-xray.cmd'
+$launcherStatus = 'Not requested'
+$rootMcpPresent = Test-Path -LiteralPath (Join-Path $RepoPath '.mcp.json') -PathType Leaf
 $trust = 'Not requested'
 if ($targets[0].Status -in @('Configured', 'Up to date')) {
+    try {
+        if ($rootMcpPresent) {
+            $launcherStatus = Set-CopilotLauncher -RepoRoot $RepoPath -IsGitRepo $isGitRepo -ExcludePath $excludePath
+            Write-Warning 'A root .mcp.json takes precedence over .github/mcp.json. Use .\copilot-xray.cmd to load Xray alongside the root servers. The root config was not changed.'
+        }
+        else {
+            $launcherStatus = Remove-CopilotLauncher -RepoRoot $RepoPath -IsGitRepo $isGitRepo -ExcludePath $excludePath
+            if ($launcherStatus -eq 'Not present') { $launcherStatus = 'Not needed' }
+        }
+    }
+    catch { Write-Warning $_.Exception.Message; $launcherStatus = 'Failed' }
     $trust = Set-CopilotWorkspaceTrust -RepoRoot $RepoPath -Interactive $interactive
 }
-$incomplete = $legacyRemaining -or @($targets | Where-Object { $_.Selected -and $_.Status -notin @('Configured', 'Up to date') }).Count -gt 0
+$incomplete = $legacyRemaining -or $launcherStatus -eq 'Failed' -or @($targets | Where-Object { $_.Selected -and $_.Status -notin @('Configured', 'Up to date') }).Count -gt 0
 Write-Host "`nXray MCP setup $(if ($incomplete) { 'incomplete' } else { 'completed' })." -ForegroundColor Cyan
 Write-Host "Repository:    $RepoPath"
 Write-Host "Xray binary:   $xrayPath"
 foreach ($target in $targets) { Write-Host ("{0}: {1} ({2})" -f $target.Client, $target.Path, $target.Status) }
 Write-Host ("Git excluded:  {0}" -f $(if (-not $isGitRepo) { 'No (not a Git repository)' } elseif ($incomplete) { 'Only successfully configured files; see warnings' } else { 'Yes' }))
 Write-Host "CLI trusted:   $trust"
+if ($targets[0].Selected) { Write-Host "CLI launcher:  $launcherPath ($launcherStatus)" }
 if ($legacyRemaining) { Write-Warning 'Legacy Xray state remains. A root definition or legacy filter may override the new CLI config. No successful migration is claimed.' }
 if ($targets[0].Status -in @('Configured', 'Up to date')) {
-    Write-Host "`nVerify from this repository: copilot mcp list; copilot mcp get xray"
+    if ($rootMcpPresent) {
+        if ($launcherStatus -in @('Configured', 'Up to date')) {
+            Write-Host "`nStart from this repository: .\copilot-xray.cmd"
+            Write-Host 'Verify inside that Copilot session: /mcp list; /mcp show xray'
+        }
+        else {
+            Write-Host "`nLoad Xray explicitly from this repository: copilot --additional-mcp-config '@.\.github\mcp.json'"
+        }
+    }
+    else { Write-Host "`nVerify from this repository: copilot mcp list; copilot mcp get xray" }
 }
 if ($incomplete) { exit 1 }
 exit 0

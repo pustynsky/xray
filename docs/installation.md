@@ -78,6 +78,7 @@ cd xray
    - Roo Code (`.roo/mcp.json`) — **not** written; see the Roo note below
 4. Keeps generated configs and backups local through Git's `info/exclude`, resolved with `git rev-parse --git-path info/exclude` for ordinary clones and worktrees. If repository rules re-include a config, setup creates a narrow, untracked per-directory ignore helper. The shared `.gitignore` is never modified.
 5. Offers persistent Copilot CLI folder trust interactively. Enter means Yes. Existing trust and unrelated settings are preserved; `COPILOT_HOME` overrides the default home directory. Non-interactive runs and `-Force` skip granting trust.
+6. If a root `.mcp.json` exists, creates a local `copilot-xray.cmd` in the repository root. The launcher explicitly loads `.github/mcp.json` alongside the root servers; the root config remains untouched.
 
 The CLI definition enables all advertised Xray tools with `tools: ["*"]`. This is separate from CLI tool approval permissions. The VS Code definition has no `tools` field.
 
@@ -155,6 +156,10 @@ including a trusted parent directory, needs no prompt. Otherwise interactive
 setup asks with Yes as the default; declining leaves the config unchanged.
 Non-interactive setup never grants trust, including with `-Force`.
 
+Copilot-generated leading `//` comment headers are supported on PowerShell 5.1
+and 7. An updated config is written as JSON without the header; the backup
+retains the original comments.
+
 Changes preserve unrelated settings, create a backup of an existing config,
 and use an atomic write with a concurrent-change check. Malformed JSON or an
 invalid trust list is reported without overwriting it or logging credentials.
@@ -167,6 +172,43 @@ Verify from the target repository:
 copilot mcp list
 copilot mcp get xray
 ```
+
+### Local CLI launcher when a root config exists
+
+Copilot CLI 1.0.95 loads the root `.mcp.json` instead of `.github/mcp.json`
+when both exist. It does not merge the two files, even when their server names
+are different. Setup therefore creates `copilot-xray.cmd` in the repository
+root when a root `.mcp.json` remains after any authorized migration.
+
+```powershell
+.\copilot-xray.cmd
+.\copilot-xray.cmd --resume
+```
+
+Verify inside the launched session with `/mcp list` or `/mcp show xray`.
+In CLI 1.0.95, the terminal subcommands `copilot mcp list` and `copilot mcp get`
+do not include servers supplied through the session-only
+`--additional-mcp-config` option, even when invoked through the launcher.
+
+The launcher forwards arguments to Copilot, returns its exit code, and finds
+`.github/mcp.json` relative to its own location. It does not embed a machine
+or drive path. It passes `-C` to run the Copilot session from the repository
+root without changing the caller's directory. This requires a CLI version
+that supports `-C`, including the verified version 1.0.95.
+
+Setup verifies that Git ignores the launcher before writing it. A tracked
+or unrecognized launcher is never overwritten. If repository rules prevent
+excluding this root file, setup leaves it unwritten and reports an incomplete
+installation rather than changing the shared `.gitignore`. The summary also
+shows the explicit fallback command:
+
+```powershell
+copilot --additional-mcp-config '@.\.github\mcp.json'
+```
+
+Without a root `.mcp.json`, ordinary `copilot` discovers `.github/mcp.json`
+and no launcher is needed. A later setup removes a managed launcher if the
+root config is gone. Selecting only VS Code does not create or remove it.
 
 ### Explicit legacy migration
 
@@ -207,6 +249,10 @@ The [retired filter design](mcp-filter-design.md) is kept as historical context.
 
 `-Restore` restores eligible local CLI and VS Code backups, not the root config.
 Unchanged reruns do not rewrite configs or refresh backups.
+Restore removes the managed local launcher if the restored CLI config has no
+Xray entry or the root `.mcp.json` is gone. If launcher cleanup fails, eligible
+CLI and VS Code backups are still restored; setup reports the cleanup failure
+and exits nonzero.
 
 ```powershell
 .\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -Restore
@@ -215,7 +261,10 @@ Unchanged reruns do not rewrite configs or refresh backups.
 ```
 
 Uninstall removes local Xray entries, preserves other servers, and deletes
-an otherwise empty generated config. `-KeepBinary` retains the executable;
+an otherwise empty generated config and the managed, untracked CLI launcher.
+The launcher's exclude rule is removed even if the file was deleted manually,
+but kept while another linked worktree still has a launcher.
+Dry runs leave the launcher unchanged. `-KeepBinary` retains the executable;
 `-KeepBackups` retains local backups. Existing configs with other servers stay
 locally excluded. If a config changes during uninstall, setup refuses to delete
 or overwrite it and retains the backup. Directory-local ignore helpers remain
