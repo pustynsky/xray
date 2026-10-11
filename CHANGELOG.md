@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Kept client restore running when CLI launcher cleanup fails.** A tracked launcher or other cleanup error no longer prevents the VS Code backup from being restored after the CLI backup. Restore reports the cleanup failure and exits nonzero while preserving the protected launcher. Launcher exclude cleanup skips Git worktree enumeration when no exact launcher rule exists.
+
+- **Added a local Copilot CLI launcher for repositories with a root MCP config.** Setup creates and Git-excludes `copilot-xray.cmd` when a root `.mcp.json` would hide `.github/mcp.json`, without changing the root config. The launcher explicitly loads the local Xray config, sets the session directory with `-C`, preserves literal arguments and the CLI exit code, and leaves the caller's directory unchanged. Tracked or unrecognized launchers are never overwritten. Restore, uninstall and obsolete-launcher cleanup also remove the local exclude rule, including after manual launcher deletion, but keep it while another linked worktree has a launcher. Setup now accepts Copilot-generated leading `//` config headers on PowerShell 5.1 and 7 while preserving settings and original backups.
+
 - **Fixed MCP setup workflow validation.** The Windows matrix now selects conditional steps with explicit PowerShell 5.1 and 7 shells. GitHub does not allow the matrix context in a step's `shell` expression. Dependency fixtures select one Git executable when several runner PATH entries match.
 
 - **Hardened local MCP setup and uninstall.** Concurrent config changes now block empty-file deletion and retain the backup. JSON serialization refuses truncation before overwriting configs or backups. New directory-local ignore rules no longer hide nested files with the same name. The dependency test suite explicitly exits successfully when its assertions pass, including when invoked in the same process by CI.
