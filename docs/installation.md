@@ -109,6 +109,136 @@ After setup, **reopen the repo folder in VS Code** to activate the MCP server.
 
 ---
 
+## Make Xray preferred for code discovery
+
+MCP configuration makes tools available; it does not guarantee which tools an
+agent selects. Xray already sends tool-selection instructions during MCP
+initialization and reminders in responses. Add persistent client instructions
+if you want to explicitly choose Xray-first discovery across sessions.
+
+This is a manual, optional step. The setup script does not create or modify
+agent instruction files. Folder trust and tool approval are separate settings;
+neither establishes a tool preference.
+
+### 1. Try it in the current chat
+
+With Xray connected to the intended repository, send:
+
+```text
+Use Xray first for code discovery in this workspace: file lookup, content
+search, symbol exploration, source reading, and caller/callee navigation.
+If Xray is unavailable or cannot cover the operation, briefly explain why
+before using an alternative. Keep existing editing, build, and test workflows.
+```
+
+This requests a preference for the current conversation. It does not save
+instructions or guarantee that a new session or subagent inherits them.
+
+### 2. Save the preference in your client's instructions
+
+Start with repository scope. Choose one instruction format supported by the
+client and agent harness you actually use:
+
+| Client | Where to put the instruction block |
+|---|---|
+| VS Code GitHub Copilot | Append to `.github/copilot-instructions.md` at the repository root. Check that the selected harness loads it; discovery rules vary by harness. |
+| GitHub Copilot CLI | Append to the repository's `.github/copilot-instructions.md` and start a new session in that repository. |
+| Visual Studio GitHub Copilot | Append to `.github/copilot-instructions.md`. Enable custom instruction loading under **Tools > Options > GitHub > Copilot > Copilot Chat**; the exact settings layout varies by version. MCP connection setup is separate from this instruction step. |
+| Other MCP clients | Use the client's documented persistent instruction mechanism. Use a root `AGENTS.md` only if that client supports it. |
+
+See the official [VS Code custom instructions](https://code.visualstudio.com/docs/agent-customization/custom-instructions)
+and [Visual Studio custom instructions](https://learn.microsoft.com/en-us/visualstudio/ide/copilot-chat-context)
+documentation for client settings and discovery details.
+
+Preserve existing instructions and reconcile conflicting tool preferences
+before appending the block. Do not create duplicate copies in several formats
+unless your clients require them. Repository instruction files may be tracked:
+review the change before sharing it with your team. For a personal-only
+preference, use your client's supported user-level instructions instead.
+User-level instructions can affect other projects, so keep the workspace
+condition in the block.
+
+Copy this block into the chosen instruction file:
+
+```markdown
+<!-- xray-discovery-preference:start -->
+## Code discovery with Xray
+
+When Xray MCP is connected and serves the current workspace, use its tools
+before built-in equivalents for code discovery:
+
+- Use `xray_fast` for file and directory lookup.
+- Use `xray_grep` for content search and matching-line context.
+- Use `xray_definitions` for supported symbols, module structure, and source
+  bodies. Use `includeBody=true` when reading a body.
+- Use `xray_callers` for supported caller/callee navigation.
+
+Respect the server's workspace scope, indexed extensions, and language support.
+Use built-in alternatives when Xray is unavailable, the target is outside its
+coverage, or the operation is unsupported. Briefly state the reason before
+falling back. Do not bypass content exclusions or access restrictions.
+
+This preference covers discovery only. Keep existing editing, build, and test
+workflows. When delegating code discovery, include this preference and its
+workspace scope in the delegated task rather than assuming inheritance.
+<!-- xray-discovery-preference:end -->
+```
+
+The markers make the block easy to find and remove; they have no special meaning
+to the client. This block does not change tool permissions or server-side
+instructions, which also describe editing and Git tools.
+
+### 3. Verify actual tool selection
+
+Start a new chat or CLI session so the client loads the saved instructions.
+Check that Xray is connected to the intended repository and that the instruction
+file is loaded:
+
+- **Copilot CLI:** run `/instructions` to list the instruction files discovered
+  for the session.
+- **VS Code Copilot:** check the response's **References** for applied
+  instructions. Use **Chat: Open Customizations** to inspect instructions
+  available to the selected harness.
+- **Visual Studio Copilot:** check the response's **References** for applied
+  repository instructions.
+
+Discovering an instruction file does not prove the agent followed it. Verify
+the tool calls separately.
+
+Ask ordinary questions without naming Xray or prescribing a tool. Replace the
+examples with files and symbols that exist in your repository:
+
+| Request | Expected discovery calls |
+|---|---|
+| "Find files whose names contain OrderService." | `xray_fast` |
+| "Find occurrences of HttpClient and show the surrounding lines." | `xray_grep` with `showLines=true` |
+| "Show the body of OrderService.Submit and find its callers." | `xray_definitions` with `includeBody=true`, then `xray_callers`, where supported |
+
+Inspect the actual tool-call trace, not just the agent's claim that it used Xray.
+An explicit request such as "Use xray_grep" checks tool availability, not whether
+the agent prefers it. Repeat a request in another fresh session to check
+persistence. If discovery is delegated, check the subagent's calls as well.
+
+Also check fallback with a permitted, non-sensitive target outside Xray's
+coverage, or in a session with Xray disconnected. The agent should explain the
+limitation before using an available alternative, not claim that an unavailable
+index proves there are no matches.
+
+Instructions guide model behavior; they do not enforce exclusive use. Strict
+Xray-only operation requires client-side tool restrictions or enforcement
+supported by the orchestrator. Neither this block nor MCP instructions override
+higher-priority host instructions or security policies.
+
+### Remove the preference
+
+Delete only the block between `xray-discovery-preference:start` and
+`xray-discovery-preference:end`, including the markers, from the instruction
+file you chose. Preserve unrelated instructions, then start a new session.
+Xray remains connected and continues to send its own MCP guidance. Removing this
+block removes the saved user preference; it does not disable the server.
+
+---
+
 ## Local Source Deployment
 
 Use this after changing source in a local clone. It builds and deploys the binary only; run `setup-xray.ps1` separately to configure an MCP client or target repository.

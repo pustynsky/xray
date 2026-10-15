@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Documented manual Xray-first code discovery setup.** The installation guide now includes persistent client instructions, verification of instruction loading and actual tool selection, fallback guidance, and removal steps. README and MCP guidance link to the workflow and distinguish preferences from host-enforced restrictions. Installer behavior is unchanged.
+
 - **Kept client restore running when CLI launcher cleanup fails.** A tracked launcher or other cleanup error no longer prevents the VS Code backup from being restored after the CLI backup. Restore reports the cleanup failure and exits nonzero while preserving the protected launcher. Launcher exclude cleanup skips Git worktree enumeration when no exact launcher rule exists.
 
 - **Added a local Copilot CLI launcher for repositories with a root MCP config.** Setup creates and Git-excludes `copilot-xray.cmd` when a root `.mcp.json` would hide `.github/mcp.json`, without changing the root config. The launcher explicitly loads the local Xray config, sets the session directory with `-C`, preserves literal arguments and the CLI exit code, and leaves the caller's directory unchanged. Tracked or unrecognized launchers are never overwritten. Restore, uninstall and obsolete-launcher cleanup also remove the local exclude rule, including after manual launcher deletion, but keep it while another linked worktree has a launcher. Setup now accepts Copilot-generated leading `//` config headers on PowerShell 5.1 and 7 while preserving settings and original backups.

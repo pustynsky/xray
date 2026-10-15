@@ -39,6 +39,24 @@ Built on the same [`ignore`](https://crates.io/crates/ignore) crate that backs [
 
 📖 **More:** [Use cases & LLM workflows](docs/use-cases.md). Detailed scenarios, AI-driven architecture exploration, automated impact analysis, and a case study where we reverse-engineered a 3,800-line system in 5 minutes.
 
+## Make your agent prefer Xray
+
+Connecting the MCP server makes Xray available, but does not guarantee that your
+agent will choose it over built-in search tools. Xray sends tool-selection
+guidance during MCP initialization and reminders in responses.
+
+For a quick trial, tell your agent:
+
+> Use Xray first for code discovery in this workspace: file lookup, content
+> search, symbol exploration, source reading, and caller/callee navigation.
+> If Xray is unavailable or cannot cover the operation, briefly explain why
+> before using an alternative. Keep existing editing, build, and test workflows.
+
+To keep this preference across sessions, follow the
+[manual Xray-first setup](docs/installation.md#make-xray-preferred-for-code-discovery).
+It includes a copyable instruction block, client-specific guidance, verification,
+and removal steps. This is a preference, not an exclusive-tool guarantee.
+
 ## Documentation
 
 | Document | Description |
