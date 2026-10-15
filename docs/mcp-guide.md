@@ -55,6 +55,22 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 
 5. **Verify** — ask the AI: _"Use xray_grep to find all files containing HttpClient"_
 
+### Tool availability versus preference
+
+The verification above checks that the tool is available. To make an explicit
+Xray-first choice across sessions, follow the
+[manual code-discovery preference setup](installation.md#make-xray-preferred-for-code-discovery).
+It includes persistent client instructions and checks using ordinary requests
+that do not name an Xray tool.
+
+MCP initialization instructions, tool descriptions, and response reminders guide
+the model; they do not enforce tool selection or override higher-priority host
+instructions. Strong wording in the server's guidance does not grant it higher
+instruction priority. Client and harness support
+determines how guidance is loaded. Exclusive Xray-only operation requires
+restrictions enforced by the host, not a server instruction or a more forceful
+prompt.
+
 > **Installing into a shared repo?** Setup writes local `.github/mcp.json` and `.vscode/mcp.json`, skips tracked target files, and leaves the root `.mcp.json` untouched. See [local configuration and legacy migration](installation.md#local-mcp-configuration-and-legacy-migration). New installations do not use Git filters or index flags.
 
 ## Exposed Tools
