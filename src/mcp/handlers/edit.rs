@@ -3996,9 +3996,18 @@ fn apply_regex_replace(
         return Err(format!("Pattern not found: \"{}\"{}{}", truncate_for_display(search), hint, swap_hint));
     }
 
-    // Check expectedContext on first match
+    if edit.occurrence > count {
+        let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
+        return Err(format!(
+            "Occurrence {} requested but pattern \"{}\" found only {} time(s){}",
+            edit.occurrence, search, count, hint
+        ));
+    }
+
+    // Replace-all keeps the historical first-match context check.
+    let context_match = edit.occurrence.saturating_sub(1);
     if let Some(ref ctx_text) = edit.expected_context
-        && let Some(m) = re.find(result.as_str()) {
+        && let Some(m) = re.find_iter(result.as_str()).nth(context_match) {
             check_expected_context(result, m.start(), m.len(), ctx_text)?;
         }
 
@@ -4009,13 +4018,6 @@ fn apply_regex_replace(
             count
         }
         n => {
-            if n > count {
-                let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
-                return Err(format!(
-                    "Occurrence {} requested but pattern \"{}\" found only {} time(s){}",
-                    n, search, count, hint
-                ));
-            }
             let mut current = 0usize;
             let replace_str = replace.to_string();
             let new_content = re.replace_all(result.as_str(), |caps: &regex::Captures| {

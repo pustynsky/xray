@@ -4,6 +4,77 @@ use crate::mcp::handlers::WorkspaceBinding;
 use serde_json::json;
 use std::path::PathBuf;
 
+fn regex_occurrence_context_fixture() -> (tempfile::TempDir, String) {
+    let tmp = tempfile::tempdir().unwrap();
+    let original = format!("FIRST_CONTEXT\nFoo\n{}SECOND_CONTEXT\nFoo\n", "\n".repeat(12));
+    std::fs::write(tmp.path().join("context.txt"), &original).unwrap();
+    (tmp, original)
+}
+
+#[test]
+fn test_regex_nth_context_checks_selected_occurrence() {
+    let (tmp, original) = regex_occurrence_context_fixture();
+    let result = handle_xray_edit(&make_ctx(tmp.path()), &json!({
+        "path": "context.txt", "regex": true,
+        "edits": [{"search": "Foo", "replace": "Changed", "occurrence": 2,
+                   "expectedContext": "SECOND_CONTEXT"}]
+    }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    assert_eq!(std::fs::read_to_string(tmp.path().join("context.txt")).unwrap(),
+        original.replace("SECOND_CONTEXT\nFoo", "SECOND_CONTEXT\nChanged"));
+}
+
+#[test]
+fn test_regex_nth_context_rejects_context_only_near_first_match() {
+    let (tmp, original) = regex_occurrence_context_fixture();
+    let result = handle_xray_edit(&make_ctx(tmp.path()), &json!({
+        "path": "context.txt", "regex": true,
+        "edits": [{"search": "Foo", "replace": "Changed", "occurrence": 2,
+                   "expectedContext": "FIRST_CONTEXT"}]
+    }));
+    assert!(result.is_error, "{}", result.content[0].text);
+    assert!(result.content[0].text.contains("Expected context"));
+    assert_eq!(std::fs::read(tmp.path().join("context.txt")).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn test_regex_nth_context_validates_bounds_before_context() {
+    let (tmp, original) = regex_occurrence_context_fixture();
+    let result = handle_xray_edit(&make_ctx(tmp.path()), &json!({
+        "path": "context.txt", "regex": true,
+        "edits": [{"search": "Foo", "replace": "Changed", "occurrence": 3,
+                   "expectedContext": "ABSENT_CONTEXT"}]
+    }));
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("Occurrence 3 requested"), "{}", result.content[0].text);
+    assert_eq!(std::fs::read(tmp.path().join("context.txt")).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn test_regex_nth_context_replace_all_preserves_first_match_contract() {
+    let (tmp, original) = regex_occurrence_context_fixture();
+    let result = handle_xray_edit(&make_ctx(tmp.path()), &json!({
+        "path": "context.txt", "regex": true,
+        "edits": [{"search": "Foo", "replace": "Changed", "occurrence": 0,
+                   "expectedContext": "FIRST_CONTEXT"}]
+    }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    assert_eq!(std::fs::read_to_string(tmp.path().join("context.txt")).unwrap(), original.replace("Foo", "Changed"));
+}
+
+#[test]
+fn test_regex_nth_context_preserves_capture_expansion() {
+    let (tmp, original) = regex_occurrence_context_fixture();
+    let result = handle_xray_edit(&make_ctx(tmp.path()), &json!({
+        "path": "context.txt", "regex": true,
+        "edits": [{"search": "F(o+)", "replace": "$1$1", "occurrence": 2,
+                   "expectedContext": "SECOND_CONTEXT"}]
+    }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    assert_eq!(std::fs::read_to_string(tmp.path().join("context.txt")).unwrap(),
+        original.replace("SECOND_CONTEXT\nFoo", "SECOND_CONTEXT\noooo"));
+}
+
 /// Helper: create a HandlerContext with server_dir pointing to a temp directory.
 fn make_ctx(dir: &std::path::Path) -> HandlerContext {
     HandlerContext {

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Fixed regex edit context checks for selected occurrences.** `xray_edit` now validates `expectedContext` near the requested regex match rather than the first match, preventing an unrelated occurrence from authorizing a write. Out-of-range occurrences are reported before context checks. Replace-all keeps its existing first-match context behavior.
+
 - **Fixed content-index retries after partial updates.** A temporary read failure for an already-indexed file now keeps the full-scan watermark unchanged even when other files are updated or removed successfully. Targeted watcher and synchronous-edit updates no longer advance that shared watermark. Old postings stay searchable, and periodic rescans retry the file after access is restored without another filesystem event, including after saving and reloading a partially updated cache. Unreadable new or previously skipped files remain eligible for addition without blocking the watermark. The cache format is unchanged.
 
 - **Documented manual Xray-first code discovery setup.** The installation guide now includes persistent client instructions, verification of instruction loading and actual tool selection, fallback guidance, and removal steps. README and MCP guidance link to the workflow and distinguish preferences from host-enforced restrictions. Installer behavior is unchanged.
