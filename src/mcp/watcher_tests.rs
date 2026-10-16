@@ -1160,14 +1160,7 @@ fn test_process_batch_dirty_file() {
     assert!(dirty.is_empty(), "dirty set should be drained after process_batch");
     // trigram should be marked dirty
     assert!(idx.trigram_dirty, "trigram should be marked dirty after update");
-    // created_at should be updated to recent time
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    assert!(idx.created_at > 0, "created_at should be updated after batch with changes");
-    assert!(idx.created_at <= now, "created_at should not be in the future");
-    assert!(now - idx.created_at < 10, "created_at should be within last 10 seconds");
+    assert_eq!(idx.created_at, 0, "a targeted batch must preserve the full-scan watermark");
     drop(idx);
 
     let trigram = trigram_build_gate.snapshot(&index);
@@ -2667,6 +2660,321 @@ fn test_reindex_paths_sync_dirty_tokenize_failure_reports_no_content_update() {
     let idx = index.read().unwrap();
     assert!(idx.index.contains_key("alpha"));
     assert_eq!(idx.file_token_counts[0], 10);
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+enum ContentReadFailureUpdate {
+    Reconcile,
+    Watcher,
+    Sync,
+}
+
+#[cfg(windows)]
+fn assert_content_read_failure_recovers(
+    update: ContentReadFailureUpdate,
+    mixed: bool,
+    restart: bool,
+) {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let (_tmp, root, mut index) = make_batch_test_setup();
+    let file_a = root.join("a.cs");
+    let file_b = root.join("b.cs");
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let baseline = now - 60;
+    let modified = UNIX_EPOCH + Duration::from_secs(now - 20);
+    let set_modified = |path: &Path, time| {
+        std::fs::OpenOptions::new().write(true).open(path).unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(time)).unwrap();
+    };
+    index.write().unwrap().created_at = baseline;
+    std::fs::write(&file_a, "class AlphaRecovered {}").unwrap();
+    set_modified(&file_a, modified);
+    if mixed {
+        std::fs::write(&file_b, "class BetaUpdated {}").unwrap();
+        set_modified(&file_b, modified);
+    } else {
+        set_modified(&file_b, UNIX_EPOCH + Duration::from_secs(now - 120));
+    }
+
+    let lock = std::fs::OpenOptions::new()
+        .read(true).share_mode(0).open(&file_a).unwrap();
+    assert_eq!(
+        std::fs::read(&file_a).unwrap_err().raw_os_error(),
+        Some(32),
+        "fixture must produce a real Windows sharing violation",
+    );
+    let mut dirty = HashSet::from([file_a.clone()]);
+    if mixed {
+        dirty.insert(file_b.clone());
+    }
+    match update {
+        ContentReadFailureUpdate::Reconcile => {
+            let counts = reconcile_content_index(
+                &index, &root.to_string_lossy(), &["cs".to_string()], false,
+            );
+            assert_eq!(counts, (0, usize::from(mixed), 0));
+        }
+        ContentReadFailureUpdate::Watcher => {
+            assert!(process_batch(
+                &index, &None, &mut dirty, &mut HashSet::new(),
+                &test_trigram_build_gate(),
+            ));
+            assert!(dirty.is_empty());
+        }
+        ContentReadFailureUpdate::Sync => {
+            let stats = reindex_paths_sync(
+                &index, &None, &dirty.into_iter().collect::<Vec<_>>(),
+                &[], &["cs".to_string()],
+            );
+            assert_eq!(stats.content_updated, usize::from(mixed));
+            assert!(!stats.content_lock_poisoned);
+        }
+    }
+    {
+        let idx = index.read().unwrap();
+        assert!(idx.index.contains_key("alpha"), "read failure must preserve old postings");
+        assert!(!idx.index.contains_key("alpharecovered"));
+        assert_eq!(idx.file_token_counts[0], 10);
+        assert_eq!(
+            idx.total_tokens,
+            idx.file_token_counts.iter().map(|&count| u64::from(count)).sum::<u64>(),
+        );
+        assert_eq!(idx.index.contains_key("betaupdated"), mixed);
+        assert_eq!(idx.trigram_dirty, mixed);
+    }
+
+    // A later successful batch must not hide an earlier failed path either.
+    if mixed {
+        std::fs::write(&file_b, "class BetaFinal {}").unwrap();
+        set_modified(&file_b, modified);
+        assert!(process_batch(
+            &index, &None, &mut HashSet::from([file_b.clone()]),
+            &mut HashSet::new(), &test_trigram_build_gate(),
+        ));
+        assert!(index.read().unwrap().index.contains_key("betafinal"));
+    }
+
+    let cache = tempfile::tempdir().unwrap();
+    if restart {
+        crate::save_content_index(&index.read().unwrap(), cache.path()).unwrap();
+        let loaded = crate::load_content_index(&root.to_string_lossy(), "cs", cache.path()).unwrap();
+        index = Arc::new(RwLock::new(build_watch_index_from(loaded)));
+        // Startup reconciliation must also preserve retry eligibility while locked.
+        assert_eq!(
+            reconcile_content_index(&index, &root.to_string_lossy(), &["cs".to_string()], false),
+            (0, usize::from(mixed), 0),
+        );
+    }
+    assert_eq!(index.read().unwrap().created_at, baseline);
+    let mtime_before_unlock = std::fs::metadata(&file_a).unwrap().modified().unwrap();
+    drop(lock);
+    assert_eq!(std::fs::metadata(&file_a).unwrap().modified().unwrap(), mtime_before_unlock);
+
+    let autosave_dirty = Arc::new(AtomicBool::new(false));
+    let outcome = periodic_rescan_once(
+        &index, &None, &Arc::new(RwLock::new(None)),
+        &Arc::new(AtomicBool::new(false)), &root.to_string_lossy(),
+        &["cs".to_string()], &["cs".to_string()],
+        &Arc::new(WatcherStats::new()), false, &autosave_dirty,
+        &test_trigram_build_gate(),
+    );
+    assert!(outcome.drift_detected, "unlock alone must leave the failed file retryable");
+    assert!(outcome.index_changed);
+    assert_eq!(outcome.content_modified, 1 + usize::from(mixed));
+    assert!(autosave_dirty.load(Ordering::Relaxed));
+    let idx = index.read().unwrap();
+    assert!(idx.index.contains_key("alpharecovered"));
+    assert!(!idx.index.contains_key("alpha"));
+    assert!(idx.index.contains_key(if mixed { "betafinal" } else { "beta" }));
+    assert!(idx.created_at >= now, "a fully successful scan can advance the watermark");
+    assert_eq!(
+        idx.total_tokens,
+        idx.file_token_counts.iter().map(|&count| u64::from(count)).sum::<u64>(),
+    );
+    assert_eq!(std::fs::read_to_string(&file_a).unwrap(), "class AlphaRecovered {}");
+    if restart {
+        crate::save_content_index(&idx, cache.path()).unwrap();
+        let loaded = crate::load_content_index(&root.to_string_lossy(), "cs", cache.path()).unwrap();
+        assert_eq!(loaded.created_at, idx.created_at);
+        assert!(loaded.index.contains_key("alpharecovered"));
+        assert!(!loaded.index.contains_key("alpha"));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn content_read_failure_single_reconciliation_recovers_on_periodic_rescan() {
+    assert_content_read_failure_recovers(ContentReadFailureUpdate::Reconcile, false, false);
+}
+
+#[cfg(windows)]
+#[test]
+fn content_read_failure_mixed_reconciliation_recovers_on_periodic_rescan() {
+    assert_content_read_failure_recovers(ContentReadFailureUpdate::Reconcile, true, false);
+}
+
+#[cfg(windows)]
+#[test]
+fn content_read_failure_mixed_reconciliation_survives_restart() {
+    assert_content_read_failure_recovers(ContentReadFailureUpdate::Reconcile, true, true);
+}
+
+#[cfg(windows)]
+#[test]
+fn content_read_failure_mixed_watcher_recovers_on_periodic_rescan() {
+    assert_content_read_failure_recovers(ContentReadFailureUpdate::Watcher, true, false);
+}
+
+#[cfg(windows)]
+#[test]
+fn content_read_failure_mixed_watcher_survives_restart() {
+    assert_content_read_failure_recovers(ContentReadFailureUpdate::Watcher, true, true);
+}
+
+#[cfg(windows)]
+#[test]
+fn content_read_failure_mixed_sync_survives_restart() {
+    assert_content_read_failure_recovers(ContentReadFailureUpdate::Sync, true, true);
+}
+
+#[test]
+fn content_read_failure_with_successful_removal_survives_restart() {
+    let (_tmp, root, index) = make_batch_test_setup();
+    let file_a = root.join("a.cs");
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let baseline = now - 60;
+    let modified = UNIX_EPOCH + Duration::from_secs(now - 20);
+    index.write().unwrap().created_at = baseline;
+    let oversized = std::fs::OpenOptions::new().write(true).open(&file_a).unwrap();
+    oversized.set_len(crate::MAX_INDEX_FILE_BYTES + 1).unwrap();
+    oversized.set_times(std::fs::FileTimes::new().set_modified(modified)).unwrap();
+    drop(oversized);
+    std::fs::remove_file(root.join("b.cs")).unwrap();
+
+    assert_eq!(
+        reconcile_content_index(&index, &root.to_string_lossy(), &["cs".to_string()], false),
+        (0, 0, 1),
+    );
+    let cache = tempfile::tempdir().unwrap();
+    crate::save_content_index(&index.read().unwrap(), cache.path()).unwrap();
+    let loaded = crate::load_content_index(&root.to_string_lossy(), "cs", cache.path()).unwrap();
+    assert_eq!(loaded.created_at, baseline, "removal must not hide the failed modification");
+    assert!(loaded.index.contains_key("alpha"));
+    assert!(!loaded.index.contains_key("beta"));
+    assert_eq!(loaded.live_file_count(), 1);
+    let index = Arc::new(RwLock::new(build_watch_index_from(loaded)));
+
+    std::fs::write(&file_a, "class AlphaRecovered {}").unwrap();
+    std::fs::OpenOptions::new().write(true).open(&file_a).unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified)).unwrap();
+    let autosave_dirty = Arc::new(AtomicBool::new(false));
+    let outcome = periodic_rescan_once(
+        &index, &None, &Arc::new(RwLock::new(None)),
+        &Arc::new(AtomicBool::new(false)), &root.to_string_lossy(),
+        &["cs".to_string()], &["cs".to_string()],
+        &Arc::new(WatcherStats::new()), false, &autosave_dirty,
+        &test_trigram_build_gate(),
+    );
+    assert!(outcome.drift_detected);
+    assert!(outcome.index_changed);
+    assert_eq!(outcome.content_modified, 1);
+    assert!(autosave_dirty.load(Ordering::Relaxed));
+    let idx = index.read().unwrap();
+    assert!(idx.index.contains_key("alpharecovered"));
+    assert!(!idx.index.contains_key("alpha"));
+    assert!(idx.created_at >= now);
+    assert_eq!(
+        idx.total_tokens,
+        idx.file_token_counts.iter().map(|&count| u64::from(count)).sum::<u64>(),
+    );
+}
+
+#[test]
+fn content_read_failure_unindexed_file_does_not_block_watermark() {
+    for remove_existing in [false, true] {
+        let (_tmp, root, mut index) = make_batch_test_setup();
+        let file_a = root.join("a.cs");
+        let file_b = root.join("b.cs");
+        let skipped = root.join("skipped.cs");
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let baseline = now - 60;
+        let old_mtime = UNIX_EPOCH + Duration::from_secs(now - 120);
+        index.write().unwrap().created_at = baseline;
+        std::fs::OpenOptions::new().write(true).open(&file_b).unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old_mtime)).unwrap();
+        let oversized = std::fs::OpenOptions::new()
+            .write(true).create_new(true).open(&skipped).unwrap();
+        oversized.set_len(crate::MAX_INDEX_FILE_BYTES + 1).unwrap();
+        oversized.set_times(std::fs::FileTimes::new().set_modified(old_mtime)).unwrap();
+        drop(oversized);
+        if remove_existing {
+            std::fs::remove_file(&file_a).unwrap();
+        } else {
+            std::fs::write(&file_a, "class AlphaUpdated {}").unwrap();
+            std::fs::OpenOptions::new().write(true).open(&file_a).unwrap()
+                .set_times(std::fs::FileTimes::new()
+                    .set_modified(UNIX_EPOCH + Duration::from_secs(now - 20))).unwrap();
+        }
+
+        let file_index = Arc::new(RwLock::new(None));
+        let file_index_dirty = Arc::new(AtomicBool::new(false));
+        let stats = Arc::new(WatcherStats::new());
+        let autosave_dirty = Arc::new(AtomicBool::new(false));
+        let trigram_build_gate = test_trigram_build_gate();
+        let rescan = |index: &Arc<RwLock<ContentIndex>>| periodic_rescan_once(
+            index, &None, &file_index, &file_index_dirty, &root.to_string_lossy(),
+            &["cs".to_string()], &["cs".to_string()], &stats, false,
+            &autosave_dirty, &trigram_build_gate,
+        );
+        let outcome = rescan(&index);
+        assert!(outcome.index_changed);
+        assert_eq!(outcome.content_added, 1);
+        assert_eq!(outcome.content_modified, usize::from(!remove_existing));
+        assert_eq!(outcome.content_removed, usize::from(remove_existing));
+        assert!(autosave_dirty.load(Ordering::Relaxed));
+        let watermark = index.read().unwrap().created_at;
+        assert!(watermark >= now, "an unindexed failure must not pin the watermark");
+
+        let cache = tempfile::tempdir().unwrap();
+        crate::save_content_index(&index.read().unwrap(), cache.path()).unwrap();
+        let loaded = crate::load_content_index(&root.to_string_lossy(), "cs", cache.path()).unwrap();
+        assert_eq!(loaded.created_at, watermark);
+        index = Arc::new(RwLock::new(build_watch_index_from(loaded)));
+        assert_eq!(
+            reconcile_content_index(&index, &root.to_string_lossy(), &["cs".to_string()], false),
+            (0, 0, 0),
+        );
+        for _ in 0..2 {
+            autosave_dirty.store(false, Ordering::Relaxed);
+            let outcome = rescan(&index);
+            assert!(outcome.drift_detected, "unindexed failures must remain eligible");
+            assert_eq!(outcome.content_added, 1);
+            assert_eq!(outcome.content_modified, 0);
+            assert_eq!(outcome.content_removed, 0);
+            assert!(!outcome.index_changed, "successful changes must not be reapplied");
+            assert!(!autosave_dirty.load(Ordering::Relaxed));
+            assert_eq!(index.read().unwrap().created_at, watermark);
+        }
+
+        std::fs::write(&skipped, "class PreviouslySkipped {}").unwrap();
+        std::fs::OpenOptions::new().write(true).open(&skipped).unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old_mtime)).unwrap();
+        let outcome = rescan(&index);
+        assert_eq!(outcome.content_added, 1);
+        assert_eq!(outcome.content_modified, 0);
+        assert!(outcome.index_changed, "new files retry regardless of their mtime");
+        assert!(autosave_dirty.load(Ordering::Relaxed));
+        let idx = index.read().unwrap();
+        assert!(idx.index.contains_key("previouslyskipped"));
+        assert_eq!(idx.index.contains_key("alphaupdated"), !remove_existing);
+        assert!(!idx.index.contains_key("alpha"));
+        assert_eq!(
+            idx.total_tokens,
+            idx.file_token_counts.iter().map(|&count| u64::from(count)).sum::<u64>(),
+        );
+    }
 }
 
 #[test]
@@ -5439,6 +5747,3 @@ fn test_post_reconcile_checkpoint_writes_postings_after_modify_only() {
     assert!(reloaded.index.contains_key("telemetry"),
         "post-reconcile checkpoint must persist new 'telemetry' token to disk");
 }
-
-
-
