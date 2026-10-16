@@ -857,6 +857,7 @@ fn process_watcher_batch(
         &mut definition_dirty_files,
         removed_files,
         trigram_build_gate,
+        Some(content_extensions),
     );
     dirty_files.extend(outcome.retry_dirty_paths.iter().cloned());
     removed_files.extend(outcome.retry_removed_paths.iter().cloned());
@@ -880,6 +881,7 @@ fn process_batch(
         &mut definition_dirty_files,
         removed_files,
         trigram_build_gate,
+        None,
     ).healthy
 }
 
@@ -891,6 +893,7 @@ fn process_batch_scoped(
     definition_dirty_files: &mut HashSet<PathBuf>,
     removed_files: &mut HashSet<PathBuf>,
     trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
+    expected_extensions: Option<&[String]>,
 ) -> BatchProcessResult {
     let content_update_count = content_dirty_files.len();
     let definition_update_count = definition_dirty_files.len();
@@ -923,7 +926,7 @@ fn process_batch_scoped(
     let batch_start = std::time::Instant::now();
 
     // Update content index using batch_purge for O(total_postings) instead of O(N × total_postings)
-    let content_result = update_content_index(index, &removed_clean, &content_dirty_clean);
+    let content_result = update_content_index_scoped(index, &removed_clean, &content_dirty_clean, expected_extensions);
     if !content_result.ok {
         return BatchProcessResult {
             healthy: false,
@@ -1130,6 +1133,15 @@ fn update_content_index(
     removed_clean: &[PathBuf],
     dirty_clean: &[PathBuf],
 ) -> ContentUpdateResult {
+    update_content_index_scoped(index, removed_clean, dirty_clean, None)
+}
+
+fn update_content_index_scoped(
+    index: &Arc<RwLock<ContentIndex>>,
+    removed_clean: &[PathBuf],
+    dirty_clean: &[PathBuf],
+    expected_extensions: Option<&[String]>,
+) -> ContentUpdateResult {
     // ── Phase 1: Tokenize all dirty files OUTSIDE the lock (~5ms × N) ──
     // During this phase, MCP requests work normally on the current index data.
     let mut unique_dirty_paths = HashSet::new();
@@ -1163,6 +1175,13 @@ fn update_content_index(
             let lock_wait_ms = write_wait_start.elapsed().as_secs_f64() * 1000.0;
             let update_start = std::time::Instant::now();
             let idx = &mut *idx;
+            if expected_extensions.is_some_and(|extensions| idx.extensions != extensions) {
+                debug!("Discarding watcher content batch after extension scope changed");
+                return ContentUpdateResult {
+                    ok: true, lock_wait_ms, update_ms: 0.0,
+                    applied_dirty: 0, applied_changes: false,
+                };
+            }
             if idx.path_to_id.is_none() {
                 ensure_path_to_id(idx);
             }
@@ -2885,6 +2904,7 @@ pub(crate) fn periodic_rescan_once(
                         index,
                         ext_matched,
                         walk_start_secs,
+                        content_extensions,
                     )
                 })
             });
@@ -3086,7 +3106,7 @@ fn reconcile_content_index(
         .unwrap_or(std::time::Duration::ZERO)
         .as_secs();
     let dir_state = scan_dir_state(dir, extensions, respect_git_exclude);
-    reconcile_content_index_with_disk_files(index, dir_state.ext_matched, walk_start)
+    reconcile_content_index_with_disk_files(index, dir_state.ext_matched, walk_start, extensions)
 }
 
 /// Same as [`reconcile_content_index`] but consumes a pre-built `disk_files`
@@ -3104,6 +3124,7 @@ pub(crate) fn reconcile_content_index_with_disk_files(
     index: &Arc<RwLock<ContentIndex>>,
     disk_files: HashMap<PathBuf, SystemTime>,
     walk_start: u64,
+    expected_extensions: &[String],
 ) -> (usize, usize, usize) {
     let start = std::time::Instant::now();
     let disk_files = &disk_files;
@@ -3114,6 +3135,10 @@ pub(crate) fn reconcile_content_index_with_disk_files(
     // ── Phase 2: Determine changes (READ LOCK — instant) ──
     let (to_tokenize, to_remove, purge_ids, added, modified) = match index.read() {
         Ok(idx) => {
+            if idx.extensions != expected_extensions {
+                debug!("Discarding content reconciliation after extension scope changed");
+                return (0, 0, 0);
+            }
             let threshold = UNIX_EPOCH + Duration::from_secs(idx.created_at.saturating_sub(2));
 
             let mut to_tokenize: Vec<PathBuf> = Vec::new();
@@ -3190,6 +3215,10 @@ pub(crate) fn reconcile_content_index_with_disk_files(
     match index.write() {
         Ok(mut idx) => {
             let idx = &mut *idx;
+            if idx.extensions != expected_extensions {
+                debug!("Discarding prepared content reconciliation after extension scope changed");
+                return (0, 0, 0);
+            }
             let has_failed_indexed_files = idx.path_to_id.as_ref().is_some_and(|p2id| {
                 failed_paths.iter().any(|path| content_file_id(p2id, path).is_some())
             });

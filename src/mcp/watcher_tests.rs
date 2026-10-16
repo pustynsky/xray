@@ -3855,6 +3855,7 @@ fn periodic_rescan_detects_added_file_and_reconciles_content() {
 #[test]
 fn periodic_rescan_uses_definition_extensions_subset() {
     let (_tmp, root, index) = make_batch_test_setup();
+    index.write().unwrap().extensions = vec!["cs".to_string(), "json".to_string()];
     std::fs::write(root.join("data.json"), "{\"name\":\"gamma\"}").unwrap();
 
     let mut def_index = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
@@ -5746,4 +5747,56 @@ fn test_post_reconcile_checkpoint_writes_postings_after_modify_only() {
          (modify-only case — pre-MEDIUM-fix would still serve stale 'alpha')");
     assert!(reloaded.index.contains_key("telemetry"),
         "post-reconcile checkpoint must persist new 'telemetry' token to disk");
+}
+
+#[test]
+fn test_watcher_extension_scope_discards_queued_old_batch() {
+    for (extension, applied) in [("cs", false), ("rs", true)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let file = root.join(format!("probe.{extension}"));
+        std::fs::write(&file, "scope_marker\n").unwrap();
+        let index = Arc::new(RwLock::new(build_watch_index_from(ContentIndex {
+            root: crate::clean_path(&root.to_string_lossy()),
+            extensions: vec!["rs".into()], ..Default::default()
+        })));
+        let outcome = process_watcher_batch(
+            &index, &None, &mut HashSet::from([file]), &mut HashSet::new(),
+            &crate::clean_path(&root.to_string_lossy()), &[extension.to_string()], &[], false,
+            &Arc::new(crate::mcp::handlers::utils::TrigramRebuildGate::new()),
+        );
+        assert!(outcome.healthy);
+        assert_eq!(outcome.index_changed, applied);
+        let index = index.read().unwrap();
+        assert_eq!(index.index.contains_key("scope_marker"), applied);
+        assert_eq!(index.live_file_count(), usize::from(applied));
+    }
+}
+
+#[test]
+fn test_watcher_extension_scope_discards_old_reconciliation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let rust_file = root.join("probe.rs");
+    std::fs::write(&rust_file, "rust_marker\n").unwrap();
+    std::fs::write(root.join("probe.cs"), "csharp_marker\n").unwrap();
+    let dir = crate::clean_path(&root.to_string_lossy());
+    let index = Arc::new(RwLock::new(build_watch_index_from(ContentIndex {
+        root: dir.clone(), extensions: vec!["rs".into()], ..Default::default()
+    })));
+    assert!(update_content_index(&index, &[], &[rust_file]).ok);
+    let stale_extensions = vec!["cs".to_string()];
+    let stale = scan_dir_state(&dir, &stale_extensions, false);
+    assert_eq!(reconcile_content_index_with_disk_files(&index, stale.ext_matched, 1, &stale_extensions), (0, 0, 0));
+    {
+        let index = index.read().unwrap();
+        assert!(index.index.contains_key("rust_marker"));
+        assert!(!index.index.contains_key("csharp_marker"));
+    }
+    std::fs::write(root.join("fresh.rs"), "fresh_marker\n").unwrap();
+    let current_extensions = vec!["rs".to_string()];
+    let current = scan_dir_state(&dir, &current_extensions, false);
+    let (added, _, _) = reconcile_content_index_with_disk_files(&index, current.ext_matched, 1, &current_extensions);
+    assert_eq!(added, 1);
+    assert!(index.read().unwrap().index.contains_key("fresh_marker"));
 }
