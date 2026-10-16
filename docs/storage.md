@@ -308,6 +308,28 @@ fn is_stale(&self) -> bool {
 
 Default max age: 24 hours (`--max-age-hours 24`). `--auto-reindex` is an opt-in flag that takes no value. Omit it and xray uses the stale index, with a warning.
 
+For the content index, `created_at` is also the full-scan watermark used by
+startup reconciliation and periodic rescans (`mtime > created_at - 2s`).
+Targeted watcher and synchronous-edit updates leave it unchanged. A reconciliation
+advances it to the walk's start time only when no selected, already-indexed file
+fails tokenization. A failed read of an indexed file keeps the previous postings
+and watermark, even when other files are updated or removed successfully.
+Autosave can persist that partial progress without hiding the failed file after
+restart. No index-format change is needed.
+
+Unreadable files without an index entry remain candidates for addition on every
+scan, regardless of mtime. They do not block the watermark: there are no old
+postings to protect, and advancing the threshold cannot hide their next retry.
+
+Until the failed file can be read, later rescans may retokenize other files newer
+than the retained watermark. This is incremental reconciliation, not a full index
+rebuild. Content-index age reports the last full build or complete reconciliation,
+not the latest individual watcher update.
+
+Caches saved by an older version after it already advanced the watermark past
+a failed file may need a one-time rebuild; the lost retry information cannot be
+recovered from that cache.
+
 ## Index discovery
 
 When loading a content index, the system tries two strategies:
@@ -349,20 +371,22 @@ This scan reads and deserializes each `.word-search` file header — slow if man
 ### Content index update (single file)
 
 ```
-1. path_to_id[path] → file_id
-2. forward[file_id] → old_tokens
-3. For each old_token:
+1. Read new file content from disk; on failure, keep the existing entry
+2. Tokenize → new_tokens with line numbers (outside the write lock)
+3. Under the write lock: path_to_id[path] → file_id, forward[file_id] → old_tokens
+4. For each old_token:
      inverted_index[old_token].retain(|p| p.file_id != file_id)
      if posting list empty: inverted_index.remove(old_token)
-4. Read new file content from disk
-5. Tokenize → new_tokens with line numbers
-6. For each new_token:
+5. For each new_token:
      inverted_index[new_token].push(Posting{file_id, lines})
-7. forward[file_id] = new_tokens.keys()
-8. file_token_counts[file_id] = new_total
+6. forward[file_id] = new_tokens.keys()
+7. file_token_counts[file_id] = new_total
 ```
 
 **Time complexity:** O(old_tokens + new_tokens + Σ posting_list_scans). The ~5ms per file figure is from watcher log output during development, not a formal benchmark.
+
+The watcher prepares replacement tokens before purging old postings. If reading
+or tokenization fails, it keeps the old postings and counts for a later retry.
 
 **Rename reconciliation:** watcher rename events preserve path roles instead of treating every `Modify(Name)` path as modified content. For paired rename events, the source path is removed and the destination path is updated in the same debounced batch; split `From`/`To` events follow the same rule. Ambiguous rename modes classify existing paths as updates and missing paths as removals. This keeps file-list, content, definition, and call-graph identities aligned without a full reindex, including renames across indexed-extension boundaries.
 

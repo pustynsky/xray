@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Fixed content-index retries after partial updates.** A temporary read failure for an already-indexed file now keeps the full-scan watermark unchanged even when other files are updated or removed successfully. Targeted watcher and synchronous-edit updates no longer advance that shared watermark. Old postings stay searchable, and periodic rescans retry the file after access is restored without another filesystem event, including after saving and reloading a partially updated cache. Unreadable new or previously skipped files remain eligible for addition without blocking the watermark. The cache format is unchanged.
+
 - **Documented manual Xray-first code discovery setup.** The installation guide now includes persistent client instructions, verification of instruction loading and actual tool selection, fallback guidance, and removal steps. README and MCP guidance link to the workflow and distinguish preferences from host-enforced restrictions. Installer behavior is unchanged.
 
 - **Kept client restore running when CLI launcher cleanup fails.** A tracked launcher or other cleanup error no longer prevents the VS Code backup from being restored after the CLI backup. Restore reports the cleanup failure and exits nonzero while preserving the protected launcher. Launcher exclude cleanup skips Git worktree enumeration when no exact launcher rule exists.

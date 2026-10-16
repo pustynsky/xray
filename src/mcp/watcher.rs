@@ -1252,15 +1252,10 @@ fn update_content_index(
             let insert_ms = insert_start.elapsed().as_secs_f64() * 1000.0;
 
             if applied_changes {
-                // Advance the content watermark only after the in-memory index
-                // actually changed. If every dirty file failed tokenization, the
-                // old postings are still present and the old mtime must remain
-                // eligible for a later watcher/rescan retry.
+                // A targeted batch cannot certify the whole index: another path
+                // may still need a retry. Only reconciliation can
+                // advance the persisted content watermark.
                 idx.trigram_dirty = true;
-                idx.created_at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or(std::time::Duration::ZERO)
-                    .as_secs();
             }
 
             // Conditionally shrink collections after retain() to release excess capacity.
@@ -3103,7 +3098,8 @@ fn reconcile_content_index(
 ///   `respect_git_exclude` flag the content index was built with (otherwise
 ///   files visible to the build path will look "deleted" here);
 /// - `walk_start` captured BEFORE the walk producing `disk_files` (this value
-///   is stored in `idx.created_at` to bound the next rescan's mtime threshold).
+///   is stored in `idx.created_at` only when no already-indexed file fails
+///   tokenization, to bound the next rescan's mtime threshold).
 pub(crate) fn reconcile_content_index_with_disk_files(
     index: &Arc<RwLock<ContentIndex>>,
     disk_files: HashMap<PathBuf, SystemTime>,
@@ -3177,8 +3173,15 @@ pub(crate) fn reconcile_content_index_with_disk_files(
 
     // ── Phase 3: Tokenize all new/modified files (NO LOCK) ──
     // During this phase, MCP requests work normally on the old index data.
+    let mut failed_paths = Vec::new();
     let tokenized: Vec<TokenizedFileResult> = to_tokenize.iter()
-        .filter_map(|path| tokenize_file_standalone(path))
+        .filter_map(|path| {
+            let result = tokenize_file_standalone(path);
+            if result.is_none() {
+                failed_paths.push(path);
+            }
+            result
+        })
         .collect();
 
     // ── Phase 4: Apply under WRITE LOCK (targeted purge + ~0.1ms × N insert) ──
@@ -3187,6 +3190,9 @@ pub(crate) fn reconcile_content_index_with_disk_files(
     match index.write() {
         Ok(mut idx) => {
             let idx = &mut *idx;
+            let has_failed_indexed_files = idx.path_to_id.as_ref().is_some_and(|p2id| {
+                failed_paths.iter().any(|path| content_file_id(p2id, path).is_some())
+            });
             if !idx.file_tokens_authoritative {
                 idx.file_tokens.clear();
             }
@@ -3260,12 +3266,14 @@ pub(crate) fn reconcile_content_index_with_disk_files(
 
             shrink_if_oversized_targeted(idx, &touched_tokens);
 
-            // Advance the reconciliation watermark only for changes that were
-            // actually applied. Detected-but-failed tokenizations must remain
-            // visible to the next periodic rescan, and startup reconcile must
-            // not checkpoint that stale snapshot as the new baseline.
             if applied_added > 0 || applied_modified > 0 || removed > 0 {
-                idx.created_at = walk_start;
+                // Partial progress is safe to persist, but must not move the
+                // shared threshold past a file whose old postings we retained.
+                // Failed additions remain absent from path_to_id and retry
+                // regardless of mtime, so they do not need to hold this back.
+                if !has_failed_indexed_files {
+                    idx.created_at = walk_start;
+                }
                 idx.trigram_dirty = true;
             }
 

@@ -728,6 +728,8 @@ pub struct ContentIndex {
     /// read root as the first bincode field.
     #[serde(default)]
     pub format_version: u32,
+    /// Full build or reconciliation watermark, in Unix seconds.
+    /// Targeted updates and failed indexed-file reads preserve it for retries.
     pub created_at: u64,
     pub max_age_secs: u64,
     /// file_id → file path
