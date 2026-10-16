@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Kept watcher filters aligned with reindexed content.** Reindexing with a different extension set now restarts the watcher even within the same workspace. Watcher events, startup reconciliation, and periodic rescans use the live content extensions rather than the startup configuration. In-flight batches and reconciliation snapshots cannot apply an outgoing extension scope to the replacement index. Definition filters remain independent, and cache formats are unchanged.
+
 - **Kept background definition builds bound to the current workspace.** Startup and cross-workspace workers now reject an outgoing build at publication, including switches away and back to the same path. The worker builds the latest workspace instead of leaving it pending, and does not overwrite an index loaded from the new workspace's cache. Ready/building flags change under the same workspace guard as publication. Cache formats are unchanged.
 
 - **Fixed regex edit context checks for selected occurrences.** `xray_edit` now validates `expectedContext` near the requested regex match rather than the first match, preventing an unrelated occurrence from authorizing a write. Out-of-range occurrences are reported before context checks. Replace-all keeps its existing first-match context behavior.

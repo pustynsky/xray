@@ -144,6 +144,108 @@ fn test_definition_cross_build_preserves_new_workspace_cache() {
     assert!(!defs.definitions.iter().any(|d| d.name == "from_a"));
 }
 
+struct WatcherScopeStop(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+impl Drop for WatcherScopeStop {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+fn reindex_watcher_extension_scope(ext: &str, same_workspace: bool, periodic: bool) {
+    use std::sync::atomic::Ordering;
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a");
+    let b = if same_workspace { a.clone() } else { tmp.path().join("b") };
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    std::fs::write(b.join("probe.rs"), "fn rsmarker() {}\n").unwrap();
+    std::fs::write(b.join("probe.cs"), "class CsMarker {}\n").unwrap();
+    let a = crate::clean_path(&std::fs::canonicalize(a).unwrap().to_string_lossy());
+    let b = std::fs::canonicalize(b).unwrap();
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "cs".into();
+    ctx.index_base = tmp.path().join("indexes");
+    ctx.watch_enabled = true;
+    ctx.watch_debounce_ms = 20;
+    ctx.periodic_rescan_enabled = periodic;
+    ctx.rescan_interval_sec = 10;
+    ctx.content_ready.store(true, Ordering::Release);
+    ctx.def_ready.store(true, Ordering::Release);
+    *ctx.index.write().unwrap() = crate::mcp::watcher::build_watch_index_from(crate::ContentIndex {
+        root: a.clone(), extensions: vec!["cs".into()], ..Default::default()
+    });
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(a.clone());
+        ws.mode = WorkspaceBindingMode::ManualOverride;
+    }
+    let _stop = WatcherScopeStop(std::sync::Arc::clone(&ctx.watcher_generation));
+    super::restart_watcher_for_workspace(&ctx, &a);
+    assert!(wait_until(|| {
+        std::fs::write(std::path::Path::new(&a).join("watcher.signal"), "ready\n").unwrap();
+        ctx.watcher_stats.events_total.load(Ordering::Relaxed) > 0
+    }));
+    let old_generation = ctx.watcher_generation.load(Ordering::Acquire);
+    let result = super::dispatch_tool(&ctx, "xray_reindex", &json!({"dir":b.to_str().unwrap(),"ext":[ext]}));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    if !same_workspace || ext != "cs" {
+        assert!(ctx.watcher_generation.load(Ordering::Acquire) > old_generation);
+    } else {
+        assert_eq!(ctx.watcher_generation.load(Ordering::Acquire), old_generation);
+    }
+    std::fs::write(b.join("probe.rs"), "fn rsmarker_updated() {}\n").unwrap();
+    std::fs::write(b.join("probe.cs"), "class CsMarkerUpdated {}\n").unwrap();
+    let expected = if ext == "rs" { "rsmarker_updated" } else { "csmarkerupdated" };
+    assert!(wait_until(|| ctx.index.read().unwrap().index.contains_key(expected)),
+        "watcher did not update the requested extension");
+    if periodic {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+        while ctx.watcher_stats.periodic_rescan_total.load(Ordering::Acquire) < 2 {
+            assert!(std::time::Instant::now() < deadline, "periodic rescan did not run");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    {
+        let index = ctx.index.read().unwrap();
+        assert_eq!(index.extensions, vec![ext.to_string()]);
+        assert!(index.index.contains_key(expected));
+        assert!(index.files.iter().all(|file| file.is_empty() || std::path::Path::new(file).extension().is_some_and(|e| e == ext)));
+    }
+    std::fs::remove_file(b.join(format!("probe.{ext}"))).unwrap();
+    std::fs::write(b.join(format!("created.{ext}")), "createdmarker\n").unwrap();
+    assert!(wait_until(|| {
+        let index = ctx.index.read().unwrap();
+        index.index.contains_key("createdmarker") && !index.index.contains_key(expected)
+    }), "watcher did not track create/delete after reindex");
+    let index = ctx.index.read().unwrap();
+    super::save_content_index(&index, &ctx.index_base).unwrap();
+    let loaded = super::load_content_index(&ctx.server_dir(), ext, &ctx.index_base).unwrap();
+    assert_eq!(loaded.extensions, vec![ext.to_string()]);
+    assert!(loaded.index.contains_key("createdmarker"));
+    assert!(loaded.files.iter().all(|file| file.is_empty() || std::path::Path::new(file).extension().is_some_and(|e| e == ext)), "{:?}", loaded.files);
+}
+
+#[test]
+fn test_reindex_watcher_scope_workspace_switch() {
+    reindex_watcher_extension_scope("rs", false, false);
+}
+
+#[test]
+fn test_reindex_watcher_scope_same_workspace() {
+    reindex_watcher_extension_scope("rs", true, false);
+}
+
+#[test]
+fn test_reindex_watcher_scope_unchanged_control() {
+    reindex_watcher_extension_scope("cs", true, false);
+}
+
+#[test]
+fn test_reindex_watcher_scope_periodic_rescan() {
+    reindex_watcher_extension_scope("rs", false, true);
+}
+
 fn wait_until(predicate: impl Fn() -> bool) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {

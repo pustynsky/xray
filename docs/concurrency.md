@@ -237,6 +237,16 @@ Building creates many temporary allocations that fragment the heap. Reloading fr
 
 ## Phase 3: File Watcher
 
+The effective content extensions come from the live content index, including
+startup caches loaded through the fallback with a wider or reordered set. Reindexing
+restarts the watcher and periodic rescan when either the workspace or those
+extensions change. Definition extensions retain their separate configured scope.
+Generation checks stop outgoing loops, but cannot cancel work already in progress.
+Content batches and reconciliation therefore compare their captured extension
+scope with the live metadata under the content-index write lock before applying
+changes. A stale scope is discarded without preventing independent definition
+updates. Reconciliation also checks before preparing changes from its disk snapshot.
+
 The watcher runs on a dedicated OS thread spawned at server startup:
 
 ```mermaid

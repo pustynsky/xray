@@ -111,6 +111,10 @@ fn compute_thread_budget(
 
 
 pub fn cmd_serve(args: ServeArgs) {
+    cmd_serve_with_index_dir(args, index_dir());
+}
+
+fn cmd_serve_with_index_dir(args: ServeArgs, idx_base: PathBuf) {
     let dir_str = args.dir.clone();
     // Flatten multi-value --ext: supports both ["rs", "md"] and ["rs,md"]
     let extensions: Vec<String> = args.ext.iter()
@@ -120,7 +124,6 @@ pub fn cmd_serve(args: ServeArgs) {
         .collect();
     let exts_for_load = extensions.join(",");
 
-    let idx_base = index_dir();
     init_logging(&args, &dir_str, &exts_for_load, &idx_base);
 
     // ─── Workspace binding: determine BEFORE index building ───
@@ -269,6 +272,7 @@ pub fn cmd_serve(args: ServeArgs) {
     let file_index = Arc::new(RwLock::new(None));
     let autosave_dirty = Arc::new(AtomicBool::new(false));
     if args.watch && !is_unresolved {
+        let content_extensions = index.read().unwrap_or_else(|e| e.into_inner()).extensions.clone();
         let watch_dir = std::fs::canonicalize(&dir_str)
             .unwrap_or_else(|_| PathBuf::from(&dir_str));
         crate::index::log_memory("serve: starting watcher");
@@ -276,7 +280,7 @@ pub fn cmd_serve(args: ServeArgs) {
             Arc::clone(&index),
             def_index.as_ref().map(Arc::clone),
             watch_dir.clone(),
-            extensions.clone(),
+            content_extensions.clone(),
             definition_reconcile_extensions.clone(),
             args.debounce_ms,
             idx_base.clone(),
@@ -305,7 +309,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 Arc::clone(&file_index),
                 Arc::clone(&file_index_dirty),
                 watch_dir,
-                extensions,
+                content_extensions,
                 definition_reconcile_extensions,
                 args.rescan_interval_sec,
                 Arc::clone(&watcher_generation),
@@ -2430,6 +2434,102 @@ mod serve_respect_git_exclude_tests {
     use crate::{build_content_index, save_content_index};
     use super::ContentIndexArgs;
 
+    #[test]
+    fn serve_startup_fallback_content_scope() {
+        use std::io::{BufRead, Write};
+        use std::process::{Command, Stdio};
+        use serde_json::{Value, json};
+
+        if let Ok(extensions) = std::env::var("XRAY_TEST_STARTUP_CONTENT_SCOPE") {
+            cmd_serve_with_index_dir(ServeArgs {
+                dir: std::env::var("XRAY_TEST_STARTUP_CONTENT_ROOT").unwrap(),
+                ext: vec![extensions],
+                watch: true,
+                debounce_ms: 20,
+                debug_log: true,
+                rescan_interval_sec: 10,
+                ..Default::default()
+            }, PathBuf::from(std::env::var_os("XRAY_TEST_STARTUP_CONTENT_CACHE").unwrap()));
+            return;
+        }
+
+        for (cached, requested) in [("rs,cs", "cs,rs"), ("cs,rs", "rs")] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("workspace");
+            std::fs::create_dir(&root).unwrap();
+            let root = crate::canonicalize_test_root(&root);
+            std::fs::write(root.join("probe.rs"), "old_rust_marker\n").unwrap();
+            std::fs::write(root.join("probe.cs"), "old_csharp_marker\n").unwrap();
+            let index_base = tmp.path().join("indexes");
+            let original = build_content_index(&ContentIndexArgs {
+                dir: root.to_string_lossy().into_owned(), ext: cached.into(),
+                threads: 1, ..Default::default()
+            }).unwrap();
+            save_content_index(&original, &index_base).unwrap();
+            assert!(load_content_index(&root.to_string_lossy(), requested, &index_base).is_err(),
+                "the test must take the startup cache fallback");
+
+            let test_name = std::thread::current().name().unwrap().to_owned();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture"])
+                .env("XRAY_TEST_STARTUP_CONTENT_SCOPE", requested)
+                .env("XRAY_TEST_STARTUP_CONTENT_ROOT", &root)
+                .env("XRAY_TEST_STARTUP_CONTENT_CACHE", &index_base)
+                .current_dir(tmp.path())
+                .stdin(Stdio::piped()).stdout(Stdio::piped())
+                .stderr(std::fs::File::create(tmp.path().join("stderr.log")).unwrap())
+                .spawn().unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let (send, receive) = std::sync::mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                for line in std::io::BufReader::new(stdout).lines() {
+                    let line = line.unwrap();
+                    if let Some(start) = line.find('{')
+                        && let Ok(response) = serde_json::from_str::<Value>(&line[start..])
+                    {
+                        send.send(response).unwrap();
+                    }
+                }
+            });
+            let mut input = child.stdin.take().unwrap();
+            let mut call = |id: u64, name: &str, arguments: Value| {
+                writeln!(input, "{}", json!({
+                    "jsonrpc":"2.0", "id":id, "method":"tools/call",
+                    "params":{"name":name, "arguments":arguments}
+                })).unwrap();
+                input.flush().unwrap();
+                let response = receive.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert_eq!(response["id"], id);
+                assert_ne!(response["result"]["isError"], true, "{response}");
+                serde_json::from_str::<Value>(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+            };
+            let _ = call(1, "xray_info", json!({}));
+            std::fs::write(root.join("probe.rs"), "fresh_rust_marker\n").unwrap();
+            std::fs::write(root.join("probe.cs"), "fresh_csharp_marker\n").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let updated = loop {
+                let result = call(2, "xray_grep", json!({"terms":["fresh_rust_marker", "fresh_csharp_marker"]}));
+                if result["summary"]["totalFiles"].as_u64() == Some(2) {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            drop(input);
+            assert!(child.wait().unwrap().success());
+            reader.join().unwrap();
+            assert!(updated, "startup watcher stayed stale for cache={cached}, requested={requested}");
+            let persisted = load_content_index(&root.to_string_lossy(), cached, &index_base).unwrap();
+            assert!(persisted.index.contains_key("fresh_rust_marker"));
+            assert!(persisted.index.contains_key("fresh_csharp_marker"));
+            let log = std::fs::read_to_string(crate::index::debug_log_path_for(&index_base, &root.to_string_lossy())).unwrap();
+            assert!(log.lines().any(|line| line.contains("| contentReady |") && line.contains("cacheHitContent=true")),
+                "startup must use the cached index rather than rebuilding: {log}");
+        }
+    }
+
     fn init_repo_with_exclude(dir: &std::path::Path, pattern: &str) {
         std::process::Command::new("git")
             .args(["init", "--quiet"])
@@ -2992,4 +3092,3 @@ mod serve_thread_budget_tests {
         assert_eq!(d, 0);
     }
 }
-

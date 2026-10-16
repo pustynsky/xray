@@ -2495,7 +2495,7 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
     // Start new watcher for new directory.
     let watch_dir = std::fs::canonicalize(dir)
         .unwrap_or_else(|_| std::path::PathBuf::from(dir));
-    let ext_vec: Vec<String> = ctx.server_ext.split(',').map(|s| s.trim().to_string()).collect();
+    let ext_vec = ctx.index.read().unwrap_or_else(|e| e.into_inner()).extensions.clone();
     let def_ext_vec = ctx.def_index.as_ref()
         .and_then(|idx| idx.read().ok().map(|idx| idx.extensions.clone()))
         .unwrap_or_else(|| ctx.def_extensions.clone());
@@ -2503,7 +2503,7 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
         Arc::clone(&ctx.index),
         ctx.def_index.as_ref().map(Arc::clone),
         watch_dir,
-        ext_vec,
+        ext_vec.clone(),
         def_ext_vec.clone(),
         ctx.watch_debounce_ms,
         ctx.index_base.clone(),
@@ -2530,14 +2530,13 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
     if ctx.periodic_rescan_enabled {
         let watch_dir_rescan = std::fs::canonicalize(dir)
             .unwrap_or_else(|_| std::path::PathBuf::from(dir));
-        let ext_vec_rescan: Vec<String> = ctx.server_ext.split(',').map(|s| s.trim().to_string()).collect();
         crate::mcp::watcher::start_periodic_rescan(
             Arc::clone(&ctx.index),
             ctx.def_index.as_ref().map(Arc::clone),
             Arc::clone(&ctx.file_index),
             Arc::clone(&ctx.file_index_dirty),
             watch_dir_rescan,
-            ext_vec_rescan,
+            ext_vec,
             def_ext_vec,
             ctx.rescan_interval_sec,
             Arc::clone(&ctx.watcher_generation),
@@ -2738,9 +2737,9 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
 
     // Rebuild mutation lookups if watcher is active.
     // Without this, watcher becomes no-op after reindex (path_to_id = None).
-    let had_watch = ctx.index.read()
-        .map(|idx| idx.file_tokens_authoritative)
-        .unwrap_or(false);
+    let (had_watch, content_extensions_changed) = ctx.index.read()
+        .map(|idx| (idx.file_tokens_authoritative, idx.extensions != new_index.extensions))
+        .unwrap_or((false, false));
     let new_index = if had_watch {
         crate::mcp::watcher::build_watch_index_from(new_index)
     } else {
@@ -2796,8 +2795,8 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
         None
     };
 
-    // Phase 3: Restart watcher for new workspace
-    if workspace_changed && ctx.watch_enabled {
+    // Phase 3: Restart watcher when its directory or content filter changes.
+    if (workspace_changed || content_extensions_changed) && ctx.watch_enabled {
         restart_watcher_for_workspace(ctx, &dir);
     }
 
