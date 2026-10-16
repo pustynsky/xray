@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Kept background definition builds bound to the current workspace.** Startup and cross-workspace workers now reject an outgoing build at publication, including switches away and back to the same path. The worker builds the latest workspace instead of leaving it pending, and does not overwrite an index loaded from the new workspace's cache. Ready/building flags change under the same workspace guard as publication. Cache formats are unchanged.
+
 - **Fixed regex edit context checks for selected occurrences.** `xray_edit` now validates `expectedContext` near the requested regex match rather than the first match, preventing an unrelated occurrence from authorizing a write. Out-of-range occurrences are reported before context checks. Replace-all keeps its existing first-match context behavior.
 
 - **Fixed content-index retries after partial updates.** A temporary read failure for an already-indexed file now keeps the full-scan watermark unchanged even when other files are updated or removed successfully. Targeted watcher and synchronous-edit updates no longer advance that shared watermark. Old postings stay searchable, and periodic rescans retry the file after access is restored without another filesystem event, including after saving and reloading a partially updated cache. Unreadable new or previously skipped files remain eligible for addition without blocking the watermark. The cache format is unchanged.

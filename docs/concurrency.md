@@ -406,6 +406,8 @@ them in reverse:
 4. ctx.git_cache   (Arc<RwLock<Option<GitHistoryCache>>>)
 ```
 
+Startup and cross-workspace definition publication also take a short `ctx.workspace` read lock **after** acquiring `ctx.def_index`. The generation and directory check, index replacement, and ready/building flag updates happen under that guard. A cross-workspace build request resets readiness and claims the building flag under a workspace **write** lock, preventing a lost handoff to a finishing worker. Workspace mutation must release its workspace lock before acquiring an index lock. The active worker follows the latest workspace when its result becomes stale; a cache loaded by a later switch takes precedence over that worker.
+
 ### Rationale
 
 Rust's `std::sync::RwLock` gives pending writers priority over fresh

@@ -2264,7 +2264,7 @@ fn effective_definition_build_extensions(ctx: &HandlerContext) -> Vec<String> {
 
 
 /// Cross-load definition index on workspace switch.
-/// Returns the action taken: "loaded_cache", "background_build", or None.
+/// Returns "loaded_cache", "background_build", "build_in_progress", or None.
 fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'static str> {
     let def_arc = ctx.def_index.as_ref()?;
     let def_ext_vec = effective_definition_build_extensions(ctx);
@@ -2276,49 +2276,48 @@ fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'stat
 
     if let Some(mut idx) = def_loaded {
         idx.shrink_maps();
-        crate::definitions::replace_live_definition_index(
-            &mut def_arc.write().unwrap_or_else(|e| e.into_inner()),
-            idx,
-        );
+        let mut current = def_arc.write().unwrap_or_else(|e| e.into_inner());
+        let _ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+        crate::definitions::replace_live_definition_index(&mut current, idx);
         ctx.def_ready.store(true, Ordering::Release);
         info!(dir = %dir, "Definition index cross-loaded from cache on workspace switch");
         return Some("loaded_cache");
     }
 
-    // No cache — start background build
+    let ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
     ctx.def_ready.store(false, Ordering::Release);
+    if ctx.def_building.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        info!(dir = %dir, "Definition index background build will follow the current workspace");
+        return Some("build_in_progress");
+    }
+    let mut build_generation = ws.generation;
+    drop(ws);
     let bg_def = Arc::clone(def_arc);
-    let bg_dir = dir.to_string();
+    let mut bg_dir = dir.to_string();
     let bg_ext = def_ext_str;
     let bg_idx_base = ctx.index_base.clone();
     let bg_ready = Arc::clone(&ctx.def_ready);
     let bg_building = Arc::clone(&ctx.def_building);
+    let bg_workspace = Arc::clone(&ctx.workspace);
     let bg_respect = ctx.respect_git_exclude;
-    std::thread::spawn(move || {
-        if bg_building.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
-            return; // another build already running
-        }
+    let mut retry_cache: Option<crate::definitions::DefinitionIndex> = None;
+    std::thread::spawn(move || loop {
         info!(dir = %bg_dir, "Building definition index in background (workspace switch)");
-        let new_idx = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+        let cache_hit = retry_cache.is_some();
+        let new_idx = retry_cache.take().unwrap_or_else(|| crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
             dir: bg_dir.clone(), ext: bg_ext.clone(), threads: 0,
             respect_git_exclude: bg_respect,
-        });
-        // Save to disk. Same correctness rationale as `build_or_load_content_index`
-        // and `handle_xray_reindex_definitions_inner` (commit e64ed47): if save
-        // fails the surviving on-disk shard may be stale (rename is not-atomic
-        // against a pre-existing target on some filesystems). On failure we MUST
-        // keep the freshly-built `new_idx` in memory and skip the drop+reload
-        // step — otherwise the watcher would silently re-publish the stale
-        // on-disk shard while reporting fresh counts via def_ready.
-        let save_failed = if let Err(e) = crate::definitions::save_definition_index(&new_idx, &bg_idx_base) {
+        }));
+        // On save failure retain the fresh index: a surviving disk shard may be stale.
+        let save_failed = if cache_hit {
+            false
+        } else if let Err(e) = crate::definitions::save_definition_index(&new_idx, &bg_idx_base) {
             warn!(error = %e, "Failed to save definition index to disk; keeping in-memory index");
             true
         } else {
             false
         };
-        // Drop + reload pattern for compact memory.
-        // SKIPPED on save failure: see save-failure rationale above.
-        let new_idx = if save_failed {
+        let new_idx = if save_failed || cache_hit {
             new_idx
         } else {
             drop(new_idx);
@@ -2327,18 +2326,39 @@ fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'stat
                 .unwrap_or_else(|e| {
                     warn!(error = %e, "Failed to reload def index, rebuilding");
                     crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
-                        dir: bg_dir, ext: bg_ext, threads: 0,
+                        dir: bg_dir.clone(), ext: bg_ext.clone(), threads: 0,
                         respect_git_exclude: bg_respect,
                     })
                 })
         };
-        crate::definitions::replace_live_definition_index(
-            &mut bg_def.write().unwrap_or_else(|e| e.into_inner()),
-            new_idx,
-        );
-        bg_building.store(false, Ordering::Release);
-        bg_ready.store(true, Ordering::Release);
-        crate::index::log_memory("reindex: def cross-build complete");
+        // Acquire the index first so waiting for readers does not block a workspace switch.
+        // Hold the workspace guard through publication AND flag release.
+        let mut current = bg_def.write().unwrap_or_else(|e| e.into_inner());
+        let ws = bg_workspace.read().unwrap_or_else(|e| e.into_inner());
+        if bg_ready.load(Ordering::Acquire) {
+            // A later switch loaded its cache while this build was running.
+            bg_building.store(false, Ordering::Release);
+            return;
+        }
+        if ws.generation == build_generation && code_xray::path_eq(&ws.dir, &bg_dir) {
+            crate::definitions::replace_live_definition_index(&mut current, new_idx);
+            bg_ready.store(true, Ordering::Release);
+            bg_building.store(false, Ordering::Release);
+            crate::index::log_memory("reindex: def cross-build complete");
+            return;
+        }
+        warn!(dir = %bg_dir, generation = build_generation,
+            "Discarding stale definition index background build; rebuilding current workspace");
+        let directory_changed = !code_xray::path_eq(&bg_dir, &ws.dir);
+        bg_dir = ws.dir.clone();
+        build_generation = ws.generation;
+        drop(ws);
+        drop(current);
+        if directory_changed {
+            let extensions: Vec<String> = bg_ext.split(',').map(str::to_string).collect();
+            retry_cache = crate::definitions::load_definition_index(&bg_dir, &bg_ext, &bg_idx_base).ok()
+                .or_else(|| crate::definitions::find_definition_index_for_dir(&bg_dir, &bg_idx_base, &extensions));
+        }
     });
     info!(dir = %dir, "Definition index background build started (no cache)");
     Some("background_build")
