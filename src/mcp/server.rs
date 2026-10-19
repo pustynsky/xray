@@ -373,6 +373,33 @@ pub(crate) fn run_shared_session<R: BufRead, W: Write>(
     run_server_loop(ctx, reader, writer, false, Some(request_gate));
 }
 
+#[cfg(test)]
+#[test]
+fn shared_protocol_setup_does_not_wait_for_a_busy_tool_gate() {
+    let gate = Arc::new(Mutex::new(()));
+    let busy_tool = gate.lock().unwrap();
+    let other_gate = Arc::clone(&gate);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"capabilities\":{}}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}\n",
+        );
+        let mut reader = std::io::Cursor::new(input);
+        let mut output = Vec::new();
+        run_shared_session(HandlerContext::default(), &mut reader, &mut output, &other_gate);
+        sender.send(output).unwrap();
+    });
+    let result = receiver.recv_timeout(std::time::Duration::from_secs(2));
+    drop(busy_tool);
+    worker.join().unwrap();
+    let output = String::from_utf8(result.expect("protocol setup was blocked by a tool call")).unwrap();
+    let replies: Vec<Value> = output.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(replies.len(), 3);
+    assert!(replies.iter().all(|reply| reply.get("result").is_some()));
+}
+
 fn run_server_loop<R: BufRead, W: Write>(
     ctx: HandlerContext,
     reader: &mut R,
@@ -590,9 +617,9 @@ fn run_server_loop<R: BufRead, W: Write>(
                     // We do this after sending the initialize response below.
 
                     let response = {
-                        // Preserve the existing serial handler execution across connections.
-                        // Do not hold this gate while reading from or writing to a client.
-                        let _request = request_gate.map(|gate| gate.lock().unwrap_or_else(|e| {
+                        // Serialize tools, not protocol setup: a long tool call must
+                        // not block another client's initialize/recovery handshake.
+                        let _request = request_gate.filter(|_| request.method == "tools/call").map(|gate| gate.lock().unwrap_or_else(|e| {
                             warn!("Recovering poisoned shared request gate");
                             e.into_inner()
                         }));

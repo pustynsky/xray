@@ -30,16 +30,25 @@ backend ownership locking.
 
 Each connection has its own MCP protocol state and policy-reminder state. Tool
 handlers execute serially across connections, so a long reindex can delay other
-clients. Disconnecting the first client does not stop the backend or hold that
-client's stdout/stderr open. Once all
+clients. Proxies keep one call in flight per session and bound buffered input.
+Disconnecting a proxy drains its replies and closes its stdout/stderr. Once all
 connections close, the backend saves and exits after 60 seconds of inactivity;
-`XRAY_BACKEND_IDLE_SECONDS` accepts an integer from 1 to 3600. A backend failure
-closes connected proxies with an error. Requests, particularly edits, are never
-replayed automatically; a new MCP connection can start a replacement backend.
+`XRAY_BACKEND_IDLE_SECONDS` accepts an integer from 1 to 3600.
+
+If a backend exits or its host terminates its Windows Job Object, surviving proxies
+keep their MCP channels open, elect one replacement, and restore their initialization
+state. Indexes may need to reload, so requests can pause during recovery. Only MCP
+initialization is repeated. A tool call whose response was lost gets an explicit
+JSON-RPC error saying its outcome may be unknown; tool calls and edits are never
+replayed automatically. Check the actual result before retrying an edit. If recovery
+fails within the startup deadline, the proxy reports the failure and exits.
 
 Local IPC is restricted to the current user: named pipes on Windows and Unix
-sockets on Unix. A host that prohibits detached processes produces an explicit
-startup error rather than a backend tied to the first client's lifetime. Proxy
+sockets on Unix. Windows first attempts an independent backend. If the host denies
+process breakaway, Xray launches the same shared backend inside the permitted host
+job and logs that mode. It does not require elevation, a service, a manual launch,
+or a different MCP command. Connection recovery handles termination of that job;
+there is still one owner of the heavy indexes, not a private index per session. Proxy
 stderr reports the backend PID. Backend stderr is stored under the index directory
 in `backends/<workspace-key>.log`; `--debug-log` continues to enable index and
 protocol diagnostics in the existing workspace debug log.
@@ -53,25 +62,21 @@ backend lock; do not run them concurrently with a backend writing the same cache
 
 ### Running lifecycle tests
 
-On Windows, Cargo runs test executables in a Job Object that prohibits explicit
-process breakaway. Build and execute these tests outside Cargo's job using:
+Run the complete backend suite, including positive startup and recovery inside
+restricted Windows jobs, using:
 
 ```powershell
 .\scripts\test-shared-backend.ps1
 ```
 
-The script first probes normal, detached and breakaway process creation. If only
-breakaway requests consistently fail with access denied, it verifies that backend
-startup explicitly fails without loading indexes or retaining ownership. It reports
-positive lifecycle/memory coverage as **NOT RUN** in the log and CI step summary;
-it does not turn those scenarios into passing tests. On a host that allows breakaway,
-it runs the Windows-ignored lifecycle and private-memory tests normally. Unexpected
-or inconsistent probe failures still fail the check. CI invokes the script as a
-separate Windows step. Other platforms run lifecycle tests with
-`cargo test --test shared_backend_stdio`. The tests cover concurrent startup,
-configuration conflicts, workspace isolation, watcher updates, edit/reindex,
-stdin draining, stdout/stderr EOF while other clients remain connected, idle
-configuration replacement, idle shutdown and recovery after a backend crash.
+The script runs `cargo test --locked --test shared_backend_stdio -- --nocapture`.
+The same tests are part of normal Windows and Ubuntu CI; positive Windows lifecycle
+tests are not skipped when breakaway is unavailable. They cover concurrent startup,
+configuration conflicts, workspace isolation, watcher updates, edit/reindex, stdin
+and output draining, idle configuration replacement, idle shutdown, recovery after
+backend death, and loss of an edit response without replaying the edit. A Windows
+regression places clients in separate jobs that forbid breakaway, terminates the
+first client's entire job, and verifies the surviving sessions share one replacement.
 The replacement regression checks an explicit retirement event with a client deadline
 shorter than the old idle timeout, rather than imposing a CPU-dependent startup budget.
 

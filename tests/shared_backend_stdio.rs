@@ -14,7 +14,6 @@ const WAIT: Duration = Duration::from_secs(60);
 
 #[cfg(windows)]
 #[test]
-#[ignore = "Run scripts/test-shared-backend.ps1: Cargo's Windows job prohibits breakaway"]
 fn windows_backend_spawn_diagnostic() {
     let supported = windows_breakaway_supported();
     println!("XRAY_TEST_BREAKAWAY={}", if supported { "supported" } else { "unsupported" });
@@ -58,22 +57,6 @@ fn windows_breakaway_supported() -> bool {
     allowed == 4
 }
 
-#[cfg(windows)]
-#[test]
-#[ignore = "Run only when the Windows runner explicitly denies process breakaway"]
-fn windows_backend_rejects_forbidden_breakaway() {
-    assert!(!windows_breakaway_supported(), "this negative test requires a host that denies breakaway");
-    let workspace = Workspace::new("forbidden_breakaway_marker");
-    let output = command(workspace.path(), "rs").output().unwrap();
-    assert!(!output.status.success(), "backend must not silently inherit the host job");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Cannot launch an independent workspace backend"), "{stderr}");
-    assert!(stderr.contains("os error 5"), "{stderr}");
-    assert!(output.stdout.is_empty(), "failed startup must not write protocol output");
-    assert!(workspace.owner_released(), "failed launch retained the ownership lock");
-    let log = fs::read_to_string(workspace.runtime.join(format!("{}.log", workspace.key))).unwrap();
-    assert!(log.is_empty(), "failed launch initialized a heavy backend: {log}");
-}
 
 
 struct Workspace {
@@ -171,6 +154,7 @@ struct Client {
     stdout_closed: mpsc::Receiver<()>,
     stderr_closed: mpsc::Receiver<()>,
     backend_pid: u32,
+    backend_pids: mpsc::Receiver<u32>,
 }
 
 impl Client {
@@ -181,7 +165,10 @@ impl Client {
     }
 
     fn start_command(mut command: Command) -> Self {
-        let mut child = command.spawn().unwrap();
+        Self::attach(command.spawn().unwrap())
+    }
+
+    fn attach(mut child: Child) -> Self {
         let input = child.stdin.take();
         let stdout = child.stdout.take().unwrap();
         let stderr_pipe = child.stderr.take().unwrap();
@@ -209,8 +196,8 @@ impl Client {
             }
             let _ = stderr_done.send(());
         });
-        let mut client = Self { child, input, replies, stderr, stdout_closed, stderr_closed, backend_pid: 0 };
-        client.backend_pid = pids.recv_timeout(WAIT).unwrap_or_else(|error| {
+        let mut client = Self { child, input, replies, stderr, stdout_closed, stderr_closed, backend_pid: 0, backend_pids: pids };
+        client.backend_pid = client.backend_pids.recv_timeout(WAIT).unwrap_or_else(|error| {
             panic!("Backend connection failed: {error}; {}", client.stderr.lock().unwrap())
         });
         client.request(1, "initialize", json!({"protocolVersion": "2025-03-26",
@@ -271,6 +258,14 @@ impl Client {
         }
     }
 
+    fn wait_for_recovery(&mut self) {
+        let old_pid = self.backend_pid;
+        self.backend_pid = self.backend_pids.recv_timeout(WAIT).unwrap_or_else(|error| {
+            panic!("recovery failed: {error}; {}", self.stderr.lock().unwrap())
+        });
+        assert_ne!(self.backend_pid, old_pid, "dead backend was not replaced");
+    }
+
     fn close(&mut self) {
         self.input.take();
         assert!(self.wait_for_exit().success(), "{}", self.stderr.lock().unwrap());
@@ -290,7 +285,6 @@ impl Drop for Client {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "Run scripts/test-shared-backend.ps1: Cargo's Windows job prohibits breakaway")]
 fn shared_backend_simultaneous_clients_and_first_client_exit() {
     let workspace = Workspace::new("shared_backend_marker");
     let barrier = Arc::new(Barrier::new(5));
@@ -319,7 +313,6 @@ fn shared_backend_simultaneous_clients_and_first_client_exit() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "Run scripts/test-shared-backend.ps1: Cargo's Windows job prohibits breakaway")]
 fn shared_backend_first_client_streams_close_while_other_client_lives() {
     let workspace = Workspace::new("stdio_owner_marker");
     let mut first = Client::start(workspace.path());
@@ -332,7 +325,6 @@ fn shared_backend_first_client_streams_close_while_other_client_lives() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "Run scripts/test-shared-backend.ps1: Cargo's Windows job prohibits breakaway")]
 fn shared_backend_idle_restart_applies_new_configuration() {
     let workspace = Workspace::new("config_restart_marker");
     let mut original_command = command_with_watch(workspace.path(), "rs", false);
@@ -375,7 +367,6 @@ fn shared_backend_idle_restart_applies_new_configuration() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "Run scripts/test-shared-backend.ps1: Cargo's Windows job prohibits breakaway")]
 fn shared_backend_isolates_workspaces_and_checks_configuration() {
     let first = Workspace::new("first_workspace_marker");
     let second = Workspace::new("second_workspace_marker");
@@ -405,7 +396,6 @@ fn shared_backend_isolates_workspaces_and_checks_configuration() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "Run scripts/test-shared-backend.ps1: Cargo's Windows job prohibits breakaway")]
 fn shared_backend_edit_and_reindex_are_visible_to_every_client() {
     let workspace = Workspace::new("before_shared_edit");
     let mut a = Client::start(workspace.path());
@@ -427,7 +417,6 @@ fn shared_backend_edit_and_reindex_are_visible_to_every_client() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "Run scripts/test-shared-backend.ps1: Cargo's Windows job prohibits breakaway")]
 fn shared_backend_drains_responses_after_stdin_eof() {
     let workspace = Workspace::new("drain_shared_marker");
     let mut client = Client::start(workspace.path());
@@ -437,6 +426,118 @@ fn shared_backend_drains_responses_after_stdin_eof() {
     client.input.take();
     for id in 100..110 { assert!(client.response(id)["tools"].is_array()); }
     assert!(client.wait_for_exit().success());
+    workspace.wait_for_shutdown();
+}
+
+#[cfg(windows)]
+struct RestrictedHostJob(std::os::windows::io::OwnedHandle);
+
+#[cfg(windows)]
+impl RestrictedHostJob {
+    fn new() -> Self {
+        use std::{os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle}, ptr};
+        use windows_sys::Win32::System::JobObjects::*;
+        unsafe {
+            let handle = CreateJobObjectW(ptr::null(), ptr::null());
+            assert!(!handle.is_null(), "{}", std::io::Error::last_os_error());
+            let job = OwnedHandle::from_raw_handle(handle);
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            assert_ne!(SetInformationJobObject(job.as_raw_handle(), JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(), size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32), 0);
+            Self(job)
+        }
+    }
+
+    fn spawn(&self, mut command: Command) -> Child {
+        use std::os::windows::{io::{AsRawHandle, FromRawHandle, OwnedHandle}, process::CommandExt};
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::{Diagnostics::ToolHelp::*, JobObjects::AssignProcessToJobObject, Threading::*},
+        };
+        // Assign before any user code runs, so backend startup cannot escape the
+        // test's per-client host job through a scheduling race.
+        command.creation_flags(CREATE_SUSPENDED);
+        let mut child = command.spawn().unwrap();
+        let setup = || -> std::io::Result<()> {
+            unsafe {
+                if AssignProcessToJobObject(self.0.as_raw_handle(), child.as_raw_handle()) == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let raw = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+                if raw == INVALID_HANDLE_VALUE { return Err(std::io::Error::last_os_error()); }
+                let snapshot = OwnedHandle::from_raw_handle(raw);
+                let mut entry: THREADENTRY32 = std::mem::zeroed();
+                entry.dwSize = size_of::<THREADENTRY32>() as u32;
+                let mut available = Thread32First(snapshot.as_raw_handle(), &mut entry);
+                while available != 0 {
+                    if entry.th32OwnerProcessID == child.id() {
+                        let raw_thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                        if raw_thread.is_null() { return Err(std::io::Error::last_os_error()); }
+                        let thread = OwnedHandle::from_raw_handle(raw_thread);
+                        if ResumeThread(thread.as_raw_handle()) == u32::MAX {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        return Ok(());
+                    }
+                    available = Thread32Next(snapshot.as_raw_handle(), &mut entry);
+                }
+                Err(std::io::Error::other("Suspended client primary thread not found"))
+            }
+        };
+        if let Err(error) = setup() {
+            let killed = child.kill();
+            let waited = child.wait();
+            panic!("host job setup: {error}; kill={killed:?}; wait={waited:?}");
+        }
+        child
+    }
+
+    fn contains(&self, pid: u32) -> bool {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::System::{JobObjects::IsProcessInJob, Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION}};
+        unsafe {
+            let raw = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            assert!(!raw.is_null());
+            let process = OwnedHandle::from_raw_handle(raw);
+            let mut member = 0;
+            assert_ne!(IsProcessInJob(process.as_raw_handle(), self.0.as_raw_handle(), &mut member), 0);
+            member != 0
+        }
+    }
+
+    fn terminate(&self) {
+        use std::os::windows::io::AsRawHandle;
+        assert_ne!(unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.0.as_raw_handle(), 99) }, 0);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn shared_backend_survives_first_clients_host_job_termination() {
+    let workspace = Workspace::new("host_survivor_marker");
+    let first_job = RestrictedHostJob::new();
+    let second_job = RestrictedHostJob::new();
+    let third_job = RestrictedHostJob::new();
+    let mut first = Client::attach(first_job.spawn(command(workspace.path(), "rs")));
+    let mut second = Client::attach(second_job.spawn(command(workspace.path(), "rs")));
+    let mut third = Client::attach(third_job.spawn(command(workspace.path(), "rs")));
+    assert_eq!(first.backend_pid, second.backend_pid);
+    assert_eq!(first.backend_pid, third.backend_pid);
+    assert!(first_job.contains(first.backend_pid), "backend must respect the first host's job boundary");
+    first.wait_for_marker("host_survivor_marker");
+    first_job.terminate();
+    assert!(!first.wait_for_exit().success());
+    second.wait_for_recovery();
+    third.wait_for_recovery();
+    assert_eq!(second.backend_pid, third.backend_pid, "survivors must elect one replacement");
+    assert!(second_job.contains(second.backend_pid) || third_job.contains(second.backend_pid));
+    second.wait_for_marker("host_survivor_marker");
+    third.wait_for_marker("host_survivor_marker");
+    let log = fs::read_to_string(workspace.runtime.join(format!("{}.log", workspace.key))).unwrap();
+    assert_eq!(log.matches("Starting MCP server").count(), 2);
+    second.close();
+    third.close();
     workspace.wait_for_shutdown();
 }
 
@@ -460,7 +561,6 @@ fn private_bytes(pid: u32) -> usize {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "Run scripts/test-shared-backend.ps1: Cargo's Windows job prohibits breakaway"]
 fn shared_backend_memory_does_not_duplicate_indexes() {
     let workspace = Workspace::new("memory_shared_marker");
     for file in 0..1500 {
@@ -529,19 +629,125 @@ fn kill_backend(pid: u32) {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "Run scripts/test-shared-backend.ps1: Cargo's Windows job prohibits breakaway")]
-fn shared_backend_crash_fails_connections_and_next_connection_restarts() {
+fn shared_backend_lost_edit_response_is_reported_and_never_replayed() {
+    lost_edit_response("");
+}
+
+#[test]
+fn shared_backend_discards_partial_json_before_recovery_error() {
+    lost_edit_response("{\"jsonrpc\":\"2.0\",\"id\":72,\"res");
+}
+
+#[test]
+fn shared_backend_discards_response_without_newline_before_recovery_error() {
+    lost_edit_response("{\"jsonrpc\":\"2.0\",\"id\":72,\"result\":{}}");
+}
+
+fn lost_edit_response(fragment: &'static str) {
+    use interprocess::local_socket::{prelude::*, ListenerOptions};
+    use std::io::Read;
+    let workspace = Workspace::new("apply_counter");
+    fs::create_dir_all(&workspace.runtime).unwrap();
+    let owner = OpenOptions::new().read(true).write(true).create(true).truncate(false)
+        .open(workspace.runtime.join(format!("{}.owner.lock", workspace.key))).unwrap();
+    owner.lock().unwrap();
+    #[cfg(windows)]
+    let name = {
+        use interprocess::local_socket::{GenericNamespaced, ToNsName};
+        let namespace = format!("{:x}", Sha256::digest(workspace.runtime.as_os_str().as_encoded_bytes()));
+        format!("xray-{namespace}-{}", workspace.key).to_ns_name::<GenericNamespaced>().unwrap()
+    };
+    #[cfg(unix)]
+    let name = {
+        use interprocess::local_socket::{GenericFilePath, ToFsName};
+        workspace.runtime.join(format!("{}.sock", &workspace.key[..24])).to_fs_name::<GenericFilePath>().unwrap()
+    };
+    let listener = ListenerOptions::new().name(name).create_sync().unwrap();
+    let target = workspace.path().join("sample.rs");
+    let edited = "pub fn apply_counter_apply_counter() {}\n";
+    let write_target = target.clone();
+    let server = thread::spawn(move || {
+        let mut stream = listener.accept().unwrap();
+        fn frame(stream: &mut impl Read) -> Value {
+            let mut size = [0; 4];
+            stream.read_exact(&mut size).unwrap();
+            let size = u32::from_le_bytes(size) as usize;
+            assert!(size <= 65536 && size > 0);
+            let mut data = vec![0; size];
+            stream.read_exact(&mut data).unwrap();
+            serde_json::from_slice(&data).unwrap()
+        }
+        let hello = frame(&mut stream);
+        let welcome = serde_json::to_vec(&json!({"protocol": hello["protocol"], "pid": std::process::id(), "error": null, "retry": false})).unwrap();
+        stream.write_all(&(welcome.len() as u32).to_le_bytes()).unwrap();
+        stream.write_all(&welcome).unwrap();
+        let initialize = frame(&mut stream);
+        assert_eq!(initialize["method"], "initialize");
+        writeln!(stream, "{}", json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"test-owner","version":"1"}}})).unwrap();
+        let edit = loop {
+            let request = frame(&mut stream);
+            if request["method"] == "tools/call" { break request; }
+            assert_eq!(request["method"], "notifications/initialized");
+        };
+        assert_eq!(edit["params"]["name"], "xray_edit");
+        // Model the dangerous boundary: the edit committed but its response was lost.
+        fs::write(write_target, edited).unwrap();
+        stream.write_all(fragment.as_bytes()).unwrap();
+        stream.flush().unwrap();
+        drop(stream);
+        drop(listener);
+        drop(owner);
+    });
+    let mut client = Client::start(workspace.path());
+    client.send(json!({"jsonrpc":"2.0","id":72,"method":"tools/call","params":{
+        "name":"xray_edit","arguments":{"path":"sample.rs","edits":[{"search":"apply_counter","replace":"apply_counter_apply_counter"}]}
+    }}));
+    let response = client.replies.recv_timeout(WAIT).unwrap();
+    assert_eq!(response["id"], 72);
+    assert_eq!(response["error"]["code"], -32000);
+    assert!(response["error"]["message"].as_str().unwrap().contains("NOT replayed"));
+    assert!(response.get("result").is_none());
+    server.join().unwrap();
+    client.wait_for_recovery();
+    client.wait_for_marker("apply_counter_apply_counter");
+    assert_eq!(fs::read_to_string(target).unwrap(), edited, "edit was replayed after its response was lost");
+    client.close();
+    workspace.wait_for_shutdown();
+}
+
+#[test]
+fn shared_backend_skips_oversized_and_null_id_input_without_losing_session() {
+    let workspace = Workspace::new("input_survivor_marker");
+    let mut client = Client::start(workspace.path());
+    client.send(json!({"jsonrpc":"2.0","id":null,"method":"ping"}));
+    let oversized = vec![b'x'; 10 * 1024 * 1024 + 1];
+    client.input.as_mut().unwrap().write_all(&oversized).unwrap();
+    client.input.as_mut().unwrap().write_all(b"\n").unwrap();
+    client.input.as_mut().unwrap().flush().unwrap();
+    let error = client.replies.recv_timeout(WAIT).unwrap();
+    assert_eq!(error["id"], Value::Null);
+    assert_eq!(error["error"]["code"], -32600);
+    client.wait_for_marker("input_survivor_marker");
+    client.close();
+    workspace.wait_for_shutdown();
+}
+
+#[test]
+fn shared_backend_crash_recovers_existing_connections_without_replaying_calls() {
     let workspace = Workspace::new("restart_shared_marker");
     let mut first = Client::start(workspace.path());
     let mut second = Client::start(workspace.path());
     first.wait_for_marker("restart_shared_marker");
     let old_pid = first.backend_pid;
     kill_backend(old_pid);
-    assert!(!first.wait_for_exit().success());
-    assert!(!second.wait_for_exit().success());
-    let mut replacement = Client::start(workspace.path());
-    assert_ne!(replacement.backend_pid, old_pid);
-    replacement.wait_for_marker("restart_shared_marker");
-    replacement.close();
+    first.wait_for_recovery();
+    second.wait_for_recovery();
+    assert_eq!(first.backend_pid, second.backend_pid, "survivors did not share one replacement");
+    assert!(first.child.try_wait().unwrap().is_none());
+    assert!(second.child.try_wait().unwrap().is_none());
+    first.wait_for_marker("restart_shared_marker");
+    second.wait_for_marker("restart_shared_marker");
+    first.close();
+    second.close();
     workspace.wait_for_shutdown();
 }

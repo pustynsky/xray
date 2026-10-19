@@ -1,5 +1,25 @@
 use interprocess::local_socket::{ListenerOptions, Stream, traits::StreamCommon};
-use std::{io, process::Command};
+use std::{io, process::{Child, Command}};
+
+pub(super) fn spawn_backend(command: &mut Command) -> io::Result<Child> {
+    detach(command)?;
+    let result = command.spawn();
+    #[cfg(windows)]
+    if let Err(error) = &result
+        && error.raw_os_error() == Some(5) {
+            use std::os::windows::process::CommandExt;
+            use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+            // Respect the host's job boundary. Surviving proxies recover the
+            // shared backend if the host later terminates this process group.
+            command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+            let child = command.spawn().map_err(|retry| io::Error::new(retry.kind(), format!(
+                "Independent backend launch failed ({error}); host-bound launch also failed: {retry}"
+            )))?;
+            eprintln!("Xray: host denied process breakaway; using a shared host-bound backend with connection recovery.");
+            return Ok(child);
+        }
+    result
+}
 
 #[cfg(windows)]
 pub(super) fn restrict_listener(options: ListenerOptions<'_>) -> io::Result<ListenerOptions<'_>> {
@@ -116,8 +136,6 @@ pub(super) fn detach(command: &mut Command) -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
     }
-    // Fail explicitly when a host job prohibits breakaway; never silently attach
-    // the shared backend's lifetime to the first MCP client's job.
     command.creation_flags(CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
     Ok(())
 }

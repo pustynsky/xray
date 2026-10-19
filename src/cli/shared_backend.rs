@@ -1,4 +1,5 @@
 mod platform;
+mod proxy;
 
 use super::{args::ServeArgs, serve};
 use crate::mcp::{handlers::HandlerContext, server};
@@ -21,7 +22,7 @@ use std::{
     io::{self, BufReader, Read, Write},
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc},
+    sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}},
     thread,
     time::{Duration, Instant},
 };
@@ -96,6 +97,7 @@ struct Welcome {
 #[derive(Default)]
 struct SessionRegistry {
     active: usize,
+    ever_accepted: bool,
     retiring: bool,
 }
 
@@ -113,9 +115,10 @@ impl SessionRegistry {
         }
         if compatible {
             self.active += 1;
+            self.ever_accepted = true;
             return Admission::Accepted;
         }
-        if self.active == 0 {
+        if self.active == 0 && self.ever_accepted {
             // Admission and retirement share a lock: a compatible connection
             // cannot slip in after an idle replacement has been requested.
             self.retiring = true;
@@ -214,7 +217,9 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 fn normalize(args: &mut ServeArgs) -> io::Result<()> {
-    args.dir = crate::clean_path(&fs::canonicalize(&args.dir)?.to_string_lossy());
+    args.dir = crate::clean_path(&fs::canonicalize(&args.dir).map_err(|error| {
+        io::Error::new(error.kind(), format!("Cannot resolve workspace --dir {:?}: {error}", args.dir))
+    })?.to_string_lossy());
     args.ext = args.ext.iter().flat_map(|s| s.split(','))
         .map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
     args.ext.sort();
@@ -248,16 +253,24 @@ pub(super) fn run(mut args: ServeArgs) -> io::Result<()> {
         run_backend(args, workspace, configuration)
     } else {
         let stream = connect_or_start(&args, &workspace, &configuration)?;
-        proxy_stdio(stream)
+        proxy::run(stream, &args, &workspace, &configuration)
     }
 }
 
 fn connect_or_start(args: &ServeArgs, workspace: &Workspace, configuration: &Configuration) -> io::Result<Stream> {
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    connect_or_start_until(args, workspace, configuration, Instant::now() + STARTUP_TIMEOUT)
+}
+
+fn connect_or_start_until(args: &ServeArgs, workspace: &Workspace, configuration: &Configuration, deadline: Instant) -> io::Result<Stream> {
     let mut launcher = None;
     let mut child: Option<Child> = None;
+    let mut replacement_requested = false;
     loop {
-        if let Some(stream) = try_connect(workspace, configuration)? {
+        let connection = try_connect(workspace, configuration)?;
+        if matches!(&connection, ConnectionAttempt::Retry) {
+            replacement_requested = true;
+        }
+        if let ConnectionAttempt::Connected(stream) = connection {
             // Reap our child if it eventually exits while this proxy is still alive.
             if let Some(mut child) = child.take() {
                 thread::spawn(move || {
@@ -268,8 +281,13 @@ fn connect_or_start(args: &ServeArgs, workspace: &Workspace, configuration: &Con
             }
             return Ok(stream);
         }
-        if let Some(child) = child.as_mut()
-            && let Some(status) = child.try_wait()? {
+        let child_status = child.as_mut().map(Child::try_wait).transpose()?.flatten();
+        if let Some(status) = child_status {
+                if status.success() && replacement_requested {
+                    child = None;
+                    replacement_requested = false;
+                    continue;
+                }
                 return Err(io::Error::other(format!(
                     "Workspace backend exited during startup ({status}). See {}", workspace.path("log").display()
                 )));
@@ -313,9 +331,8 @@ fn spawn_backend(args: &ServeArgs, workspace: &Workspace) -> io::Result<Child> {
             command.arg(flag);
         }
     }
-    platform::detach(&mut command)?;
-    command.spawn().map_err(|error| io::Error::new(error.kind(), format!(
-        "Cannot launch an independent workspace backend: {error}. The host may prohibit detached processes."
+    platform::spawn_backend(&mut command).map_err(|error| io::Error::new(error.kind(), format!(
+        "Cannot launch workspace backend: {error}"
     )))
 }
 
@@ -326,11 +343,17 @@ fn retryable(error: &io::Error) -> bool {
         || cfg!(windows) && error.raw_os_error() == Some(231) // ERROR_PIPE_BUSY
 }
 
-fn try_connect(workspace: &Workspace, configuration: &Configuration) -> io::Result<Option<Stream>> {
+enum ConnectionAttempt {
+    Connected(Stream),
+    Retry,
+    Unavailable,
+}
+
+fn try_connect(workspace: &Workspace, configuration: &Configuration) -> io::Result<ConnectionAttempt> {
     let mut stream = match ConnectOptions::new().name(workspace.name()?)
         .wait_mode(ConnectWaitMode::Timeout(POLL)).nonblocking_stream(true).connect_sync() {
         Ok(stream) => stream,
-        Err(error) if retryable(&error) => return Ok(None),
+        Err(error) if retryable(&error) => return Ok(ConnectionAttempt::Unavailable),
         Err(error) => return Err(error),
     };
     platform::verify_peer(&stream)?;
@@ -340,21 +363,21 @@ fn try_connect(workspace: &Workspace, configuration: &Configuration) -> io::Resu
     })();
     let welcome = match handshake {
         Ok(welcome) => welcome,
-        Err(error) if retryable(&error) => return Ok(None),
+        Err(error) if retryable(&error) => return Ok(ConnectionAttempt::Unavailable),
         Err(error) => return Err(error),
     };
     if welcome.protocol != PROTOCOL {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "Incompatible workspace backend protocol"));
     }
     if welcome.retry {
-        return Ok(None);
+        return Ok(ConnectionAttempt::Retry);
     }
     if let Some(error) = welcome.error {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
     }
     stream.set_nonblocking(false)?;
     eprintln!("Xray: connected to workspace backend PID {}", welcome.pid);
-    Ok(Some(stream))
+    Ok(ConnectionAttempt::Connected(stream))
 }
 
 fn backend_idle_timeout() -> io::Result<Duration> {
@@ -491,11 +514,15 @@ fn serve_connection(
 
 fn send_frame<T: Serialize>(stream: &mut Stream, message: &T) -> io::Result<()> {
     let bytes = serde_json::to_vec(message)?;
+    send_payload(stream, &bytes)
+}
+
+fn send_payload(stream: &mut Stream, bytes: &[u8]) -> io::Result<()> {
     if bytes.len() > MAX_HANDSHAKE {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "Backend handshake exceeds size limit"));
     }
     let mut frame = (bytes.len() as u32).to_le_bytes().to_vec();
-    frame.extend_from_slice(&bytes);
+    frame.extend_from_slice(bytes);
     let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     let mut offset = 0;
     while offset < frame.len() {
@@ -586,6 +613,7 @@ impl<R: Read> Read for ClientInput<R> {
     }
 }
 
+#[cfg(test)]
 fn forward_input(reader: &mut impl Read, writer: &mut impl Write, closing: &AtomicBool) -> io::Result<()> {
     let mut bytes = [0; 8192];
     loop {
@@ -600,42 +628,17 @@ fn forward_input(reader: &mut impl Read, writer: &mut impl Write, closing: &Atom
     }
 }
 
-fn proxy_stdio(stream: Stream) -> io::Result<()> {
-    let stream = Arc::new(stream);
-    let closing = Arc::new(AtomicBool::new(false));
-    let input_closing = Arc::clone(&closing);
-    let (finished, completion) = mpsc::channel();
-    let input_stream = Arc::clone(&stream);
-    let input_finished = finished.clone();
-    thread::spawn(move || {
-        let result = forward_input(&mut io::stdin().lock(), &mut &*input_stream, &input_closing);
-        let _ = input_finished.send((true, result));
-    });
-    thread::spawn(move || {
-        let mut stdout = io::stdout().lock();
-        let result = io::copy(&mut &*stream, &mut stdout).and_then(|_| stdout.flush());
-        let _ = finished.send((false, result));
-    });
-    let (mut input_done, mut output_done) = (false, false);
-    while !input_done || !output_done {
-        let (is_input, result) = completion.recv().map_err(io::Error::other)?;
-        result?;
-        if is_input {
-            input_done = true;
-        } else {
-            output_done = true;
-            if !closing.load(Ordering::Acquire) {
-                return Err(io::Error::new(io::ErrorKind::ConnectionAborted,
-                    "Workspace backend disconnected; reconnect the MCP client. Requests were not replayed."));
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_registry_preserves_fresh_backend_for_its_launcher() {
+        let mut lifecycle = SessionRegistry::default();
+        assert_eq!(lifecycle.admit(false), Admission::Conflict);
+        assert!(!lifecycle.retiring);
+        assert_eq!(lifecycle.admit(true), Admission::Accepted);
+    }
 
     #[test]
     fn shared_registry_never_retires_an_active_session() {
@@ -654,7 +657,7 @@ mod tests {
     #[test]
     fn shared_registry_admission_and_retirement_are_atomic() {
         for _ in 0..100 {
-            let lifecycle = Arc::new(Mutex::new(SessionRegistry::default()));
+            let lifecycle = Arc::new(Mutex::new(SessionRegistry { ever_accepted: true, ..SessionRegistry::default() }));
             let barrier = Arc::new(std::sync::Barrier::new(2));
             let first = Arc::clone(&lifecycle);
             let ready = Arc::clone(&barrier);

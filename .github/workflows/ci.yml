@@ -76,10 +76,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test --workspace --locked
         run: cargo test --workspace --locked
-      - name: Shared backend process tests outside Cargo job (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: .\scripts\test-shared-backend.ps1
 
   feature-matrix:
     name: Feature matrix (${{ matrix.features }})
