@@ -369,6 +369,37 @@ fn shared_backend_idle_restart_applies_new_configuration() {
 }
 
 #[test]
+fn shared_backend_idle_timeout_is_configurable_per_workspace() {
+    let first = Workspace::new("idle_first_workspace");
+    let second = Workspace::new("idle_second_workspace");
+    let mut first_command = command_with_watch(first.path(), "rs", false);
+    first_command.env("XRAY_BACKEND_IDLE_SECONDS", "1");
+    let mut second_command = command_with_watch(second.path(), "rs", false);
+    second_command.env("XRAY_BACKEND_IDLE_SECONDS", "3");
+    let mut a = Client::start_command(first_command);
+    let mut b = Client::start_command(second_command);
+    assert_ne!(a.backend_pid, b.backend_pid);
+    a.wait_for_marker("idle_first_workspace");
+    b.wait_for_marker("idle_second_workspace");
+
+    a.close();
+    let waiting = Instant::now();
+    while !first.owner_released() {
+        b.request(42, "ping", json!({}));
+        assert!(waiting.elapsed() < WAIT, "activity in another workspace prevented idle shutdown");
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!second.owner_released(), "another workspace's shutdown stopped a connected backend");
+    b.wait_for_marker("idle_second_workspace");
+
+    let disconnected = Instant::now();
+    b.close();
+    second.wait_for_shutdown();
+    assert!(disconnected.elapsed() >= Duration::from_secs(3),
+        "second workspace did not honor its own configured idle timeout");
+}
+
+#[test]
 fn shared_backend_isolates_workspaces_and_checks_configuration() {
     let first = Workspace::new("first_workspace_marker");
     let second = Workspace::new("second_workspace_marker");

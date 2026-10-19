@@ -382,8 +382,12 @@ fn try_connect(workspace: &Workspace, configuration: &Configuration) -> io::Resu
 }
 
 fn backend_idle_timeout() -> io::Result<Duration> {
-    match std::env::var("XRAY_BACKEND_IDLE_SECONDS") {
-        Err(std::env::VarError::NotPresent) => Ok(Duration::from_secs(60)),
+    parse_backend_idle_timeout(std::env::var("XRAY_BACKEND_IDLE_SECONDS"))
+}
+
+fn parse_backend_idle_timeout(value: Result<String, std::env::VarError>) -> io::Result<Duration> {
+    match value {
+        Err(std::env::VarError::NotPresent) => Ok(Duration::from_secs(600)),
         Ok(value) => value.parse::<u64>().ok().filter(|value| (1..=3600).contains(value))
             .map(Duration::from_secs).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput,
                 "XRAY_BACKEND_IDLE_SECONDS must be an integer between 1 and 3600")),
@@ -632,6 +636,30 @@ fn forward_input(reader: &mut impl Read, writer: &mut impl Write, closing: &Atom
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_idle_timeout_defaults_to_ten_minutes() {
+        assert_eq!(
+            parse_backend_idle_timeout(Err(std::env::VarError::NotPresent)).unwrap(),
+            Duration::from_secs(600),
+        );
+    }
+
+    #[test]
+    fn backend_idle_timeout_preserves_explicit_overrides_and_validation() {
+        for seconds in [1, 60, 600, 3600] {
+            assert_eq!(
+                parse_backend_idle_timeout(Ok(seconds.to_string())).unwrap(),
+                Duration::from_secs(seconds),
+            );
+        }
+        for value in ["", "0", "3601", "invalid", "-1"] {
+            assert_eq!(
+                parse_backend_idle_timeout(Ok(value.to_string())).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+            );
+        }
+    }
 
     #[test]
     fn shared_registry_preserves_fresh_backend_for_its_launcher() {
