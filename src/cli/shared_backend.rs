@@ -119,6 +119,7 @@ impl SessionRegistry {
             // Admission and retirement share a lock: a compatible connection
             // cannot slip in after an idle replacement has been requested.
             self.retiring = true;
+            tracing::info!("Retiring idle workspace backend for configuration change");
             Admission::Retry
         } else {
             Admission::Conflict

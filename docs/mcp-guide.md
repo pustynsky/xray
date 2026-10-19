@@ -60,12 +60,20 @@ process breakaway. Build and execute these tests outside Cargo's job using:
 .\scripts\test-shared-backend.ps1
 ```
 
-The script includes the Windows-ignored lifecycle and private-memory tests; CI runs
-it as a separate Windows step. Other platforms run lifecycle tests with
+The script first probes normal, detached and breakaway process creation. If only
+breakaway requests consistently fail with access denied, it verifies that backend
+startup explicitly fails without loading indexes or retaining ownership. It reports
+positive lifecycle/memory coverage as **NOT RUN** in the log and CI step summary;
+it does not turn those scenarios into passing tests. On a host that allows breakaway,
+it runs the Windows-ignored lifecycle and private-memory tests normally. Unexpected
+or inconsistent probe failures still fail the check. CI invokes the script as a
+separate Windows step. Other platforms run lifecycle tests with
 `cargo test --test shared_backend_stdio`. The tests cover concurrent startup,
 configuration conflicts, workspace isolation, watcher updates, edit/reindex,
 stdin draining, stdout/stderr EOF while other clients remain connected, idle
 configuration replacement, idle shutdown and recovery after a backend crash.
+The replacement regression checks an explicit retirement event with a client deadline
+shorter than the old idle timeout, rather than imposing a CPU-dependent startup budget.
 
 
 ## Setup in VS Code

@@ -16,10 +16,16 @@ const WAIT: Duration = Duration::from_secs(60);
 #[test]
 #[ignore = "Run scripts/test-shared-backend.ps1: Cargo's Windows job prohibits breakaway"]
 fn windows_backend_spawn_diagnostic() {
+    let supported = windows_breakaway_supported();
+    println!("XRAY_TEST_BREAKAWAY={}", if supported { "supported" } else { "unsupported" });
+}
+
+#[cfg(windows)]
+fn windows_breakaway_supported() -> bool {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
     let temporary = tempfile::tempdir().unwrap();
-    let mut failures = Vec::new();
+    let (mut allowed, mut denied) = (0, 0);
     for (name, flags) in [
         ("plain", 0),
         ("detached", DETACHED_PROCESS),
@@ -38,15 +44,35 @@ fn windows_backend_spawn_diagnostic() {
                     let status = child.wait().unwrap();
                     eprintln!("spawn {name}, append={append}: {status}");
                     assert!(status.success());
+                    if flags & CREATE_BREAKAWAY_FROM_JOB != 0 { allowed += 1; }
                 }
-                Err(error) => {
-                    eprintln!("spawn {name}, append={append}: {error}");
-                    failures.push(format!("{name}, append={append}: {error}"));
+                Err(error) if flags & CREATE_BREAKAWAY_FROM_JOB != 0 && error.raw_os_error() == Some(5) => {
+                    eprintln!("spawn {name}, append={append}: host denies breakaway: {error}");
+                    denied += 1;
                 }
+                Err(error) => panic!("spawn {name}, append={append}: unexpected failure: {error}"),
             }
         }
     }
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(matches!((allowed, denied), (4, 0) | (0, 4)), "inconsistent breakaway results: allowed={allowed}, denied={denied}");
+    allowed == 4
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "Run only when the Windows runner explicitly denies process breakaway"]
+fn windows_backend_rejects_forbidden_breakaway() {
+    assert!(!windows_breakaway_supported(), "this negative test requires a host that denies breakaway");
+    let workspace = Workspace::new("forbidden_breakaway_marker");
+    let output = command(workspace.path(), "rs").output().unwrap();
+    assert!(!output.status.success(), "backend must not silently inherit the host job");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Cannot launch an independent workspace backend"), "{stderr}");
+    assert!(stderr.contains("os error 5"), "{stderr}");
+    assert!(output.stdout.is_empty(), "failed startup must not write protocol output");
+    assert!(workspace.owner_released(), "failed launch retained the ownership lock");
+    let log = fs::read_to_string(workspace.runtime.join(format!("{}.log", workspace.key))).unwrap();
+    assert!(log.is_empty(), "failed launch initialized a heavy backend: {log}");
 }
 
 
@@ -310,7 +336,7 @@ fn shared_backend_first_client_streams_close_while_other_client_lives() {
 fn shared_backend_idle_restart_applies_new_configuration() {
     let workspace = Workspace::new("config_restart_marker");
     let mut original_command = command_with_watch(workspace.path(), "rs", false);
-    original_command.env("XRAY_BACKEND_IDLE_SECONDS", "20");
+    original_command.env("XRAY_BACKEND_IDLE_SECONDS", "120");
     let mut original = Client::start_command(original_command);
     original.wait_for_marker("config_restart_marker");
     let old_pid = original.backend_pid;
@@ -319,21 +345,19 @@ fn shared_backend_idle_restart_applies_new_configuration() {
     original.input.take();
     assert!(original.wait_for_exit().success());
     assert!(!workspace.owner_released(), "old backend must still own its idle workspace");
-    let started = Instant::now();
     let barrier = Arc::new(Barrier::new(3));
     let starts: Vec<_> = (0..3).map(|_| {
         let root = workspace.path().to_owned();
         let barrier = Arc::clone(&barrier);
         thread::spawn(move || {
             let mut replacement = command_with_watch(&root, "rs", false);
-            replacement.env("XRAY_BACKEND_IDLE_SECONDS", "20").args(["--max-response-kb", "64"]);
+            replacement.args(["--max-response-kb", "64"]);
             barrier.wait();
             Client::start_command(replacement)
         })
     }).collect();
     let results: Vec<_> = starts.into_iter().map(|start| start.join()).collect();
     let mut clients: Vec<_> = results.into_iter().map(Result::unwrap).collect();
-    assert!(started.elapsed() < Duration::from_secs(10), "restart waited for the old idle timeout");
     let new_pid = clients[0].backend_pid;
     assert_ne!(new_pid, old_pid);
     for client in &mut clients {
@@ -342,6 +366,10 @@ fn shared_backend_idle_restart_applies_new_configuration() {
     }
     let log = fs::read_to_string(workspace.runtime.join(format!("{}.log", workspace.key))).unwrap();
     assert_eq!(log.matches("Starting MCP server").count(), 2, "old and replacement backends must initialize once each");
+    // All clients have a 60-second connection deadline, shorter than the old
+    // 120-second idle timeout. Check the actual retirement path, not CPU speed.
+    assert_eq!(log.matches("Retiring idle workspace backend for configuration change").count(), 1,
+        "replacement must retire the old backend, not wait for idle expiry");
     for client in &mut clients { client.close(); }
     workspace.wait_for_shutdown();
 }
