@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods, reason = "Process tests deliberately exercise native Command creation"))]
+
 //! High-performance code search engine with inverted indexing and AST-based code intelligence.
 //!
 //! Binary crate entry point. All CLI logic is in the `cli` module.
@@ -35,6 +37,63 @@ pub use index::{
 
 // Re-export CLI types used by other modules
 pub use cli::args::{IndexArgs, ContentIndexArgs, ServeArgs};
+
+#[allow(clippy::disallowed_methods, reason = "Central constructor applies the platform's background-process flags")]
+pub(crate) fn background_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let command = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // A detached MCP backend has no console for child console programs to
+        // inherit. Suppress window allocation without changing their stdio.
+        let mut command = command;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        command
+    }
+    #[cfg(not(windows))]
+    command
+}
+
+#[cfg(all(test, windows))]
+mod background_process_tests {
+    #[test]
+    fn background_command_does_not_create_console() {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::{Console::GetConsoleWindow, Threading::DETACHED_PROCESS};
+        const TEST_NAME: &str = "background_process_tests::background_command_does_not_create_console";
+        match std::env::var("XRAY_CONSOLE_TEST_STAGE").as_deref() {
+            Ok("child") => {
+                assert!(unsafe { GetConsoleWindow() }.is_null(), "background child allocated a console");
+                println!("background-stdout-preserved");
+                eprintln!("background-stderr-preserved");
+            }
+            Ok("detached-parent") => {
+                assert!(unsafe { GetConsoleWindow() }.is_null(), "fixture must reproduce a detached backend");
+                let output = super::background_command(std::env::current_exe().unwrap())
+                    .args(["--exact", TEST_NAME, "--nocapture"])
+                    .env("XRAY_CONSOLE_TEST_STAGE", "child")
+                    .output().unwrap();
+                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                assert!(String::from_utf8_lossy(&output.stdout).contains("background-stdout-preserved"));
+                assert!(String::from_utf8_lossy(&output.stderr).contains("background-stderr-preserved"));
+                println!("background-detached-parent-checked");
+            }
+            _ => {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", TEST_NAME, "--nocapture"])
+                    .env("XRAY_CONSOLE_TEST_STAGE", "detached-parent")
+                    .creation_flags(DETACHED_PROCESS)
+                    .output().unwrap();
+                assert!(output.status.success(), "stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+                assert!(String::from_utf8_lossy(&output.stdout).lines()
+                    .any(|line| line == "background-detached-parent-checked"),
+                    "detached parent did not execute the console/output assertions: {}",
+                    String::from_utf8_lossy(&output.stdout));
+            }
+        }
+    }
+}
 
 fn main() {
     cli::run();

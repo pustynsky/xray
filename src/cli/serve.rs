@@ -115,6 +115,15 @@ pub fn cmd_serve(args: ServeArgs) {
 }
 
 fn cmd_serve_with_index_dir(args: ServeArgs, idx_base: PathBuf) {
+    mcp::server::run_server(build_context_with_index_dir(args, idx_base));
+    crate::index::log_memory("serve: event loop exited");
+}
+
+pub(super) fn build_context(args: ServeArgs) -> mcp::handlers::HandlerContext {
+    build_context_with_index_dir(args, index_dir())
+}
+
+fn build_context_with_index_dir(args: ServeArgs, idx_base: PathBuf) -> mcp::handlers::HandlerContext {
     let dir_str = args.dir.clone();
     // Flatten multi-value --ext: supports both ["rs", "md"] and ["rs,md"]
     let extensions: Vec<String> = args.ext.iter()
@@ -338,7 +347,7 @@ fn cmd_serve_with_index_dir(args: ServeArgs, idx_base: PathBuf) {
     );
 
     // ─── Detect current branch ───
-    let current_branch = std::process::Command::new("git")
+    let current_branch = crate::background_command("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(&dir_str)
         .output()
@@ -401,8 +410,7 @@ fn cmd_serve_with_index_dir(args: ServeArgs, idx_base: PathBuf) {
         Arc::clone(&ctx.watcher_stats),
     );
 
-    mcp::server::run_server(ctx);
-    crate::index::log_memory("serve: event loop exited");
+    ctx
 }
 
 /// Spawn a background thread that emits one `memorySnapshot` phase log
@@ -877,7 +885,7 @@ fn primary_build_lock_owner_is_alive(pid: u32) -> Option<bool> {
 #[cfg(windows)]
 fn platform_process_is_alive(pid: u32) -> Option<bool> {
     let filter = format!("PID eq {}", pid);
-    let output = std::process::Command::new("tasklist")
+    let output = crate::background_command("tasklist")
         .args(["/FI", filter.as_str(), "/FO", "CSV", "/NH"])
         .output()
         .ok()?;
@@ -909,7 +917,7 @@ fn platform_process_is_alive(pid: u32) -> Option<bool> {
     }
 
     let pid_arg = pid.to_string();
-    let status = std::process::Command::new("kill")
+    let status = crate::background_command("kill")
         .args(["-0", pid_arg.as_str()])
         .status()
         .ok()?;
@@ -2531,7 +2539,7 @@ mod serve_respect_git_exclude_tests {
     }
 
     fn init_repo_with_exclude(dir: &std::path::Path, pattern: &str) {
-        std::process::Command::new("git")
+        crate::background_command("git")
             .args(["init", "--quiet"])
             .current_dir(dir)
             .output()

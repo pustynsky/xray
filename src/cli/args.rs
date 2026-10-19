@@ -252,15 +252,22 @@ AVAILABLE TOOLS (exposed via MCP):
   xray_reindex_definitions -- Re-index code definitions (AST parser). Requires --definitions
 
 HOW IT WORKS:
+  With an explicit --dir, serve automatically connects to one shared workspace
+  backend. Compatible clients reuse indexes and a watcher instead of loading
+  their own copies. Configuration conflicts fail explicitly. The backend exits
+  after 60 seconds without clients (XRAY_BACKEND_IDLE_SECONDS: 1..3600).
+  --standalone keeps a private server; --dir . keeps dynamic/private binding.
+  The backend performs these steps:
   1. On startup: loads (or builds) content index into RAM (~0.7-1.6s one-time)
   2. With --definitions: loads cached definition index from disk (~1.5s),
      or builds it using AST parsers on first use (~16-32s for 48K files)
-  3. Starts JSON-RPC event loop on stdin/stdout
+  3. Handles separate JSON-RPC sessions through each client's stdio proxy
   4. All search queries use in-memory index (~0.6-4ms per query)
   5. With --watch: file changes update both indexes incrementally (<1s/file)
-  6. Logging goes to stderr (never pollutes JSON-RPC on stdout)
+  6. Proxy diagnostics go to stderr; backend stderr goes to backends/<key>.log
+     in the index directory. JSON-RPC stdout remains clean.
 "#)]
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ServeArgs {
     /// Directory to index and serve.
     #[arg(short, long, default_value = ".")]
@@ -320,6 +327,13 @@ pub struct ServeArgs {
     /// `--watch` and when `--no-periodic-rescan` is NOT set.
     #[arg(long, default_value = "300")]
     pub rescan_interval_sec: u64,
+
+    /// Run a private stdio server instead of connecting to a shared workspace backend.
+    #[arg(long, conflicts_with = "internal_backend")]
+    pub standalone: bool,
+
+    #[arg(long, hide = true)]
+    pub internal_backend: bool,
 }
 
 impl Default for ServeArgs {
@@ -337,6 +351,8 @@ impl Default for ServeArgs {
             respect_git_exclude: false,
             no_periodic_rescan: false,
             rescan_interval_sec: 300,
+            standalone: false,
+            internal_backend: false,
         }
     }
 }

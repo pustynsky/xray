@@ -57,9 +57,14 @@ ctrlc = "3"
 strsim = "0.11.1"
 url = "2"
 sha2 = "0.10"
+interprocess = { version = "2", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp"] }
+widestring = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

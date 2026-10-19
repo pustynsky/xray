@@ -6,6 +6,87 @@ Complete guide for the `xray serve` MCP server — setup, tools API, and example
 
 The MCP server starts its event loop **immediately** and responds to `initialize` / `tools/list` without waiting for indexes to build. If a pre-built index exists on disk, it is loaded synchronously (< 3s). Otherwise, indexes are built in a background thread — search tools return a friendly "Index is being built, please retry" message until ready. This eliminates startup timeouts when Roo/VS Code launches the server for the first time.
 
+## Shared workspace backend
+
+With an explicit `--dir`, `xray serve` is a lightweight stdio proxy. The first
+connection automatically starts a separate backend for the canonical workspace;
+additional compatible connections reuse its indexes, watcher, rescan and caches.
+Different workspaces have separate backends. Existing MCP configuration does not
+need to change, and no manual backend startup or administrator privileges are required.
+
+Connections must use the same normalized serve arguments, executable build, and
+`XRAY_*` / `GIT_*` environment settings. A conflict reports the differing setting
+names instead of silently using the first client's settings or loading another
+copy. Extension order, case and duplicates are normalized. Reindex can rebuild the
+shared indexes, but cannot switch the workspace or change the indexed extensions.
+Restart all connections to change backend configuration. While compatible sessions
+are still active, a conflicting connection is rejected without stopping them. Once
+none remain, a connection with a new configuration retires the idle backend: it stops
+admitting sessions, saves its indexes, and releases ownership before a replacement
+starts. The proxy retries this startup handshake within its existing startup timeout;
+there is no need to wait out the idle timeout. Tool requests are not replayed.
+Stop old-version servers before upgrading: older binaries do not participate in
+backend ownership locking.
+
+Each connection has its own MCP protocol state and policy-reminder state. Tool
+handlers execute serially across connections, so a long reindex can delay other
+clients. Proxies keep one call in flight per session and bound buffered input.
+Disconnecting a proxy drains its replies and closes its stdout/stderr. Once all
+connections close, the backend saves and exits after 60 seconds of inactivity;
+`XRAY_BACKEND_IDLE_SECONDS` accepts an integer from 1 to 3600.
+
+If a backend exits or its host terminates its Windows Job Object, surviving proxies
+keep their MCP channels open, elect one replacement, and restore their initialization
+state. Indexes may need to reload, so requests can pause during recovery. Only MCP
+initialization is repeated. A tool call whose response was lost gets an explicit
+JSON-RPC error saying its outcome may be unknown; tool calls and edits are never
+replayed automatically. Check the actual result before retrying an edit. If recovery
+fails within the startup deadline, the proxy reports the failure and exits.
+
+Local IPC is restricted to the current user: named pipes on Windows and Unix
+sockets on Unix. Windows first attempts an independent backend. If the host denies
+process breakaway, Xray launches the same shared backend inside the permitted host
+job and logs that mode. It does not require elevation, a service, a manual launch,
+or a different MCP command. Connection recovery handles termination of that job;
+there is still one owner of the heavy indexes, not a private index per session. Proxy
+stderr reports the backend PID. Backend stderr is stored under the index directory
+in `backends/<workspace-key>.log`; `--debug-log` continues to enable index and
+protocol diagnostics in the existing workspace debug log.
+On Windows, runtime Git commands and the PID probe use `CREATE_NO_WINDOW`, so
+startup/history indexing and Git tools do not open console windows. Their captured
+output and error reporting are preserved; no MCP configuration flag is needed.
+Clippy enforces use of the shared command constructor in production code. The
+backend launcher applies its own process flags and has a local, documented exception;
+process-test harnesses and build-time Git metadata probes have separate exceptions.
+
+`--standalone` retains a private stdio server for troubleshooting. It cannot run
+alongside a shared owner of the same workspace. The existing dynamic `--dir .`
+mode remains private because MCP roots can change its workspace after initialize;
+it prints a notice. Use an explicit workspace path to share indexes. Standalone
+CLI index-writing commands and older servers are not coordinated by the new
+backend lock; do not run them concurrently with a backend writing the same caches.
+
+### Running lifecycle tests
+
+Run the complete backend suite, including positive startup and recovery inside
+restricted Windows jobs, using:
+
+```powershell
+.\scripts\test-shared-backend.ps1
+```
+
+The script runs `cargo test --locked --test shared_backend_stdio -- --nocapture`.
+The same tests are part of normal Windows and Ubuntu CI; positive Windows lifecycle
+tests are not skipped when breakaway is unavailable. They cover concurrent startup,
+configuration conflicts, workspace isolation, watcher updates, edit/reindex, stdin
+and output draining, idle configuration replacement, idle shutdown, recovery after
+backend death, and loss of an edit response without replaying the edit. A Windows
+regression places clients in separate jobs that forbid breakaway, terminates the
+first client's entire job, and verifies the surviving sessions share one replacement.
+The replacement regression checks an explicit retirement event with a client deadline
+shorter than the old idle timeout, rather than imposing a CPU-dependent startup budget.
+
+
 ## Setup in VS Code
 
 1. **Install xray** (if not already):

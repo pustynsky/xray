@@ -74,6 +74,7 @@ fn main() {
 /// Return `"<short7>"` or `"<short7>-dirty"` when `git` is available;
 /// `None` when not in a git checkout or git is not on PATH. The dirty
 /// flag includes both tracked-but-modified and untracked changes.
+#[allow(clippy::disallowed_methods, reason = "Build-time Git probes run before the runtime command helper is compiled")]
 fn git_short_sha_with_dirty() -> Option<String> {
     let sha = std::process::Command::new("git")
         .args(["rev-parse", "--short=7", "HEAD"])

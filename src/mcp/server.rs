@@ -1,6 +1,6 @@
 use std::io::{self, BufRead, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use tracing::{debug, error, info, warn};
@@ -357,8 +357,55 @@ pub fn run_server(ctx: HandlerContext) {
 fn run_server_with_io<R: BufRead, W: Write>(
     ctx: HandlerContext,
     reader: &mut R,
+    writer: &mut W,
+    install_signal_handler: bool,
+) {
+    run_server_loop(ctx, reader, writer, install_signal_handler, None);
+}
+
+pub(crate) fn run_shared_session<R: BufRead, W: Write>(
+    mut ctx: HandlerContext,
+    reader: &mut R,
+    writer: &mut W,
+    request_gate: &Mutex<()>,
+) {
+    ctx.policy_reminder_state = Arc::new(handlers::utils::PolicyReminderState::new());
+    run_server_loop(ctx, reader, writer, false, Some(request_gate));
+}
+
+#[cfg(test)]
+#[test]
+fn shared_protocol_setup_does_not_wait_for_a_busy_tool_gate() {
+    let gate = Arc::new(Mutex::new(()));
+    let busy_tool = gate.lock().unwrap();
+    let other_gate = Arc::clone(&gate);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"capabilities\":{}}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}\n",
+        );
+        let mut reader = std::io::Cursor::new(input);
+        let mut output = Vec::new();
+        run_shared_session(HandlerContext::default(), &mut reader, &mut output, &other_gate);
+        sender.send(output).unwrap();
+    });
+    let result = receiver.recv_timeout(std::time::Duration::from_secs(2));
+    drop(busy_tool);
+    worker.join().unwrap();
+    let output = String::from_utf8(result.expect("protocol setup was blocked by a tool call")).unwrap();
+    let replies: Vec<Value> = output.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(replies.len(), 3);
+    assert!(replies.iter().all(|reply| reply.get("result").is_some()));
+}
+
+fn run_server_loop<R: BufRead, W: Write>(
+    ctx: HandlerContext,
+    reader: &mut R,
     mut writer: &mut W,
     install_signal_handler: bool,
+    request_gate: Option<&Mutex<()>>,
 ) {
     let mut state = ServerState::new();
 
@@ -569,7 +616,22 @@ fn run_server_with_io<R: BufRead, W: Write>(
                     // But we need to trigger roots/list after initialize response.
                     // We do this after sending the initialize response below.
 
-                    let response = dispatch_request_with_panic_guard(&ctx, &request.method, &request.params, id.clone());
+                    let response = {
+                        // Serialize tools, not protocol setup: a long tool call must
+                        // not block another client's initialize/recovery handshake.
+                        let _request = request_gate.filter(|_| request.method == "tools/call").map(|gate| gate.lock().unwrap_or_else(|e| {
+                            warn!("Recovering poisoned shared request gate");
+                            e.into_inner()
+                        }));
+                        if let Some(message) = request_gate.and_then(|_| shared_config_error(&ctx, &request.method, &request.params)) {
+                            safe_to_value(
+                                JsonRpcResponse::new(id.clone(), safe_to_value(ToolCallResult::error(message), &id)),
+                                &id,
+                            )
+                        } else {
+                            dispatch_request_with_panic_guard(&ctx, &request.method, &request.params, id.clone())
+                        }
+                    };
 
                     let resp_str = match serde_json::to_string(&response) {
                         Ok(s) => s,
@@ -631,6 +693,10 @@ fn run_server_with_io<R: BufRead, W: Write>(
     };
 
     crate::index::log_protocol_event("shutdown", &[("reason", shutdown_reason.to_string())]);
+    if request_gate.is_some() {
+        info!("MCP session closed; workspace backend remains available");
+        return;
+    }
     info!("stdin closed, saving indexes before shutdown...");
     crate::index::log_memory("shutdown: saving indexes");
     save_indexes_on_shutdown(&ctx);
@@ -655,7 +721,38 @@ fn run_server_with_io<R: BufRead, W: Write>(
 /// partial in-memory state. If it is ready, we save unconditionally
 /// (including the empty case, which represents a legitimate "all files
 /// removed" state).
-fn save_indexes_on_shutdown(ctx: &HandlerContext) {
+fn shared_config_error(ctx: &HandlerContext, method: &str, params: &Option<Value>) -> Option<String> {
+    if method != "tools/call" {
+        return None;
+    }
+    let params = params.as_ref()?;
+    let expected = match params.get("name")?.as_str()? {
+        "xray_reindex" => ctx.server_ext.split(',').map(str::to_string).collect(),
+        "xray_reindex_definitions" => handlers::effective_definition_build_extensions(ctx),
+        _ => return None,
+    };
+    let ext = params.get("arguments")?.get("ext")?.as_array()?;
+    if ext.is_empty() {
+        return None;
+    }
+    let supplied: Option<Vec<String>> = ext.iter().map(|v| v.as_str().map(str::to_string)).collect();
+    let mut supplied = supplied?;
+    let mut expected: Vec<String> = expected;
+    for values in [&mut supplied, &mut expected] {
+        for value in values.iter_mut() {
+            *value = value.trim().to_lowercase();
+        }
+        values.sort();
+        values.dedup();
+    }
+    (supplied != expected).then(|| {
+        "Cannot change indexed extensions on a shared workspace backend. Omit `ext` to rebuild \
+         its current configuration, or restart all connections with the new --ext configuration."
+            .to_string()
+    })
+}
+
+pub(crate) fn save_indexes_on_shutdown(ctx: &HandlerContext) {
     use std::sync::atomic::Ordering;
 
     // Save content index
