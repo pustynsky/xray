@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods, reason = "Process tests deliberately exercise native Command creation"))]
+
 //! High-performance code search engine with inverted indexing and AST-based code intelligence.
 //!
 //! Binary crate entry point. All CLI logic is in the `cli` module.
@@ -36,6 +38,7 @@ pub use index::{
 // Re-export CLI types used by other modules
 pub use cli::args::{IndexArgs, ContentIndexArgs, ServeArgs};
 
+#[allow(clippy::disallowed_methods, reason = "Central constructor applies the platform's background-process flags")]
 pub(crate) fn background_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let command = std::process::Command::new(program);
     #[cfg(windows)]
@@ -73,6 +76,7 @@ mod background_process_tests {
                 assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
                 assert!(String::from_utf8_lossy(&output.stdout).contains("background-stdout-preserved"));
                 assert!(String::from_utf8_lossy(&output.stderr).contains("background-stderr-preserved"));
+                println!("background-detached-parent-checked");
             }
             _ => {
                 let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -82,6 +86,10 @@ mod background_process_tests {
                     .output().unwrap();
                 assert!(output.status.success(), "stdout={} stderr={}",
                     String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+                assert!(String::from_utf8_lossy(&output.stdout).lines()
+                    .any(|line| line == "background-detached-parent-checked"),
+                    "detached parent did not execute the console/output assertions: {}",
+                    String::from_utf8_lossy(&output.stdout));
             }
         }
     }

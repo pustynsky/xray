@@ -3,3 +3,9 @@
 too-many-arguments-threshold = 7
 cognitive-complexity-threshold = 50
 type-complexity-threshold = 250
+
+# Runtime subprocesses must use background_command; specialized launchers and
+# test/build harnesses have explicit, scoped exceptions.
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "Use crate::background_command to prevent Windows console windows" },
+]

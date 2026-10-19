@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods, reason = "Process-level tests exercise native creation flags and stdio directly")]
+
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{

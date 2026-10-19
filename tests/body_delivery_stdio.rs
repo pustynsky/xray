@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods, reason = "Process-level tests exercise native creation flags and stdio directly")]
+
 use std::collections::{BTreeSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};

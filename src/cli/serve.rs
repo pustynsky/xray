@@ -917,7 +917,7 @@ fn platform_process_is_alive(pid: u32) -> Option<bool> {
     }
 
     let pid_arg = pid.to_string();
-    let status = std::process::Command::new("kill")
+    let status = crate::background_command("kill")
         .args(["-0", pid_arg.as_str()])
         .status()
         .ok()?;

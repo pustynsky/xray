@@ -310,6 +310,7 @@ fn connect_or_start_until(args: &ServeArgs, workspace: &Workspace, configuration
     }
 }
 
+#[allow(clippy::disallowed_methods, reason = "Backend launcher applies its own detach and host-job flags in platform::spawn_backend")]
 fn spawn_backend(args: &ServeArgs, workspace: &Workspace) -> io::Result<Child> {
     let log = OpenOptions::new().create(true).append(true).open(workspace.path("log"))?;
     let mut command = Command::new(std::env::current_exe()?);

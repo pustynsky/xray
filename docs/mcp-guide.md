@@ -55,6 +55,9 @@ protocol diagnostics in the existing workspace debug log.
 On Windows, runtime Git commands and the PID probe use `CREATE_NO_WINDOW`, so
 startup/history indexing and Git tools do not open console windows. Their captured
 output and error reporting are preserved; no MCP configuration flag is needed.
+Clippy enforces use of the shared command constructor in production code. The
+backend launcher applies its own process flags and has a local, documented exception;
+process-test harnesses and build-time Git metadata probes have separate exceptions.
 
 `--standalone` retains a private stdio server for troubleshooting. It cannot run
 alongside a shared owner of the same workspace. The existing dynamic `--dir .`
