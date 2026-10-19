@@ -255,7 +255,7 @@ HOW IT WORKS:
   With an explicit --dir, serve automatically connects to one shared workspace
   backend. Compatible clients reuse indexes and a watcher instead of loading
   their own copies. Configuration conflicts fail explicitly. The backend exits
-  after 60 seconds without clients (XRAY_BACKEND_IDLE_SECONDS: 1..3600).
+  after 600 seconds (10 minutes) without clients (XRAY_BACKEND_IDLE_SECONDS: 1..3600).
   --standalone keeps a private server; --dir . keeps dynamic/private binding.
   The backend performs these steps:
   1. On startup: loads (or builds) content index into RAM (~0.7-1.6s one-time)

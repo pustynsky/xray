@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Keep idle workspace backends alive for 10 minutes by default.** After the last client disconnects, the default shutdown delay is now 600 seconds instead of 60. Explicit `XRAY_BACKEND_IDLE_SECONDS` overrides (1 to 3600 seconds) are unchanged. This does not change recovery when a Windows host terminates the backend's process group.
+
 - **Stopped Git console windows flashing from the Windows MCP backend.** Runtime Git commands, including startup branch detection, history-cache builds and live Git tools, now use `CREATE_NO_WINDOW`. The PID probe uses the same background command helper. Captured stdout/stderr and exit-status handling are unchanged. A Windows regression runs a child from a detached parent and verifies that no console is allocated while both output streams remain readable; an explicit completion marker prevents a renamed or missing inner test from passing silently. Clippy rejects direct runtime `Command::new` calls outside the background helper and explicitly documented launcher exceptions.
 
 

@@ -32,8 +32,25 @@ Each connection has its own MCP protocol state and policy-reminder state. Tool
 handlers execute serially across connections, so a long reindex can delay other
 clients. Proxies keep one call in flight per session and bound buffered input.
 Disconnecting a proxy drains its replies and closes its stdout/stderr. Once all
-connections close, the backend saves and exits after 60 seconds of inactivity;
-`XRAY_BACKEND_IDLE_SECONDS` accepts an integer from 1 to 3600.
+connections close, the backend saves and exits after 600 seconds (10 minutes) without
+connections. `XRAY_BACKEND_IDLE_SECONDS` accepts an integer from 1 to 3600 and
+overrides this default. A connected but inactive client keeps the backend alive.
+This timeout does not prevent the host from terminating its Windows Job Object.
+
+The idle timer belongs to each workspace backend independently. Activity in workspace
+B does not extend the lifetime of an idle workspace A, and A stopping does not stop B.
+For a per-workspace override, set the environment value in that workspace's MCP entry:
+
+```json
+"env": {
+  "XRAY_BACKEND_IDLE_SECONDS": "600"
+}
+```
+
+Another workspace can use a different value, such as `"1800"` for 30 minutes.
+All clients of the same workspace must use the same environment setting; omitting it
+uses the 600-second default. Apply an override consistently to both VS Code and
+Copilot CLI configurations when they share that workspace.
 
 If a backend exits or its host terminates its Windows Job Object, surviving proxies
 keep their MCP channels open, elect one replacement, and restore their initialization
