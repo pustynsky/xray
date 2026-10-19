@@ -6,6 +6,68 @@ Complete guide for the `xray serve` MCP server — setup, tools API, and example
 
 The MCP server starts its event loop **immediately** and responds to `initialize` / `tools/list` without waiting for indexes to build. If a pre-built index exists on disk, it is loaded synchronously (< 3s). Otherwise, indexes are built in a background thread — search tools return a friendly "Index is being built, please retry" message until ready. This eliminates startup timeouts when Roo/VS Code launches the server for the first time.
 
+## Shared workspace backend
+
+With an explicit `--dir`, `xray serve` is a lightweight stdio proxy. The first
+connection automatically starts a separate backend for the canonical workspace;
+additional compatible connections reuse its indexes, watcher, rescan and caches.
+Different workspaces have separate backends. Existing MCP configuration does not
+need to change, and no manual backend startup or administrator privileges are required.
+
+Connections must use the same normalized serve arguments, executable build, and
+`XRAY_*` / `GIT_*` environment settings. A conflict reports the differing setting
+names instead of silently using the first client's settings or loading another
+copy. Extension order, case and duplicates are normalized. Reindex can rebuild the
+shared indexes, but cannot switch the workspace or change the indexed extensions.
+Restart all connections to change backend configuration. While compatible sessions
+are still active, a conflicting connection is rejected without stopping them. Once
+none remain, a connection with a new configuration retires the idle backend: it stops
+admitting sessions, saves its indexes, and releases ownership before a replacement
+starts. The proxy retries this startup handshake within its existing startup timeout;
+there is no need to wait out the idle timeout. Tool requests are not replayed.
+Stop old-version servers before upgrading: older binaries do not participate in
+backend ownership locking.
+
+Each connection has its own MCP protocol state and policy-reminder state. Tool
+handlers execute serially across connections, so a long reindex can delay other
+clients. Disconnecting the first client does not stop the backend or hold that
+client's stdout/stderr open. Once all
+connections close, the backend saves and exits after 60 seconds of inactivity;
+`XRAY_BACKEND_IDLE_SECONDS` accepts an integer from 1 to 3600. A backend failure
+closes connected proxies with an error. Requests, particularly edits, are never
+replayed automatically; a new MCP connection can start a replacement backend.
+
+Local IPC is restricted to the current user: named pipes on Windows and Unix
+sockets on Unix. A host that prohibits detached processes produces an explicit
+startup error rather than a backend tied to the first client's lifetime. Proxy
+stderr reports the backend PID. Backend stderr is stored under the index directory
+in `backends/<workspace-key>.log`; `--debug-log` continues to enable index and
+protocol diagnostics in the existing workspace debug log.
+
+`--standalone` retains a private stdio server for troubleshooting. It cannot run
+alongside a shared owner of the same workspace. The existing dynamic `--dir .`
+mode remains private because MCP roots can change its workspace after initialize;
+it prints a notice. Use an explicit workspace path to share indexes. Standalone
+CLI index-writing commands and older servers are not coordinated by the new
+backend lock; do not run them concurrently with a backend writing the same caches.
+
+### Running lifecycle tests
+
+On Windows, Cargo runs test executables in a Job Object that prohibits explicit
+process breakaway. Build and execute these tests outside Cargo's job using:
+
+```powershell
+.\scripts\test-shared-backend.ps1
+```
+
+The script includes the Windows-ignored lifecycle and private-memory tests; CI runs
+it as a separate Windows step. Other platforms run lifecycle tests with
+`cargo test --test shared_backend_stdio`. The tests cover concurrent startup,
+configuration conflicts, workspace isolation, watcher updates, edit/reindex,
+stdin draining, stdout/stderr EOF while other clients remain connected, idle
+configuration replacement, idle shutdown and recovery after a backend crash.
+
+
 ## Setup in VS Code
 
 1. **Install xray** (if not already):

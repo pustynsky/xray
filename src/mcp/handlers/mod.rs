@@ -910,6 +910,7 @@ pub fn determine_initial_binding(dir: &str, extensions: &[String], respect_git_e
 pub type CurrentBranchCache =
     Arc<RwLock<std::collections::HashMap<String, (Instant, Option<String>)>>>;
 
+#[derive(Clone)]
 pub struct HandlerContext {
     pub index: Arc<RwLock<ContentIndex>>,
     pub def_index: Option<Arc<RwLock<DefinitionIndex>>>,
@@ -2251,7 +2252,7 @@ fn build_or_load_content_index(
     Ok((reloaded, "rebuilt"))
 }
 
-fn effective_definition_build_extensions(ctx: &HandlerContext) -> Vec<String> {
+pub(crate) fn effective_definition_build_extensions(ctx: &HandlerContext) -> Vec<String> {
     if !ctx.def_extensions.is_empty() {
         return ctx.def_extensions.clone();
     }

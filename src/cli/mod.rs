@@ -3,6 +3,7 @@
 pub mod args;
 mod info;
 mod serve;
+mod shared_backend;
 
 pub use args::*;
 
@@ -97,7 +98,7 @@ pub fn run() {
         Commands::Info => { info::cmd_info(); Ok(()) },
         Commands::ContentIndex(args) => cmd_content_index(args),
         Commands::Grep(args) => cmd_grep(args),
-        Commands::Serve(args) => { serve::cmd_serve(args); Ok(()) },
+        Commands::Serve(args) => shared_backend::run(args).map_err(SearchError::Io),
         Commands::DefIndex(args) => cmd_def_index(args),
         Commands::DefAudit(args) => cmd_def_audit(args),
         Commands::Cleanup(args) => {

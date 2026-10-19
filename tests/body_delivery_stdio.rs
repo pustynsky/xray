@@ -16,7 +16,7 @@ struct Server {
 impl Server {
     fn start(root: &std::path::Path, limit: &str) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_xray"))
-            .args(["serve", "--dir"]).arg(root).args(["--ext", "rs", "--definitions"])
+            .args(["serve", "--standalone", "--dir"]).arg(root).args(["--ext", "rs", "--definitions"])
             .current_dir(root)
             .env("XRAY_TRANSPORT_MAX_BYTES", limit)
             .env("XRAY_GUIDANCE_PREFIX", "1")

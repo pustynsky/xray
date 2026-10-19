@@ -374,7 +374,7 @@ xray def-audit --dir C:\Projects --ext cs --show-lossy
 
 ## `xray serve` — Start MCP Server
 
-Starts a Model Context Protocol (MCP) server over stdio. See [MCP Server Guide](mcp-guide.md) for full documentation on setup, tools API, and examples.
+Exposes MCP over stdio. With an explicit `--dir`, compatible clients automatically share one workspace backend and its indexes; each `serve` process remains a lightweight proxy. `--dir .` retains dynamic, private workspace binding. See the [MCP Server Guide](mcp-guide.md#shared-workspace-backend) for lifecycle, configuration compatibility, diagnostics, and tests.
 
 ```bash
 # Start MCP server for C# files
@@ -402,6 +402,7 @@ xray serve --dir C:\Projects --ext rs --watch --definitions
 | `--watch`              | Watch for file changes and update indexes incrementally              |
 | `--definitions`        | Load (or build on first use) code definition index (tree-sitter AST) |
 | `--metrics`            | Add `responseBytes` and `estimatedTokens` to every tool response     |
+| `--standalone`         | Use a private stdio server; refuses an existing owner of an explicitly selected workspace |
 | `--debounce-ms <MS>`   | Debounce delay for file watcher (default: 500)                       |
 | `--no-periodic-rescan` | Disable the periodic rescan fail-safe (see note below)               |
 | `--rescan-interval-sec <SECS>` | Interval for the periodic rescan (default: 300, min: 10 enforced at runtime) |

@@ -111,6 +111,11 @@ fn compute_thread_budget(
 
 
 pub fn cmd_serve(args: ServeArgs) {
+    mcp::server::run_server(build_context(args));
+    crate::index::log_memory("serve: event loop exited");
+}
+
+pub(super) fn build_context(args: ServeArgs) -> mcp::handlers::HandlerContext {
     let dir_str = args.dir.clone();
     // Flatten multi-value --ext: supports both ["rs", "md"] and ["rs,md"]
     let extensions: Vec<String> = args.ext.iter()
@@ -392,8 +397,7 @@ pub fn cmd_serve(args: ServeArgs) {
         Arc::clone(&ctx.watcher_stats),
     );
 
-    mcp::server::run_server(ctx);
-    crate::index::log_memory("serve: event loop exited");
+    ctx
 }
 
 /// Spawn a background thread that emits one `memorySnapshot` phase log
@@ -2829,4 +2833,3 @@ mod serve_thread_budget_tests {
         assert_eq!(d, 0);
     }
 }
-

@@ -1,6 +1,6 @@
 use std::io::{self, BufRead, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use tracing::{debug, error, info, warn};
@@ -357,8 +357,28 @@ pub fn run_server(ctx: HandlerContext) {
 fn run_server_with_io<R: BufRead, W: Write>(
     ctx: HandlerContext,
     reader: &mut R,
+    writer: &mut W,
+    install_signal_handler: bool,
+) {
+    run_server_loop(ctx, reader, writer, install_signal_handler, None);
+}
+
+pub(crate) fn run_shared_session<R: BufRead, W: Write>(
+    mut ctx: HandlerContext,
+    reader: &mut R,
+    writer: &mut W,
+    request_gate: &Mutex<()>,
+) {
+    ctx.policy_reminder_state = Arc::new(handlers::utils::PolicyReminderState::new());
+    run_server_loop(ctx, reader, writer, false, Some(request_gate));
+}
+
+fn run_server_loop<R: BufRead, W: Write>(
+    ctx: HandlerContext,
+    reader: &mut R,
     mut writer: &mut W,
     install_signal_handler: bool,
+    request_gate: Option<&Mutex<()>>,
 ) {
     let mut state = ServerState::new();
 
@@ -569,7 +589,22 @@ fn run_server_with_io<R: BufRead, W: Write>(
                     // But we need to trigger roots/list after initialize response.
                     // We do this after sending the initialize response below.
 
-                    let response = dispatch_request_with_panic_guard(&ctx, &request.method, &request.params, id.clone());
+                    let response = {
+                        // Preserve the existing serial handler execution across connections.
+                        // Do not hold this gate while reading from or writing to a client.
+                        let _request = request_gate.map(|gate| gate.lock().unwrap_or_else(|e| {
+                            warn!("Recovering poisoned shared request gate");
+                            e.into_inner()
+                        }));
+                        if let Some(message) = request_gate.and_then(|_| shared_config_error(&ctx, &request.method, &request.params)) {
+                            safe_to_value(
+                                JsonRpcResponse::new(id.clone(), safe_to_value(ToolCallResult::error(message), &id)),
+                                &id,
+                            )
+                        } else {
+                            dispatch_request_with_panic_guard(&ctx, &request.method, &request.params, id.clone())
+                        }
+                    };
 
                     let resp_str = match serde_json::to_string(&response) {
                         Ok(s) => s,
@@ -631,6 +666,10 @@ fn run_server_with_io<R: BufRead, W: Write>(
     };
 
     crate::index::log_protocol_event("shutdown", &[("reason", shutdown_reason.to_string())]);
+    if request_gate.is_some() {
+        info!("MCP session closed; workspace backend remains available");
+        return;
+    }
     info!("stdin closed, saving indexes before shutdown...");
     crate::index::log_memory("shutdown: saving indexes");
     save_indexes_on_shutdown(&ctx);
@@ -655,7 +694,38 @@ fn run_server_with_io<R: BufRead, W: Write>(
 /// partial in-memory state. If it is ready, we save unconditionally
 /// (including the empty case, which represents a legitimate "all files
 /// removed" state).
-fn save_indexes_on_shutdown(ctx: &HandlerContext) {
+fn shared_config_error(ctx: &HandlerContext, method: &str, params: &Option<Value>) -> Option<String> {
+    if method != "tools/call" {
+        return None;
+    }
+    let params = params.as_ref()?;
+    let expected = match params.get("name")?.as_str()? {
+        "xray_reindex" => ctx.server_ext.split(',').map(str::to_string).collect(),
+        "xray_reindex_definitions" => handlers::effective_definition_build_extensions(ctx),
+        _ => return None,
+    };
+    let ext = params.get("arguments")?.get("ext")?.as_array()?;
+    if ext.is_empty() {
+        return None;
+    }
+    let supplied: Option<Vec<String>> = ext.iter().map(|v| v.as_str().map(str::to_string)).collect();
+    let mut supplied = supplied?;
+    let mut expected: Vec<String> = expected;
+    for values in [&mut supplied, &mut expected] {
+        for value in values.iter_mut() {
+            *value = value.trim().to_lowercase();
+        }
+        values.sort();
+        values.dedup();
+    }
+    (supplied != expected).then(|| {
+        "Cannot change indexed extensions on a shared workspace backend. Omit `ext` to rebuild \
+         its current configuration, or restart all connections with the new --ext configuration."
+            .to_string()
+    })
+}
+
+pub(crate) fn save_indexes_on_shutdown(ctx: &HandlerContext) {
     use std::sync::atomic::Ordering;
 
     // Save content index

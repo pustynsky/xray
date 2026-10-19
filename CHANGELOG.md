@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Shared indexes across MCP clients for explicitly selected workspaces.** `xray serve --dir <path>` now automatically starts or connects to one backend per canonical workspace, with a shared index set, watcher and cache persistence. Compatible clients keep separate MCP sessions; conflicting configurations are rejected while sessions are active. An idle backend can be replaced immediately when all clients restart with a new configuration. Closing a proxy drains its pending responses and closes its stdio handles without stopping other clients, including on Windows. Backends save and exit after an idle timeout. `--standalone` retains private serving, and dynamic `--dir .` binding remains private. Windows lifecycle tests run outside Cargo's Job Object through `scripts/test-shared-backend.ps1`.
+
+
 - **Fixed content-index retries after partial updates.** A temporary read failure for an already-indexed file now keeps the full-scan watermark unchanged even when other files are updated or removed successfully. Targeted watcher and synchronous-edit updates no longer advance that shared watermark. Old postings stay searchable, and periodic rescans retry the file after access is restored without another filesystem event, including after saving and reloading a partially updated cache. Unreadable new or previously skipped files remain eligible for addition without blocking the watermark. The cache format is unchanged.
 
 - **Documented manual Xray-first code discovery setup.** The installation guide now includes persistent client instructions, verification of instruction loading and actual tool selection, fallback guidance, and removal steps. README and MCP guidance link to the workflow and distinguish preferences from host-enforced restrictions. Installer behavior is unchanged.
