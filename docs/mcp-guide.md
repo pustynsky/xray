@@ -52,6 +52,9 @@ there is still one owner of the heavy indexes, not a private index per session. 
 stderr reports the backend PID. Backend stderr is stored under the index directory
 in `backends/<workspace-key>.log`; `--debug-log` continues to enable index and
 protocol diagnostics in the existing workspace debug log.
+On Windows, runtime Git commands and the PID probe use `CREATE_NO_WINDOW`, so
+startup/history indexing and Git tools do not open console windows. Their captured
+output and error reporting are preserved; no MCP configuration flag is needed.
 
 `--standalone` retains a private stdio server for troubleshooting. It cannot run
 alongside a shared owner of the same workspace. The existing dynamic `--dir .`

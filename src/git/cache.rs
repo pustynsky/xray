@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -676,7 +676,7 @@ impl GitHistoryCache {
         // No `--` separator before `branch`: in `git log`, anything after `--` is treated
         // as a path-filter, not a revision. CACHE-001 defence relies on `validate_git_ref`
         // (above) rejecting any `-`-prefixed input before we get here.
-        let mut child = Command::new("git")
+        let mut child = crate::background_command("git")
             .args([
                 "-c",
                 "core.quotePath=false", // raw UTF-8 paths
@@ -1110,7 +1110,7 @@ impl GitHistoryCache {
         timeout: std::time::Duration,
         context: &str,
     ) -> Result<std::process::ExitStatus, String> {
-        let mut child = Command::new("git")
+        let mut child = crate::background_command("git")
             .args(args)
             .current_dir(repo_path)
             .stdout(Stdio::null())
@@ -1127,7 +1127,7 @@ impl GitHistoryCache {
         timeout: std::time::Duration,
         context: &str,
     ) -> Result<std::process::Output, String> {
-        let mut child = Command::new("git")
+        let mut child = crate::background_command("git")
             .args(args)
             .current_dir(repo_path)
             .stdout(Stdio::piped())

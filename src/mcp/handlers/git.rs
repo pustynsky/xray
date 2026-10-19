@@ -1448,7 +1448,7 @@ fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
 /// Run a git command in the given repo directory and return trimmed stdout.
 fn run_git_command(repo: &str, args: &[&str]) -> Result<String, String> {
-    let output = std::process::Command::new("git")
+    let output = crate::background_command("git")
         .args(args)
         .current_dir(repo)
         .output()

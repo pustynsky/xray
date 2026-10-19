@@ -1,7 +1,6 @@
 //! Shared utility functions for MCP tool handlers.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -94,7 +93,7 @@ pub(crate) fn current_branch_resolved(ctx: &HandlerContext) -> (Option<String>, 
     // atomic with the write below). N is bounded by handler concurrency and the
     // probe is cheap (~5–20 ms on Windows), so we accept it instead of adding a
     // single-flight gate.
-    let probed = Command::new("git")
+    let probed = crate::background_command("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(&dir)
         .output()

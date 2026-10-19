@@ -470,7 +470,7 @@ fn run_file_history_query(
         format!("{}%H{}%ai{}%an{}%ae{}%s{}", RECORD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP)
     };
 
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::background_command("git");
     cmd.current_dir(repo_path)
         .arg("log")
         .arg(format!("--format={}", format));
@@ -547,7 +547,7 @@ fn get_commit_diff(repo_path: &str, hash: &str, file: &str) -> Result<String, St
     //
     // Net effect: 200-commit `xray_git_history file=… includeDiff=true`
     // drops from 400 → 200 spawns (≈1–4s saved on Windows).
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::background_command("git");
     cmd.current_dir(repo_path)
         .arg("show")
         .arg("--first-parent")
@@ -622,7 +622,7 @@ fn run_first_commit_query(
         RECORD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP
     );
 
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::background_command("git");
     cmd.current_dir(repo_path)
         .arg("log")
         .arg(format!("--format={}", format))
@@ -662,7 +662,7 @@ pub fn top_authors(
     // But git shortlog doesn't give us first/last dates, so we use git log
     let format = format!("{}%H{}%ai{}%an{}%ae{}%s{}", RECORD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP);
 
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::background_command("git");
     cmd.current_dir(repo_path)
         .arg("log")
         .arg(format!("--format={}", format));
@@ -777,7 +777,7 @@ pub fn repo_activity(
     // Use git log with --name-only to get changed files per commit
     let format = format!("{}%H{}%ai{}%an{}%ae{}%s{}", RECORD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP);
 
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::background_command("git");
     cmd.current_dir(repo_path)
         .arg("log")
         .arg(format!("--format={}", format))
@@ -846,7 +846,7 @@ pub fn repo_activity(
 /// [`file_ever_existed_in_git`] to check whether a file was ever tracked
 /// (including deleted files).
 pub fn file_exists_in_current_head(repo: &str, file: &str) -> bool {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::background_command("git");
     cmd.current_dir(repo)
         .arg("ls-files")
         .arg("--")
@@ -870,7 +870,7 @@ pub fn file_exists_in_current_head(repo: &str, file: &str) -> bool {
 /// Cost: one `git rev-parse HEAD` (~1-3 ms). Called only on empty cache
 /// results, so non-empty queries pay zero overhead.
 pub fn current_head_hash(repo: &str) -> Option<String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::background_command("git");
     cmd.current_dir(repo).args(["rev-parse", "HEAD"]);
     match run_git(&mut cmd) {
         Ok(output) => {
@@ -961,7 +961,7 @@ fn shallow_cache() -> &'static std::sync::Mutex<HashMap<String, ShallowState>> {
 /// elsewhere). Returns the path even when the file does not currently
 /// exist; callers must `stat`/`read` it to detect presence.
 fn resolve_shallow_path(repo: &str) -> Option<std::path::PathBuf> {
-    let out = Command::new("git")
+    let out = crate::background_command("git")
         .current_dir(repo)
         .args(["rev-parse", "--git-path", "shallow"])
         .output()
@@ -1219,7 +1219,7 @@ fn worktree_relative_path(root: &Path, path: &Path) -> Option<String> {
 /// honors it — `git ls-files --eol` reports `attr/text` for a `* crlf` rule — so
 /// the compatibility table from gitattributes(5) is applied here.
 fn check_attr_line_ending_inputs(root: &Path, relative: &str) -> Option<(String, String)> {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::background_command("git");
     cmd.current_dir(root)
         .args(["check-attr", "-z", "text", "eol", "crlf", "--"])
         .arg(relative);
@@ -1265,7 +1265,7 @@ fn apply_legacy_crlf_attribute(text: String, eol: String, crlf: String) -> (Stri
 /// Not cached: config is read once per created file, and a stale answer would
 /// be worse than the spawn it saves.
 fn read_eol_config(root: &Path) -> EolConfig {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::background_command("git");
     cmd.current_dir(root)
         .args(["config", "-z", "--get-regexp", r"^core\.(autocrlf|eol)$"]);
     // Exit 1 here just means neither key is set; check-attr already proved Git works.
@@ -1330,7 +1330,7 @@ pub fn file_exists_in_git(repo: &str, file: &str) -> bool {
 /// cheaper `file_exists_in_current_head` returns false AND you need to decide
 /// between "never existed" and "deleted".
 pub fn file_ever_existed_in_git(repo: &str, file: &str) -> bool {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::background_command("git");
     cmd.current_dir(repo)
         .arg("log")
         .arg("--all")
@@ -1359,7 +1359,7 @@ pub fn file_ever_existed_in_git(repo: &str, file: &str) -> bool {
 /// 75-225 seconds on large repos (200K files). This single call reads only
 /// `.git/index` and runs in ~200-700ms even on huge repos.
 pub fn list_tracked_files_under(repo: &str, dir: &str) -> std::collections::HashSet<String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::background_command("git");
     cmd.current_dir(repo)
         .arg("ls-files")
         .arg("-z"); // NUL-separated — safe for unusual filenames
@@ -1394,7 +1394,7 @@ pub fn blame_lines(
 ) -> Result<Vec<BlameLine>, String> {
     let end = end_line.unwrap_or(start_line);
 
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::background_command("git");
     cmd.current_dir(repo_path)
         .arg("blame")
         .arg(format!("-L{},{}", start_line, end))

@@ -347,7 +347,7 @@ fn build_context_with_index_dir(args: ServeArgs, idx_base: PathBuf) -> mcp::hand
     );
 
     // ─── Detect current branch ───
-    let current_branch = std::process::Command::new("git")
+    let current_branch = crate::background_command("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(&dir_str)
         .output()
@@ -885,7 +885,7 @@ fn primary_build_lock_owner_is_alive(pid: u32) -> Option<bool> {
 #[cfg(windows)]
 fn platform_process_is_alive(pid: u32) -> Option<bool> {
     let filter = format!("PID eq {}", pid);
-    let output = std::process::Command::new("tasklist")
+    let output = crate::background_command("tasklist")
         .args(["/FI", filter.as_str(), "/FO", "CSV", "/NH"])
         .output()
         .ok()?;
@@ -2539,7 +2539,7 @@ mod serve_respect_git_exclude_tests {
     }
 
     fn init_repo_with_exclude(dir: &std::path::Path, pattern: &str) {
-        std::process::Command::new("git")
+        crate::background_command("git")
             .args(["init", "--quiet"])
             .current_dir(dir)
             .output()

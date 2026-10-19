@@ -2591,7 +2591,7 @@ fn rebuild_git_cache_for_workspace(ctx: &HandlerContext, dir: &str) {
             let disk_cache = GitHistoryCache::load_from_disk(&cache_path).ok();
             match disk_cache {
                 Some(c) => {
-                    let current_head = std::process::Command::new("git")
+                    let current_head = crate::background_command("git")
                         .args(["rev-parse", &branch])
                         .current_dir(&repo_path)
                         .output()
