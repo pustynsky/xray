@@ -237,6 +237,16 @@ Building creates many temporary allocations that fragment the heap. Reloading fr
 
 ## Phase 3: File Watcher
 
+The effective content extensions come from the live content index, including
+startup caches loaded through the fallback with a wider or reordered set. Reindexing
+restarts the watcher and periodic rescan when either the workspace or those
+extensions change. Definition extensions retain their separate configured scope.
+Generation checks stop outgoing loops, but cannot cancel work already in progress.
+Content batches and reconciliation therefore compare their captured extension
+scope with the live metadata under the content-index write lock before applying
+changes. A stale scope is discarded without preventing independent definition
+updates. Reconciliation also checks before preparing changes from its disk snapshot.
+
 The watcher runs on a dedicated OS thread spawned at server startup:
 
 ```mermaid
@@ -405,6 +415,8 @@ them in reverse:
 3. ctx.file_index  (Arc<RwLock<Option<FileIndex>>>)
 4. ctx.git_cache   (Arc<RwLock<Option<GitHistoryCache>>>)
 ```
+
+Startup and cross-workspace definition publication also take a short `ctx.workspace` read lock **after** acquiring `ctx.def_index`. The generation and directory check, index replacement, and ready/building flag updates happen under that guard. A cross-workspace build request resets readiness and claims the building flag under a workspace **write** lock, preventing a lost handoff to a finishing worker. Workspace mutation must release its workspace lock before acquiring an index lock. The active worker follows the latest workspace when its result becomes stale; a cache loaded by a later switch takes precedence over that worker.
 
 ### Rationale
 

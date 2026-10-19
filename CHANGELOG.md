@@ -4,6 +4,13 @@
 
 - **Shared indexes across MCP clients for explicitly selected workspaces.** `xray serve --dir <path>` now automatically starts or connects to one backend per canonical workspace, with a shared index set, watcher and cache persistence. Compatible clients keep separate MCP sessions; conflicting configurations are rejected while sessions are active. An idle backend can be replaced immediately when all clients restart with a new configuration. Closing a proxy drains its pending responses and closes its stdio handles without stopping other clients, including on Windows. Backends save and exit after an idle timeout. `--standalone` retains private serving, and dynamic `--dir .` binding remains private. Windows lifecycle tests run outside Cargo's Job Object through `scripts/test-shared-backend.ps1`.
 
+## 0.9.0 (2026-10-16)
+
+- **Kept watcher filters aligned with reindexed content.** Reindexing with a different extension set now restarts the watcher even within the same workspace. Watcher events, startup reconciliation, and periodic rescans use the live content extensions rather than the startup configuration. In-flight batches and reconciliation snapshots cannot apply an outgoing extension scope to the replacement index. Definition filters remain independent, and cache formats are unchanged.
+
+- **Kept background definition builds bound to the current workspace.** Startup and cross-workspace workers now reject an outgoing build at publication, including switches away and back to the same path. The worker builds the latest workspace instead of leaving it pending, and does not overwrite an index loaded from the new workspace's cache. Ready/building flags change under the same workspace guard as publication. Cache formats are unchanged.
+
+- **Fixed regex edit context checks for selected occurrences.** `xray_edit` now validates `expectedContext` near the requested regex match rather than the first match, preventing an unrelated occurrence from authorizing a write. Out-of-range occurrences are reported before context checks. Replace-all keeps its existing first-match context behavior.
 
 - **Fixed content-index retries after partial updates.** A temporary read failure for an already-indexed file now keeps the full-scan watermark unchanged even when other files are updated or removed successfully. Targeted watcher and synchronous-edit updates no longer advance that shared watermark. Old postings stay searchable, and periodic rescans retry the file after access is restored without another filesystem event, including after saving and reloading a partially updated cache. Unreadable new or previously skipped files remain eligible for addition without blocking the watermark. The cache format is unchanged.
 

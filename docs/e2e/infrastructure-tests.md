@@ -592,7 +592,7 @@ protection uses a separate `content_building` flag with `compare_exchange`.
 - After roots/list: `ws.status = Reindexing`, `content_ready = false`, `def_ready = false`
 - `xray_definitions` returns `WORKSPACE_REINDEXING` error (not 0 results!)
 - After `xray_reindex`: content + def indexes loaded, `ws.status = Resolved`
-- Response includes `defIndexAction` (loaded_cache or background_build)
+- Response includes `defIndexAction` (`loaded_cache`, `background_build`, or `build_in_progress` when an active worker will rebuild the latest workspace)
 
 ---
 

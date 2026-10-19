@@ -21,6 +21,231 @@ use super::handlers_test_utils::make_ctx_with_defs;
 use serde_json::json;
 
 
+#[cfg(feature = "lang-rust")]
+fn definition_switch_fixture() -> (tempfile::TempDir, HandlerContext, Vec<String>) {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots: Vec<String> = ["initial", "a", "b"].iter().map(|name| {
+        let path = tmp.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        crate::clean_path(&std::fs::canonicalize(path).unwrap().to_string_lossy())
+    }).collect();
+    std::fs::write(std::path::Path::new(&roots[1]).join("a.rs"), "pub fn from_a() {}\n").unwrap();
+    std::fs::write(std::path::Path::new(&roots[2]).join("b.rs"), "pub fn from_b() {}\n").unwrap();
+    let mut ctx = HandlerContext::default();
+    ctx.index_base = tmp.path().join("indexes");
+    ctx.server_ext = "rs".into();
+    ctx.def_extensions = vec!["rs".into()];
+    ctx.def_index = Some(std::sync::Arc::new(std::sync::RwLock::new(
+        crate::definitions::DefinitionIndex::default(),
+    )));
+    *ctx.index.write().unwrap() = crate::ContentIndex { root: roots[0].clone(), ..Default::default() };
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(roots[0].clone());
+        ws.mode = WorkspaceBindingMode::ManualOverride;
+    }
+    (tmp, ctx, roots)
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
+fn test_definition_cross_build_latest_workspace_is_built() {
+    use std::sync::atomic::Ordering;
+    let (_tmp, ctx, roots) = definition_switch_fixture();
+    let defs = ctx.def_index.as_ref().unwrap();
+    let barrier = defs.read().unwrap();
+    for dir in &roots[1..] {
+        let response = super::dispatch_tool(&ctx, "xray_reindex", &json!({"dir":dir,"ext":["rs"]}));
+        assert!(!response.is_error, "{}", response.content[0].text);
+        assert!(wait_until(|| ctx.def_building.load(Ordering::Acquire)));
+    }
+    drop(barrier);
+    assert!(wait_until(|| !ctx.def_building.load(Ordering::Acquire)));
+    assert!(ctx.def_ready.load(Ordering::Acquire));
+    let response = super::dispatch_tool(&ctx, "xray_definitions", &json!({"name":["from_a","from_b"],"exactNameOnly":true}));
+    assert!(!response.is_error, "{}", response.content[0].text);
+    let value: serde_json::Value = serde_json::from_str(&response.content[0].text).unwrap();
+    let names: Vec<_> = value["definitions"].as_array().unwrap().iter().map(|d| d["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["from_b"], "outgoing definitions must not be served as current: {value}");
+    assert!(code_xray::path_eq(&defs.read().unwrap().root, &roots[2]));
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
+fn test_definition_cross_build_same_workspace_control() {
+    use std::sync::atomic::Ordering;
+    let (_tmp, ctx, roots) = definition_switch_fixture();
+    ctx.workspace.write().unwrap().set_dir(roots[1].clone());
+    assert_eq!(cross_load_definition_index(&ctx, &roots[1]), Some("background_build"));
+    assert!(wait_until(|| !ctx.def_building.load(Ordering::Acquire) && ctx.def_ready.load(Ordering::Acquire)));
+    let defs = ctx.def_index.as_ref().unwrap().read().unwrap();
+    assert!(defs.definitions.iter().any(|d| d.name == "from_a"));
+    assert!(code_xray::path_eq(&defs.root, &roots[1]));
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
+fn test_definition_cross_build_generation_rejects_round_trip() {
+    use std::sync::atomic::Ordering;
+    let (_tmp, ctx, roots) = definition_switch_fixture();
+    ctx.workspace.write().unwrap().set_dir(roots[1].clone());
+    let defs = ctx.def_index.as_ref().unwrap();
+    let barrier = defs.read().unwrap();
+    assert_eq!(cross_load_definition_index(&ctx, &roots[1]), Some("background_build"));
+    assert!(wait_until(|| crate::definitions::load_definition_index(&roots[1], "rs", &ctx.index_base).is_ok()));
+    std::fs::write(std::path::Path::new(&roots[1]).join("a.rs"), "pub fn from_new_a() {}\n").unwrap();
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(roots[2].clone());
+        ws.generation += 1;
+        ws.set_dir(roots[1].clone());
+        ws.generation += 1;
+    }
+    drop(barrier);
+    assert!(wait_until(|| !ctx.def_building.load(Ordering::Acquire)));
+    assert!(ctx.def_ready.load(Ordering::Acquire));
+    let defs = defs.read().unwrap();
+    assert!(defs.definitions.iter().any(|d| d.name == "from_new_a"));
+    assert!(!defs.definitions.iter().any(|d| d.name == "from_a"));
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
+fn test_definition_cross_build_preserves_new_workspace_cache() {
+    use std::sync::{Arc, atomic::Ordering};
+    let (_tmp, ctx, roots) = definition_switch_fixture();
+    let cached = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+        dir: roots[2].clone(), ext: "rs".into(), threads: 1, respect_git_exclude: true,
+    });
+    crate::definitions::save_definition_index(&cached, &ctx.index_base).unwrap();
+    std::fs::write(std::path::Path::new(&roots[2]).join("b.rs"), "pub fn uncached_b() {}\n").unwrap();
+    let ctx = Arc::new(ctx);
+    let defs = Arc::clone(ctx.def_index.as_ref().unwrap());
+    let barrier = defs.read().unwrap();
+    let response = super::dispatch_tool(&ctx, "xray_reindex", &json!({"dir":roots[1],"ext":["rs"]}));
+    assert!(!response.is_error, "{}", response.content[0].text);
+    assert!(wait_until(|| crate::definitions::load_definition_index(&roots[1], "rs", &ctx.index_base).is_ok()));
+    let next_ctx = Arc::clone(&ctx);
+    let next_dir = roots[2].clone();
+    let switch = std::thread::spawn(move || super::dispatch_tool(
+        &next_ctx, "xray_reindex", &json!({"dir":next_dir,"ext":["rs"]}),
+    ));
+    assert!(wait_until(|| code_xray::path_eq(&ctx.server_dir(), &roots[2])));
+    drop(barrier);
+    let response = switch.join().unwrap();
+    assert!(!response.is_error, "{}", response.content[0].text);
+    let value: serde_json::Value = serde_json::from_str(&response.content[0].text).unwrap();
+    assert_eq!(value["defIndexAction"], "loaded_cache");
+    assert!(wait_until(|| !ctx.def_building.load(Ordering::Acquire)));
+    assert!(ctx.def_ready.load(Ordering::Acquire));
+    let defs = defs.read().unwrap();
+    assert!(code_xray::path_eq(&defs.root, &roots[2]));
+    assert!(defs.definitions.iter().any(|d| d.name == "from_b"));
+    assert!(!defs.definitions.iter().any(|d| d.name == "from_a"));
+}
+
+struct WatcherScopeStop(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+impl Drop for WatcherScopeStop {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+fn reindex_watcher_extension_scope(ext: &str, same_workspace: bool, periodic: bool) {
+    use std::sync::atomic::Ordering;
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a");
+    let b = if same_workspace { a.clone() } else { tmp.path().join("b") };
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    std::fs::write(b.join("probe.rs"), "fn rsmarker() {}\n").unwrap();
+    std::fs::write(b.join("probe.cs"), "class CsMarker {}\n").unwrap();
+    let a = crate::clean_path(&std::fs::canonicalize(a).unwrap().to_string_lossy());
+    let b = std::fs::canonicalize(b).unwrap();
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "cs".into();
+    ctx.index_base = tmp.path().join("indexes");
+    ctx.watch_enabled = true;
+    ctx.watch_debounce_ms = 20;
+    ctx.periodic_rescan_enabled = periodic;
+    ctx.rescan_interval_sec = 10;
+    ctx.content_ready.store(true, Ordering::Release);
+    ctx.def_ready.store(true, Ordering::Release);
+    *ctx.index.write().unwrap() = crate::mcp::watcher::build_watch_index_from(crate::ContentIndex {
+        root: a.clone(), extensions: vec!["cs".into()], ..Default::default()
+    });
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(a.clone());
+        ws.mode = WorkspaceBindingMode::ManualOverride;
+    }
+    let _stop = WatcherScopeStop(std::sync::Arc::clone(&ctx.watcher_generation));
+    super::restart_watcher_for_workspace(&ctx, &a);
+    assert!(wait_until(|| {
+        std::fs::write(std::path::Path::new(&a).join("watcher.signal"), "ready\n").unwrap();
+        ctx.watcher_stats.events_total.load(Ordering::Relaxed) > 0
+    }));
+    let old_generation = ctx.watcher_generation.load(Ordering::Acquire);
+    let result = super::dispatch_tool(&ctx, "xray_reindex", &json!({"dir":b.to_str().unwrap(),"ext":[ext]}));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    if !same_workspace || ext != "cs" {
+        assert!(ctx.watcher_generation.load(Ordering::Acquire) > old_generation);
+    } else {
+        assert_eq!(ctx.watcher_generation.load(Ordering::Acquire), old_generation);
+    }
+    std::fs::write(b.join("probe.rs"), "fn rsmarker_updated() {}\n").unwrap();
+    std::fs::write(b.join("probe.cs"), "class CsMarkerUpdated {}\n").unwrap();
+    let expected = if ext == "rs" { "rsmarker_updated" } else { "csmarkerupdated" };
+    assert!(wait_until(|| ctx.index.read().unwrap().index.contains_key(expected)),
+        "watcher did not update the requested extension");
+    if periodic {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+        while ctx.watcher_stats.periodic_rescan_total.load(Ordering::Acquire) < 2 {
+            assert!(std::time::Instant::now() < deadline, "periodic rescan did not run");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    {
+        let index = ctx.index.read().unwrap();
+        assert_eq!(index.extensions, vec![ext.to_string()]);
+        assert!(index.index.contains_key(expected));
+        assert!(index.files.iter().all(|file| file.is_empty() || std::path::Path::new(file).extension().is_some_and(|e| e == ext)));
+    }
+    std::fs::remove_file(b.join(format!("probe.{ext}"))).unwrap();
+    std::fs::write(b.join(format!("created.{ext}")), "createdmarker\n").unwrap();
+    assert!(wait_until(|| {
+        let index = ctx.index.read().unwrap();
+        index.index.contains_key("createdmarker") && !index.index.contains_key(expected)
+    }), "watcher did not track create/delete after reindex");
+    let index = ctx.index.read().unwrap();
+    super::save_content_index(&index, &ctx.index_base).unwrap();
+    let loaded = super::load_content_index(&ctx.server_dir(), ext, &ctx.index_base).unwrap();
+    assert_eq!(loaded.extensions, vec![ext.to_string()]);
+    assert!(loaded.index.contains_key("createdmarker"));
+    assert!(loaded.files.iter().all(|file| file.is_empty() || std::path::Path::new(file).extension().is_some_and(|e| e == ext)), "{:?}", loaded.files);
+}
+
+#[test]
+fn test_reindex_watcher_scope_workspace_switch() {
+    reindex_watcher_extension_scope("rs", false, false);
+}
+
+#[test]
+fn test_reindex_watcher_scope_same_workspace() {
+    reindex_watcher_extension_scope("rs", true, false);
+}
+
+#[test]
+fn test_reindex_watcher_scope_unchanged_control() {
+    reindex_watcher_extension_scope("cs", true, false);
+}
+
+#[test]
+fn test_reindex_watcher_scope_periodic_rescan() {
+    reindex_watcher_extension_scope("rs", false, true);
+}
+
 fn wait_until(predicate: impl Fn() -> bool) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
@@ -945,6 +1170,7 @@ fn test_cross_load_definition_index_save_failure_keeps_fresh_in_memory_index() {
     let index_base_file = tmp.path().join("not_a_dir.dat");
     std::fs::write(&index_base_file, b"placeholder").unwrap();
     ctx.index_base = index_base_file;
+    ctx.workspace.write().unwrap().set_dir(workspace_str.clone());
     // Reset def_ready so we can poll it for background completion below.
     ctx.def_ready.store(false, Ordering::Release);
 

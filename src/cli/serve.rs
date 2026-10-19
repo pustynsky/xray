@@ -111,11 +111,19 @@ fn compute_thread_budget(
 
 
 pub fn cmd_serve(args: ServeArgs) {
-    mcp::server::run_server(build_context(args));
+    cmd_serve_with_index_dir(args, index_dir());
+}
+
+fn cmd_serve_with_index_dir(args: ServeArgs, idx_base: PathBuf) {
+    mcp::server::run_server(build_context_with_index_dir(args, idx_base));
     crate::index::log_memory("serve: event loop exited");
 }
 
 pub(super) fn build_context(args: ServeArgs) -> mcp::handlers::HandlerContext {
+    build_context_with_index_dir(args, index_dir())
+}
+
+fn build_context_with_index_dir(args: ServeArgs, idx_base: PathBuf) -> mcp::handlers::HandlerContext {
     let dir_str = args.dir.clone();
     // Flatten multi-value --ext: supports both ["rs", "md"] and ["rs,md"]
     let extensions: Vec<String> = args.ext.iter()
@@ -125,7 +133,6 @@ pub(super) fn build_context(args: ServeArgs) -> mcp::handlers::HandlerContext {
         .collect();
     let exts_for_load = extensions.join(",");
 
-    let idx_base = index_dir();
     init_logging(&args, &dir_str, &exts_for_load, &idx_base);
 
     // ─── Workspace binding: determine BEFORE index building ───
@@ -135,6 +142,8 @@ pub(super) fn build_context(args: ServeArgs) -> mcp::handlers::HandlerContext {
     if is_unresolved {
         warn!(target: "xray::startup", dir = %ws_binding.dir, "workspace UNRESOLVED (no source files), skipping index build");
     }
+
+    let workspace = Arc::new(RwLock::new(ws_binding));
 
     // ─── Async startup flags ───
     let content_ready = Arc::new(AtomicBool::new(false));
@@ -158,6 +167,7 @@ pub(super) fn build_context(args: ServeArgs) -> mcp::handlers::HandlerContext {
     };
 
     let definition_load = if args.definitions {
+        let workspace = Arc::clone(&workspace);
         let def_dir_str = dir_str.clone();
         let def_extensions = extensions.clone();
         let def_idx_base = idx_base.clone();
@@ -173,6 +183,7 @@ pub(super) fn build_context(args: ServeArgs) -> mcp::handlers::HandlerContext {
                 &def_ready_for_load, &def_build_terminal_for_load, &def_building_for_load,
                 def_respect_git_exclude,
                 def_thread_budget,
+                &workspace,
             )
         }))
     } else {
@@ -215,6 +226,7 @@ pub(super) fn build_context(args: ServeArgs) -> mcp::handlers::HandlerContext {
             &def_ready, &def_build_terminal, &def_building,
             args.respect_git_exclude,
             def_thread_budget,
+            &workspace,
         )
     };
 
@@ -269,6 +281,7 @@ pub(super) fn build_context(args: ServeArgs) -> mcp::handlers::HandlerContext {
     let file_index = Arc::new(RwLock::new(None));
     let autosave_dirty = Arc::new(AtomicBool::new(false));
     if args.watch && !is_unresolved {
+        let content_extensions = index.read().unwrap_or_else(|e| e.into_inner()).extensions.clone();
         let watch_dir = std::fs::canonicalize(&dir_str)
             .unwrap_or_else(|_| PathBuf::from(&dir_str));
         crate::index::log_memory("serve: starting watcher");
@@ -276,7 +289,7 @@ pub(super) fn build_context(args: ServeArgs) -> mcp::handlers::HandlerContext {
             Arc::clone(&index),
             def_index.as_ref().map(Arc::clone),
             watch_dir.clone(),
-            extensions.clone(),
+            content_extensions.clone(),
             definition_reconcile_extensions.clone(),
             args.debounce_ms,
             idx_base.clone(),
@@ -305,7 +318,7 @@ pub(super) fn build_context(args: ServeArgs) -> mcp::handlers::HandlerContext {
                 Arc::clone(&file_index),
                 Arc::clone(&file_index_dirty),
                 watch_dir,
-                extensions,
+                content_extensions,
                 definition_reconcile_extensions,
                 args.rescan_interval_sec,
                 Arc::clone(&watcher_generation),
@@ -352,7 +365,7 @@ pub(super) fn build_context(args: ServeArgs) -> mcp::handlers::HandlerContext {
     let ctx = mcp::handlers::HandlerContext {
         index,
         def_index,
-        workspace: Arc::new(RwLock::new(ws_binding)),
+        workspace,
         server_ext: exts_for_load,
         metrics: args.metrics,
         index_base: idx_base,
@@ -1376,6 +1389,117 @@ fn publish_definition_index(
     );
 }
 
+fn start_definition_index_build(
+    target: Arc<RwLock<definitions::DefinitionIndex>>,
+    mut args: definitions::DefIndexArgs,
+    index_base: PathBuf,
+    workspace: Arc<RwLock<mcp::handlers::WorkspaceBinding>>,
+    building: Arc<AtomicBool>,
+    ready: Arc<AtomicBool>,
+    terminal: Arc<AtomicBool>,
+) {
+    let ws = workspace.read().unwrap_or_else(|e| e.into_inner());
+    args.dir = ws.dir.clone();
+    let mut build_generation = ws.generation;
+    // Reserve before spawning: a switch must not start a competing worker.
+    building.store(true, Ordering::Release);
+    drop(ws);
+    let mut retry_cache: Option<definitions::DefinitionIndex> = None;
+    spawn_background_build("definitionsBuildPanicked", building, ready, terminal, move |build_state| loop {
+        info!(dir = %args.dir, "Building definition index in background...");
+        crate::index::log_memory("def-build: starting");
+        let build_start = Instant::now();
+        let index_build_start = Instant::now();
+        let cache_hit = retry_cache.is_some();
+        let new_idx = retry_cache.take().unwrap_or_else(|| definitions::build_definition_index(&args));
+        let index_build_elapsed = index_build_start.elapsed();
+        crate::index::log_memory("def-build: finished");
+        let save_start = Instant::now();
+        let save_result = if cache_hit { Ok(()) } else { definitions::save_definition_index(&new_idx, &index_base) };
+        let save_elapsed = save_start.elapsed();
+        let save_failed = if let Err(e) = save_result {
+            warn!(error = %e, "Failed to save definition index to disk; keeping in-memory index");
+            true
+        } else {
+            let exts_str = new_idx.extensions.join(",");
+            let saved_path = definitions::definition_index_path_for(&new_idx.root, &exts_str, &index_base);
+            crate::index::cleanup_stale_same_root_indexes(&index_base, &saved_path, &new_idx.root, "code-structure");
+            false
+        };
+
+        // A failed save can leave a stale shard, so retain the fresh in-memory index.
+        let def_count = new_idx.definitions.len();
+        let file_count = new_idx.files.len();
+        let call_count: usize = new_idx.method_calls.values().map(Vec::len).sum();
+        let drop_reload_start = Instant::now();
+        let mut new_idx = if save_failed || cache_hit {
+            new_idx
+        } else {
+            drop(new_idx);
+            crate::index::log_memory("serve: after drop(def build)");
+            crate::index::force_mimalloc_collect();
+            crate::index::log_memory("serve: after mi_collect (def)");
+            definitions::load_definition_index(&args.dir, &args.ext, &index_base)
+                .unwrap_or_else(|e| {
+                    warn!(error = %e, "Failed to reload definition index from disk, rebuilding");
+                    definitions::build_definition_index(&args)
+                })
+        };
+        let drop_reload_elapsed = drop_reload_start.elapsed();
+        if !save_failed {
+            crate::index::log_memory("serve: after reload def from disk");
+        }
+        new_idx.shrink_maps();
+        let mut current = target.write().unwrap_or_else(|e| e.into_inner());
+        let ws = workspace.read().unwrap_or_else(|e| e.into_inner());
+        if build_state.ready.load(Ordering::Acquire) {
+            // A cache loaded by a later switch wins without changing its readiness.
+            build_state.mark_not_building();
+            build_state.terminal.store(true, Ordering::Release);
+            build_state.completed = true;
+            return;
+        }
+        if ws.generation != build_generation || !code_xray::path_eq(&ws.dir, &args.dir) {
+            warn!(dir = %args.dir, generation = build_generation,
+                "Discarding stale startup definition build; rebuilding current workspace");
+            let directory_changed = !code_xray::path_eq(&args.dir, &ws.dir);
+            args.dir = ws.dir.clone();
+            build_generation = ws.generation;
+            drop(ws);
+            drop(current);
+            if directory_changed {
+                let extensions: Vec<String> = args.ext.split(',').map(str::to_string).collect();
+                retry_cache = definitions::load_definition_index(&args.dir, &args.ext, &index_base).ok()
+                    .or_else(|| definitions::find_definition_index_for_dir(&args.dir, &index_base, &extensions));
+            }
+            continue;
+        }
+        definitions::replace_live_definition_index(&mut current, new_idx);
+        build_state.complete_ready();
+        drop(ws);
+        drop(current);
+        let elapsed = build_start.elapsed();
+        info!(
+            elapsed_ms = format_args!("{:.1}", elapsed.as_secs_f64() * 1000.0),
+            definitions = def_count, files = file_count,
+            "Definition index ready (background build complete)"
+        );
+        crate::index::log_phase("definitionsReady", &[
+            ("cacheHitDefinitions", cache_hit.to_string()),
+            ("definitionsBuildMs", crate::index::format_duration_ms(index_build_elapsed)),
+            ("definitionsSaveMs", crate::index::format_duration_ms(save_elapsed)),
+            ("definitionsDropReloadMs", crate::index::format_duration_ms(drop_reload_elapsed)),
+            ("definitionsTotalBuildMs", crate::index::format_duration_ms(elapsed)),
+            ("definitionsReadyAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
+            ("definitionsFilesParsed", file_count.to_string()),
+            ("definitionsExtracted", def_count.to_string()),
+            ("definitionsCallSites", call_count.to_string()),
+        ]);
+        crate::index::log_memory("serve: def ready");
+        return;
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn load_or_build_definition_index(
     dir_str: &str,
@@ -1389,6 +1513,7 @@ fn load_or_build_definition_index(
     def_building: &Arc<AtomicBool>,
     respect_git_exclude: bool,
     build_threads: usize,
+    workspace: &Arc<RwLock<mcp::handlers::WorkspaceBinding>>,
 ) -> LoadOrBuildDefinitionIndexResult {
     // Use compile-time definition extensions based on enabled Cargo features
     let supported_def_langs = definitions::definition_extensions();
@@ -1571,100 +1696,15 @@ fn load_or_build_definition_index(
             crate::index::log_phase("definitionsBuildQueued", &[
                 ("cacheHitDefinitions", "false".to_string()),
             ]);
-            // Build in background
-            let bg_def = Arc::clone(&def_arc);
-            let bg_def_ready = Arc::clone(def_ready);
-            let bg_def_terminal = Arc::clone(def_build_terminal);
-            let bg_def_building = Arc::clone(def_building);
-            let bg_dir = dir_str.to_string();
-            let bg_def_exts = def_exts.clone();
-            let bg_idx_base = idx_base.to_path_buf();
-
-            spawn_background_build("definitionsBuildPanicked", bg_def_building, bg_def_ready, bg_def_terminal, move |build_state| {
-                info!("Building definition index in background...");
-                crate::index::log_memory("def-build: starting");
-                let build_start = Instant::now();
-                let index_build_start = Instant::now();
-                let new_idx = definitions::build_definition_index(&definitions::DefIndexArgs {
-                    dir: bg_dir.clone(),
-                    ext: bg_def_exts.clone(),
-                    threads: build_threads,
+            start_definition_index_build(
+                Arc::clone(&def_arc),
+                definitions::DefIndexArgs {
+                    dir: dir_str.to_string(), ext: def_exts.clone(), threads: build_threads,
                     respect_git_exclude,
-                });
-                let index_build_elapsed = index_build_start.elapsed();
-                crate::index::log_memory("def-build: finished");
-                let save_start = Instant::now();
-                let save_result = definitions::save_definition_index(&new_idx, &bg_idx_base);
-                let save_elapsed = save_start.elapsed();
-                let save_failed = if let Err(e) = save_result {
-                    warn!(error = %e, "Failed to save definition index to disk; keeping in-memory index");
-                    true
-                } else {
-                    // Clean up old definition indexes for the same root with different extensions
-                    let exts_str = new_idx.extensions.join(",");
-                    let saved_path = definitions::definition_index_path_for(&new_idx.root, &exts_str, &bg_idx_base);
-                    crate::index::cleanup_stale_same_root_indexes(&bg_idx_base, &saved_path, &new_idx.root, "code-structure");
-                    false
-                };
-
-                // Drop + reload to eliminate allocator fragmentation (same pattern).
-                //
-                // SKIPPED on save failure (commit e64ed47 follow-up): if save failed,
-                // the surviving on-disk shard may be stale (rename is not-atomic against
-                // a pre-existing target on some filesystems) — reloading would silently
-                // re-publish stale definitions while we report fresh build counts via
-                // definitionsReady. Keep the freshly-built `new_idx` in memory at the
-                // cost of allocator fragmentation; correctness wins over layout.
-                let def_count = new_idx.definitions.len();
-                let file_count = new_idx.files.len();
-                let call_count: usize = new_idx.method_calls.values().map(Vec::len).sum();
-                let drop_reload_start = Instant::now();
-                let new_idx = if save_failed {
-                    new_idx
-                } else {
-                    drop(new_idx);
-                    crate::index::log_memory("serve: after drop(def build)");
-                    crate::index::force_mimalloc_collect();
-                    crate::index::log_memory("serve: after mi_collect (def)");
-                    definitions::load_definition_index(&bg_dir, &bg_def_exts, &bg_idx_base)
-                        .unwrap_or_else(|e| {
-                            warn!(error = %e, "Failed to reload definition index from disk, rebuilding");
-                            definitions::build_definition_index(&definitions::DefIndexArgs {
-                                dir: bg_dir, ext: bg_def_exts, threads: build_threads,
-                                respect_git_exclude,
-                            })
-                        })
-                };
-                let drop_reload_elapsed = drop_reload_start.elapsed();
-                if !save_failed {
-                    crate::index::log_memory("serve: after reload def from disk");
-                }
-
-                let elapsed = build_start.elapsed();
-                info!(
-                    elapsed_ms = format_args!("{:.1}", elapsed.as_secs_f64() * 1000.0),
-                    definitions = def_count,
-                    files = file_count,
-                    "Definition index ready (background build complete)"
-                );
-                let mut new_idx = new_idx;
-                new_idx.shrink_maps();
-                publish_definition_index(&bg_def, new_idx);
-                build_state.mark_not_building();
-                crate::index::log_phase("definitionsReady", &[
-                    ("cacheHitDefinitions", "false".to_string()),
-                    ("definitionsBuildMs", crate::index::format_duration_ms(index_build_elapsed)),
-                    ("definitionsSaveMs", crate::index::format_duration_ms(save_elapsed)),
-                    ("definitionsDropReloadMs", crate::index::format_duration_ms(drop_reload_elapsed)),
-                    ("definitionsTotalBuildMs", crate::index::format_duration_ms(elapsed)),
-                    ("definitionsReadyAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
-                    ("definitionsFilesParsed", file_count.to_string()),
-                    ("definitionsExtracted", def_count.to_string()),
-                    ("definitionsCallSites", call_count.to_string()),
-                ]);
-                build_state.complete_ready();
-                crate::index::log_memory("serve: def ready");
-            });
+                },
+                idx_base.to_path_buf(), Arc::clone(workspace),
+                Arc::clone(def_building), Arc::clone(def_ready), Arc::clone(def_build_terminal),
+            );
         } else {
             def_build_terminal.store(true, Ordering::Release);
         }
@@ -2402,6 +2442,102 @@ mod serve_respect_git_exclude_tests {
     use crate::{build_content_index, save_content_index};
     use super::ContentIndexArgs;
 
+    #[test]
+    fn serve_startup_fallback_content_scope() {
+        use std::io::{BufRead, Write};
+        use std::process::{Command, Stdio};
+        use serde_json::{Value, json};
+
+        if let Ok(extensions) = std::env::var("XRAY_TEST_STARTUP_CONTENT_SCOPE") {
+            cmd_serve_with_index_dir(ServeArgs {
+                dir: std::env::var("XRAY_TEST_STARTUP_CONTENT_ROOT").unwrap(),
+                ext: vec![extensions],
+                watch: true,
+                debounce_ms: 20,
+                debug_log: true,
+                rescan_interval_sec: 10,
+                ..Default::default()
+            }, PathBuf::from(std::env::var_os("XRAY_TEST_STARTUP_CONTENT_CACHE").unwrap()));
+            return;
+        }
+
+        for (cached, requested) in [("rs,cs", "cs,rs"), ("cs,rs", "rs")] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("workspace");
+            std::fs::create_dir(&root).unwrap();
+            let root = crate::canonicalize_test_root(&root);
+            std::fs::write(root.join("probe.rs"), "old_rust_marker\n").unwrap();
+            std::fs::write(root.join("probe.cs"), "old_csharp_marker\n").unwrap();
+            let index_base = tmp.path().join("indexes");
+            let original = build_content_index(&ContentIndexArgs {
+                dir: root.to_string_lossy().into_owned(), ext: cached.into(),
+                threads: 1, ..Default::default()
+            }).unwrap();
+            save_content_index(&original, &index_base).unwrap();
+            assert!(load_content_index(&root.to_string_lossy(), requested, &index_base).is_err(),
+                "the test must take the startup cache fallback");
+
+            let test_name = std::thread::current().name().unwrap().to_owned();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture"])
+                .env("XRAY_TEST_STARTUP_CONTENT_SCOPE", requested)
+                .env("XRAY_TEST_STARTUP_CONTENT_ROOT", &root)
+                .env("XRAY_TEST_STARTUP_CONTENT_CACHE", &index_base)
+                .current_dir(tmp.path())
+                .stdin(Stdio::piped()).stdout(Stdio::piped())
+                .stderr(std::fs::File::create(tmp.path().join("stderr.log")).unwrap())
+                .spawn().unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let (send, receive) = std::sync::mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                for line in std::io::BufReader::new(stdout).lines() {
+                    let line = line.unwrap();
+                    if let Some(start) = line.find('{')
+                        && let Ok(response) = serde_json::from_str::<Value>(&line[start..])
+                    {
+                        send.send(response).unwrap();
+                    }
+                }
+            });
+            let mut input = child.stdin.take().unwrap();
+            let mut call = |id: u64, name: &str, arguments: Value| {
+                writeln!(input, "{}", json!({
+                    "jsonrpc":"2.0", "id":id, "method":"tools/call",
+                    "params":{"name":name, "arguments":arguments}
+                })).unwrap();
+                input.flush().unwrap();
+                let response = receive.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert_eq!(response["id"], id);
+                assert_ne!(response["result"]["isError"], true, "{response}");
+                serde_json::from_str::<Value>(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+            };
+            let _ = call(1, "xray_info", json!({}));
+            std::fs::write(root.join("probe.rs"), "fresh_rust_marker\n").unwrap();
+            std::fs::write(root.join("probe.cs"), "fresh_csharp_marker\n").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let updated = loop {
+                let result = call(2, "xray_grep", json!({"terms":["fresh_rust_marker", "fresh_csharp_marker"]}));
+                if result["summary"]["totalFiles"].as_u64() == Some(2) {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            drop(input);
+            assert!(child.wait().unwrap().success());
+            reader.join().unwrap();
+            assert!(updated, "startup watcher stayed stale for cache={cached}, requested={requested}");
+            let persisted = load_content_index(&root.to_string_lossy(), cached, &index_base).unwrap();
+            assert!(persisted.index.contains_key("fresh_rust_marker"));
+            assert!(persisted.index.contains_key("fresh_csharp_marker"));
+            let log = std::fs::read_to_string(crate::index::debug_log_path_for(&index_base, &root.to_string_lossy())).unwrap();
+            assert!(log.lines().any(|line| line.contains("| contentReady |") && line.contains("cacheHitContent=true")),
+                "startup must use the cached index rather than rebuilding: {log}");
+        }
+    }
+
     fn init_repo_with_exclude(dir: &std::path::Path, pattern: &str) {
         std::process::Command::new("git")
             .args(["init", "--quiet"])
@@ -2520,6 +2656,9 @@ mod serve_respect_git_exclude_tests {
             &def_building,
             false, // CLI flag — was true at build time, now false
             1,     // build_threads (unused — cache hit path)
+            &Arc::new(RwLock::new(mcp::handlers::determine_initial_binding(
+                &dir.to_string_lossy(), &extensions, false,
+            ))),
         );
 
         let def_index = def_index.expect("definitions_enabled=true must yield Some(arc)");
@@ -2671,6 +2810,131 @@ mod serve_respect_git_exclude_tests {
         );
     }
 
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn serve_definition_startup_dot_bootstrap_no_switch() {
+        if std::env::var_os("XRAY_TEST_DOT_STARTUP").is_none() {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::write(tmp.path().join("fixture.rs"), "pub fn dot_startup_marker() {}\n").unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "cli::serve::serve_definition_startup_dot_bootstrap_no_switch", "--nocapture"])
+                .env("XRAY_TEST_DOT_STARTUP", "1")
+                .current_dir(tmp.path())
+                .output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), stderr);
+            assert_eq!(stderr.matches("Found 1 files to parse").count(), 1, "{stderr}");
+            return;
+        }
+        let extensions = vec!["rs".to_string()];
+        let workspace = Arc::new(RwLock::new(mcp::handlers::determine_initial_binding(".", &extensions, false)));
+        assert_eq!(workspace.read().unwrap().mode, mcp::handlers::WorkspaceBindingMode::DotBootstrap);
+        let index_base = std::env::current_dir().unwrap().join("indexes");
+        crate::index::enable_debug_log(&index_base, ".");
+        let ready = Arc::new(AtomicBool::new(false));
+        let terminal = Arc::new(AtomicBool::new(false));
+        let building = Arc::new(AtomicBool::new(false));
+        let (index, _, _, _) = load_or_build_definition_index(
+            ".", &extensions, &index_base, "rs", false, true,
+            &ready, &terminal, &building, false, 1, &workspace,
+        );
+        let log_path = crate::index::debug_log_path_for(&index_base, ".");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let log = loop {
+            let log = std::fs::read_to_string(&log_path).unwrap();
+            if terminal.load(Ordering::Acquire) && log.contains("| definitionsReady |") {
+                break log;
+            }
+            assert!(Instant::now() < deadline, "startup did not complete: {log}");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(ready.load(Ordering::Acquire));
+        assert!(!building.load(Ordering::Acquire));
+        let phases: Vec<_> = log.lines().filter(|line| line.contains("| definitionsReady |")).collect();
+        assert_eq!(phases.len(), 1, "{log}");
+        assert!(phases[0].contains("cacheHitDefinitions=false"), "{log}");
+        let index = index.unwrap();
+        let index = index.read().unwrap();
+        assert!(code_xray::path_eq(&index.root, &workspace.read().unwrap().dir));
+        assert!(index.definitions.iter().any(|d| d.name == "dot_startup_marker"));
+    }
+
+    #[cfg(all(test, feature = "lang-rust"))]
+    fn definition_startup_switch(cached: bool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots: Vec<String> = ["a", "b"].iter().map(|name| {
+            let path = tmp.path().join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            crate::clean_path(&std::fs::canonicalize(path).unwrap().to_string_lossy())
+        }).collect();
+        std::fs::write(Path::new(&roots[0]).join("a.rs"), "pub fn from_a() {}\n").unwrap();
+        std::fs::write(Path::new(&roots[1]).join("b.rs"), "pub fn from_b() {}\n").unwrap();
+        let mut ctx = mcp::handlers::HandlerContext {
+            index_base: tmp.path().join("indexes"), server_ext: "rs".into(),
+            def_extensions: vec!["rs".into()], ..Default::default()
+        };
+        {
+            let mut ws = ctx.workspace.write().unwrap();
+            ws.set_dir(roots[0].clone());
+            ws.mode = mcp::handlers::WorkspaceBindingMode::DotBootstrap;
+        }
+        *ctx.index.write().unwrap() = ContentIndex { root: roots[0].clone(), ..Default::default() };
+        ctx.content_ready.store(true, Ordering::Release);
+        if cached {
+            let index = definitions::build_definition_index(&definitions::DefIndexArgs {
+                dir: roots[1].clone(), ext: "rs".into(), threads: 1, respect_git_exclude: false,
+            });
+            definitions::save_definition_index(&index, &ctx.index_base).unwrap();
+            std::fs::write(Path::new(&roots[1]).join("b.rs"), "pub fn uncached_b() {}\n").unwrap();
+        }
+        let defs = Arc::new(RwLock::new(definitions::DefinitionIndex::default()));
+        ctx.def_index = Some(Arc::clone(&defs));
+        let barrier = defs.read().unwrap();
+        let terminal = Arc::new(AtomicBool::new(false));
+        start_definition_index_build(
+            Arc::clone(&defs), definitions::DefIndexArgs {
+                dir: roots[0].clone(), ext: "rs".into(), threads: 1, respect_git_exclude: false,
+            }, ctx.index_base.clone(), Arc::clone(&ctx.workspace),
+            Arc::clone(&ctx.def_building), Arc::clone(&ctx.def_ready), Arc::clone(&terminal),
+        );
+        let wait = |predicate: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !predicate() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(predicate(), "background definition switch timed out");
+        };
+        wait(&|| definitions::load_definition_index(&roots[0], "rs", &ctx.index_base).is_ok());
+        let ctx = Arc::new(ctx);
+        let next_ctx = Arc::clone(&ctx);
+        let next_dir = roots[1].clone();
+        let switch = std::thread::spawn(move || mcp::handlers::dispatch_tool(
+            &next_ctx, "xray_reindex", &serde_json::json!({"dir":next_dir,"ext":["rs"]}),
+        ));
+        wait(&|| code_xray::path_eq(&ctx.server_dir(), &roots[1]));
+        drop(barrier);
+        let response = switch.join().unwrap();
+        assert!(!response.is_error, "{}", response.content[0].text);
+        wait(&|| terminal.load(Ordering::Acquire) && !ctx.def_building.load(Ordering::Acquire));
+        assert!(ctx.def_ready.load(Ordering::Acquire));
+        let defs = defs.read().unwrap();
+        assert!(code_xray::path_eq(&defs.root, &roots[1]));
+        assert!(defs.definitions.iter().any(|d| d.name == "from_b"));
+        assert!(!defs.definitions.iter().any(|d| d.name == "from_a" || d.name == "uncached_b"));
+    }
+
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn serve_definition_startup_switch_builds_latest_workspace() {
+        definition_startup_switch(false);
+    }
+
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn serve_definition_startup_switch_preserves_loaded_cache() {
+        definition_startup_switch(true);
+    }
+
     /// Save-failure smoke test (2026-05-05) for `load_or_build_definition_index`'s
     /// background-build path. Same shape and same documentary-only caveat as
     /// `serve_load_or_build_content_index_save_failure_keeps_fresh_in_memory_index`
@@ -2709,6 +2973,9 @@ mod serve_respect_git_exclude_tests {
             &def_building,
             false, // CLI flag (irrelevant for save-failure semantics)
             1,     // build_threads
+            &Arc::new(RwLock::new(mcp::handlers::determine_initial_binding(
+                &dir.to_string_lossy(), &extensions, false,
+            ))),
         );
 
         let def_index = def_index_opt.expect("definitions_enabled=true must yield Some(arc)");
