@@ -232,9 +232,10 @@ fn normalize(args: &mut ServeArgs) -> io::Result<()> {
 }
 
 pub(super) fn run(mut args: ServeArgs) -> io::Result<()> {
-    // The existing roots-based mode can change workspaces after initialize.
+    // Roots-based and unresolved modes can change workspaces after initialize.
     // Keep it private rather than pinning it to an accidental startup directory.
-    if matches!(args.dir.as_str(), "." | "./" | ".\\") && !args.internal_backend {
+    if !args.internal_backend
+        && (matches!(args.dir.as_str(), "." | "./" | ".\\") || !std::path::Path::new(&args.dir).is_dir()) {
         eprintln!("Xray: dynamic workspace mode uses a private server; pass an explicit --dir to share indexes.");
         serve::cmd_serve(args);
         return Ok(());

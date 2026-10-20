@@ -884,14 +884,18 @@ pub fn has_source_files(dir: &str, extensions: &[String], max_depth: usize, resp
 }
 
 /// Determine the initial WorkspaceBindingMode based on --dir argument.
-/// - Explicit non-dot path → PinnedCli
+/// - Explicit non-dot path to an existing directory → PinnedCli
+/// - Explicit missing or non-directory path → Unresolved
 /// - Dot path with source files → DotBootstrap
 /// - Dot path without source files → Unresolved
 pub fn determine_initial_binding(dir: &str, extensions: &[String], respect_git_exclude: bool) -> WorkspaceBinding {
     let is_dot = dir == "." || dir == "./" || dir == ".\\";
     if !is_dot {
-        // Explicit path — PinnedCli, always resolved
-        WorkspaceBinding::pinned(dir.to_string())
+        if std::path::Path::new(dir).is_dir() {
+            WorkspaceBinding::pinned(dir.to_string())
+        } else {
+            WorkspaceBinding::unresolved(dir.to_string())
+        }
     } else {
         // Dot path — check if CWD has source files
         let canonical = std::fs::canonicalize(dir)
@@ -1273,9 +1277,14 @@ fn dispatch_inner(
         let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
         match ws.status {
             WorkspaceStatus::Unresolved => {
+                let message = if std::path::Path::new(&ws.dir).is_dir() {
+                    format!("Server started with --dir . which resolved to '{}' — no source files found.", ws.dir)
+                } else {
+                    format!("Server --dir '{}' does not exist or is not a directory.", ws.dir)
+                };
                 let error_msg = serde_json::json!({
                     "error": "WORKSPACE_UNRESOLVED",
-                    "message": format!("Server started with --dir . which resolved to '{}' — no source files found.", ws.dir),
+                    "message": message,
                     "hint": "Call xray_reindex with dir parameter pointing to your project: xray_reindex dir=C:/Projects/MyApp",
                     "serverDir": ws.dir,
                     "workspaceStatus": "unresolved"

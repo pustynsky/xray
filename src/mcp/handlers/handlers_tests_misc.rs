@@ -2002,9 +2002,77 @@ fn test_has_source_files_nonexistent_ext() {
 
 #[test]
 fn test_determine_initial_binding_explicit_path() {
-    let ws = determine_initial_binding("C:/Projects/MyApp", &["rs".to_string()], false);
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().to_string_lossy().into_owned();
+
+    let ws = determine_initial_binding(&dir, &["rs".to_string()], false);
+
     assert_eq!(ws.mode, WorkspaceBindingMode::PinnedCli);
-    assert_eq!(ws.dir, "C:/Projects/MyApp");
+    assert_eq!(ws.status, WorkspaceStatus::Resolved);
+    assert_eq!(ws.dir, dir);
+}
+
+#[test]
+fn test_determine_initial_binding_missing_explicit_path_is_unresolved() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("moved-repo").to_string_lossy().into_owned();
+
+    let ws = determine_initial_binding(&missing, &["rs".to_string()], false);
+
+    assert_eq!(ws.mode, WorkspaceBindingMode::Unresolved);
+    assert_eq!(ws.status, WorkspaceStatus::Unresolved);
+    assert_eq!(ws.dir, missing);
+}
+
+#[test]
+fn test_determine_initial_binding_explicit_file_path_is_unresolved() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("repo.rs");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+    let dir = file.to_string_lossy().into_owned();
+
+    let ws = determine_initial_binding(&dir, &["rs".to_string()], false);
+
+    assert_eq!(ws.mode, WorkspaceBindingMode::Unresolved);
+    assert_eq!(ws.status, WorkspaceStatus::Unresolved);
+    assert_eq!(ws.dir, dir);
+}
+
+#[test]
+fn test_unresolved_missing_dir_reports_missing_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("moved-repo").to_string_lossy().into_owned();
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(determine_initial_binding(&missing, &["rs".to_string()], false))),
+        ..Default::default()
+    };
+
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": ["test"]}));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(text.contains("WORKSPACE_UNRESOLVED"), "{}", text);
+    assert!(text.contains("does not exist"), "{}", text);
+    assert!(!text.contains("--dir ."), "{}", text);
+}
+
+#[test]
+fn test_unresolved_existing_dir_reports_no_source_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().to_string_lossy().into_owned();
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(dir))),
+        ..Default::default()
+    };
+
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": ["test"]}));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(text.contains("WORKSPACE_UNRESOLVED"), "{}", text);
+    assert!(text.contains("--dir ."), "{}", text);
+    assert!(text.contains("no source files found"), "{}", text);
+    assert!(!text.contains("does not exist"), "{}", text);
 }
 
 #[test]

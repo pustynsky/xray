@@ -581,6 +581,34 @@ protection uses a separate `content_building` flag with `compare_exchange`.
 
 ---
 
+### T-WS-MISSING-DIR: Explicit `--dir` does not exist or points to a file
+
+**Scenario (stdio JSON-RPC, including the default shared-backend entry point):**
+1. Confirm `C:\Repos\DoesNotExist_XrayE2E` does not exist.
+2. Start `xray serve --dir C:\Repos\DoesNotExist_XrayE2E --ext rs,md --definitions`.
+3. Send `initialize` without capabilities, then `notifications/initialized`.
+4. Call `xray_grep {"terms":["xray"],"countOnly":true}`.
+5. Call `xray_reindex {"dir":"<repo>\docs"}`, then repeat the grep.
+6. In a fresh process, initialize with `capabilities.roots.listChanged=true`.
+7. Answer the server's `roots/list` request with `{"roots":[{"uri":"file:///<repo>/docs"}]}`.
+8. Call `xray_reindex {}`.
+9. Repeat the initial error check with `--dir` pointing to an existing file.
+
+**Expected:**
+- Startup succeeds in private, unresolved mode without a shared backend, index build or watcher.
+- stderr contains `workspace UNRESOLVED` with `reason="directory does not exist"`.
+- The first grep returns `isError: true`, `WORKSPACE_UNRESOLVED` and `does not exist`, not `INDEX_BUILDING` or a misleading `--dir .` message.
+- Manual reindex returns `status: "ok"` and `files > 0`; the next grep has `summary.totalOccurrences > 0`.
+- The roots-capable session receives `roots/list`; after the reply, reindex returns `status: "ok"` and `summary.serverDir` points to `<repo>\docs`.
+- Neither recovery path requires restarting the server.
+- An existing explicit directory, even an empty one, remains pinned and resolved.
+
+**Unit tests:** `test_determine_initial_binding_explicit_path`, `test_determine_initial_binding_missing_explicit_path_is_unresolved`, `test_determine_initial_binding_explicit_file_path_is_unresolved`, `test_unresolved_missing_dir_reports_missing_directory`, `test_unresolved_existing_dir_reports_no_source_files`.
+
+**Integration tests:** `missing_explicit_dir_uses_private_server_and_recovers`, `explicit_file_dir_uses_private_unresolved_server`.
+
+---
+
 ### T-WS-ROOTS-LIST: Workspace switch via roots/list resets ready flags
 
 **Scenario (manual — requires MCP client with roots support):**
@@ -733,4 +761,3 @@ protection uses a separate `content_building` flag with `compare_exchange`.
 **Unit tests:** `test_is_path_within_exact_root_accepted`, `test_is_path_within_relative_dotdot_resolving_inside_accepted`, `test_is_path_within_through_symlinked_subdir`, `test_is_path_within_traversal_rejected`, `test_is_path_within_relative_dotdot_escape_still_rejected`, `test_classify_for_sync_reindex_through_symlinked_subdir`, `test_validate_search_dir_through_symlinked_subdir`, `test_resolve_dir_to_absolute_through_symlinked_subdir`, `test_xray_fast_subdir_filter_through_symlinked_subdir` (gated on `#[cfg(windows)]` where they create real symlinks via `std::os::windows::fs::symlink_dir`). The `dir_is_outside` boolean used by `xray_fast` is exercised end-to-end via `test_xray_fast_subdir_filter_through_symlinked_subdir`.
 
 ---
-

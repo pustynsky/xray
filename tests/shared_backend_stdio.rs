@@ -170,7 +170,11 @@ impl Client {
         Self::attach(command.spawn().unwrap())
     }
 
-    fn attach(mut child: Child) -> Self {
+    fn attach(child: Child) -> Self {
+        Self::attach_with_backend(child, true)
+    }
+
+    fn attach_with_backend(mut child: Child, shared: bool) -> Self {
         let input = child.stdin.take();
         let stdout = child.stdout.take().unwrap();
         let stderr_pipe = child.stderr.take().unwrap();
@@ -199,11 +203,14 @@ impl Client {
             let _ = stderr_done.send(());
         });
         let mut client = Self { child, input, replies, stderr, stdout_closed, stderr_closed, backend_pid: 0, backend_pids: pids };
-        client.backend_pid = client.backend_pids.recv_timeout(WAIT).unwrap_or_else(|error| {
-            panic!("Backend connection failed: {error}; {}", client.stderr.lock().unwrap())
-        });
+        if shared {
+            client.backend_pid = client.backend_pids.recv_timeout(WAIT).unwrap_or_else(|error| {
+                panic!("Backend connection failed: {error}; {}", client.stderr.lock().unwrap())
+            });
+        }
+        let capabilities = if shared { json!({"roots": {"listChanged": true}}) } else { json!({}) };
         client.request(1, "initialize", json!({"protocolVersion": "2025-03-26",
-            "capabilities": {"roots": {"listChanged": true}}, "clientInfo": {"name": "shared-test", "version": "1"}}));
+            "capabilities": capabilities, "clientInfo": {"name": "shared-test", "version": "1"}}));
         client.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
         client
     }
@@ -284,6 +291,47 @@ impl Drop for Client {
             if let Err(error) = self.child.wait() { eprintln!("Proxy wait failed: {error}"); }
         }
     }
+}
+
+#[test]
+fn missing_explicit_dir_uses_private_server_and_recovers() {
+    let workspace = Workspace::new("missing_dir_recovery_marker");
+    let missing = workspace.path().join("moved-repo");
+    let mut client = Client::attach_with_backend(command(&missing, "rs").spawn().unwrap(), false);
+
+    let result = client.call("xray_grep", json!({"terms": ["missing_dir_recovery_marker"], "countOnly": true}));
+
+    assert_eq!(result["isError"], true, "{result}");
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("WORKSPACE_UNRESOLVED"), "{text}");
+    assert!(text.contains("does not exist"), "{text}");
+    assert!(!text.contains("--dir ."), "{text}");
+
+    let result = client.call("xray_reindex", json!({"dir": workspace.path()}));
+
+    let payload = Client::payload(&result);
+    assert_eq!(payload["status"], "ok");
+    assert!(payload["files"].as_u64().unwrap() > 0);
+    client.wait_for_marker("missing_dir_recovery_marker");
+    client.close();
+    assert!(client.stderr.lock().unwrap().contains("workspace UNRESOLVED"));
+    assert!(!client.stderr.lock().unwrap().contains("connected to workspace backend"));
+}
+
+#[test]
+fn explicit_file_dir_uses_private_unresolved_server() {
+    let workspace = Workspace::new("file_dir_marker");
+    let file = workspace.path().join("sample.rs");
+    let mut client = Client::attach_with_backend(command(&file, "rs").spawn().unwrap(), false);
+
+    let result = client.call("xray_grep", json!({"terms": ["file_dir_marker"], "countOnly": true}));
+
+    assert_eq!(result["isError"], true, "{result}");
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("WORKSPACE_UNRESOLVED"), "{text}");
+    assert!(text.contains("does not exist or is not a directory"), "{text}");
+    client.close();
+    assert!(!client.stderr.lock().unwrap().contains("connected to workspace backend"));
 }
 
 #[test]
