@@ -81,12 +81,16 @@ jobs:
         shell: powershell
         run: |
           & .\scripts\test-mcp-setup.ps1 -UserMcpOnly -XrayBinary .\target\debug\xray.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\scripts\test-setup-xray-repos.ps1 -XrayBinary .\target\debug\xray.exe
           exit $LASTEXITCODE
       - name: Test user MCP setup (PowerShell 7)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           & .\scripts\test-mcp-setup.ps1 -UserMcpOnly -XrayBinary .\target\debug\xray.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\scripts\test-setup-xray-repos.ps1 -XrayBinary .\target\debug\xray.exe
           exit $LASTEXITCODE
 
   feature-matrix:

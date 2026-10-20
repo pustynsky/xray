@@ -37,6 +37,21 @@
 .PARAMETER SkipDownload
     Skip downloading xray.exe and use the existing installation.
 
+.PARAMETER PreserveSettings
+    With -UserMcp, preserve supported serve arguments from the current profile
+    or legacy workspace entries. Refuse conflicting settings and foreign personal
+    registrations instead of replacing them. -Force does not authorize process
+    termination in this mode; use -KillRunning separately.
+
+.PARAMETER PlanOnly
+    With -UserMcp, validate setup and return a read-only plan without downloads,
+    extension scanning, process termination, profile migration, or file writes.
+    Used by setup-xray-repos.ps1.
+
+.PARAMETER BinaryPrepared
+    Optional completion signal for setup-xray-repos.ps1. Set to true after the
+    shared executable is ready, even if repository configuration later fails.
+
 .PARAMETER EnableVSCode
     Select VS Code setup. Without either client switch, both clients are selected.
     With -UserMcp, the CLI/SDK registration is also included for Agent Host.
@@ -157,6 +172,8 @@ param(
     [string]$GithubRepo = 'pustynsky/xray',
     [string]$Extensions,
     [switch]$SkipDownload,
+    [switch]$PreserveSettings,
+    [switch]$PlanOnly,
     [switch]$EnableVSCode,
     [switch]$EnableRoo,
     [switch]$EnableCopilotCli,
@@ -171,7 +188,8 @@ param(
     [switch]$Uninstall,
     [switch]$KeepBackups,
     [switch]$KeepBinary,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [ref]$BinaryPrepared
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1236,6 +1254,93 @@ function Get-UserMcpMigrationConfigs {
     }
 }
 
+function ConvertTo-PreservedWorkspaceArguments {
+    param([object[]]$Arguments, [string]$RepoRoot, [switch]$Legacy)
+
+    $values = @{}
+    $flags = @('--watch', '--definitions', '--metrics', '--debug-log', '--respect-git-exclude', '--no-periodic-rescan')
+    $options = @('--ext', '--debounce-ms', '--log-level', '--max-response-kb', '--rescan-interval-sec')
+    $items = @($Arguments)
+    if ($Legacy) {
+        if ($items.Count -eq 0 -or $items[0] -cne 'serve') { throw 'Legacy Xray command must start with serve.' }
+        $items = @($items | Select-Object -Skip 1)
+        $options += '--dir'
+    }
+    for ($i = 0; $i -lt $items.Count; $i++) {
+        $key = $items[$i]
+        if ($key -isnot [string] -or ($flags -cnotcontains $key -and $options -cnotcontains $key)) {
+            throw "Unsupported workspace argument '$key'. Review this repository separately."
+        }
+        if ($values.ContainsKey($key)) { throw "Repeated workspace argument '$key'." }
+        if ($flags -ccontains $key) { $values[$key] = $true; continue }
+        $i++
+        if ($i -ge $items.Count -or $items[$i] -isnot [string] -or [string]::IsNullOrWhiteSpace($items[$i])) {
+            throw "Missing value for workspace argument '$key'."
+        }
+        $value = $items[$i]
+        if ($key -eq '--ext') {
+            $value = Normalize-ExtensionList $value
+            if (-not $value) { throw 'Workspace extensions must not be empty.' }
+        }
+        elseif ($key -eq '--dir') {
+            if (-not [IO.Path]::IsPathRooted($value) -or
+                [IO.Path]::GetFullPath($value).TrimEnd('\', '/') -ine $RepoRoot.TrimEnd('\', '/')) {
+                throw "Legacy --dir does not match the repository: $RepoRoot."
+            }
+        }
+        elseif ($key -eq '--log-level') {
+            if ($value -cnotin @('trace', 'debug', 'info', 'warn', 'error', 'off')) { throw "Unsupported log level '$value'." }
+        }
+        else {
+            $number = 0
+            if (-not [int]::TryParse($value, [ref]$number) -or $number -lt 0) { throw "Invalid number for '$key'." }
+            $value = $number.ToString([Globalization.CultureInfo]::InvariantCulture)
+        }
+        $values[$key] = $value
+    }
+    if (-not $values.ContainsKey('--ext')) { throw 'Existing Xray settings have no explicit --ext. Review this repository separately.' }
+    if ($Legacy -and -not $values.ContainsKey('--dir')) { throw 'Legacy Xray settings have no explicit --dir.' }
+    $result = @()
+    foreach ($key in @($values.Keys | Sort-Object)) {
+        if ($key -eq '--dir') { continue }
+        $result += $key
+        if ($flags -cnotcontains $key) { $result += $values[$key] }
+    }
+    return [PSCustomObject]@{ Arguments = $result; Extensions = $values['--ext']; Signature = ($result | ConvertTo-Json -Compress) }
+}
+
+function Get-PreservedWorkspaceSettings {
+    param($Profile, [object[]]$Migrations, [string]$RepoRoot)
+
+    $settings = @()
+    if ($null -ne $Profile.Text) {
+        if ($Profile.Value.version -ne 1 -or @($Profile.Value.PSObject.Properties.Name | Where-Object {
+            $_ -cnotin @('version', 'workspaceRoot', 'args')
+        }).Count -gt 0 -or $Profile.Value.args -isnot [array]) { throw "Unsupported workspace profile: $($Profile.Path)." }
+        $settings += ConvertTo-PreservedWorkspaceArguments -Arguments $Profile.Value.args -RepoRoot $RepoRoot
+    }
+    foreach ($migration in $Migrations) {
+        if ($migration.MetadataOnly) { continue }
+        $document = ConvertFrom-SetupJson -Text $migration.OriginalText -Path $migration.Path
+        $container = $document.PSObject.Properties[$migration.Container]
+        $servers = if ($container) { $container.Value } else { $document }
+        $entry = $servers.xray
+        if ($entry.command -isnot [string] -or [IO.Path]::GetFileName($entry.command) -ine 'xray.exe' -or
+            ($entry.type -and $entry.type -ne 'stdio') -or $entry.args -isnot [array] -or
+            ($entry.env -and @($entry.env.PSObject.Properties).Count -gt 0) -or $entry.cwd) {
+            throw "Cannot preserve command, cwd, or environment in $($migration.Path). Review this repository separately."
+        }
+        $settings += ConvertTo-PreservedWorkspaceArguments -Arguments $entry.args -RepoRoot $RepoRoot -Legacy
+    }
+    if ($settings.Count -eq 0) {
+        if ($Migrations.Count -gt 0) { throw 'Legacy filter metadata has no recoverable serve arguments. Review this repository separately.' }
+        return $null
+    }
+    $signatures = @($settings | Select-Object -ExpandProperty Signature -Unique)
+    if ($signatures.Count -ne 1) { throw 'Conflicting Xray settings across workspace profile/client configurations. No settings were selected.' }
+    return $settings[0]
+}
+
 function Remove-UserMcpWorkspaceEntry {
     param([string]$RepoRoot, [bool]$IsGitRepo, [string]$ExcludePath, $Migration)
     $current = @(Get-UserMcpMigrationConfigs -RepoRoot $RepoRoot -Binary $Migration.Binary -IsGitRepo $IsGitRepo -Consent $true |
@@ -1494,9 +1599,12 @@ if ($isGitRepo) { $RepoPath = $gitWorkTreeRoot }
 if ($GitVisibility) { Write-Warning '-GitVisibility is deprecated. All generated configs are now local; neither Visible nor Hidden installs a Git filter.' }
 if ($EnableRoo) { Write-Warning '-EnableRoo is disabled. Use -EnableVSCode or -EnableCopilotCli instead.' }
 if ($Restore -and $Uninstall) { Write-Error '-Restore and -Uninstall cannot be used together.'; exit 1 }
+if (($PlanOnly -or $PreserveSettings) -and (-not $UserMcp -or $Restore -or $Uninstall -or $DryRun)) {
+    Write-Error '-PlanOnly and -PreserveSettings require ordinary -UserMcp setup.'; exit 1
+}
 if ($DryRun -and -not $Uninstall) { Write-Error '-DryRun is supported only with -Uninstall.'; exit 1 }
 $nonInteractiveHost = @([Environment]::GetCommandLineArgs() | Where-Object { $_ -match '^-NonI' }).Count -gt 0
-$interactive = -not $Force -and -not $nonInteractiveHost -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+$interactive = -not $Force -and -not $PlanOnly -and -not $nonInteractiveHost -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
 $selectAll = -not ($EnableVSCode -or $EnableCopilotCli)
 $targets = @(
     [PSCustomObject]@{ Relative = '.github/mcp.json'; Container = 'mcpServers'; Client = 'Copilot CLI'; Selected = $selectAll -or $EnableCopilotCli; Path = (Join-Path $RepoPath '.github\mcp.json'); Status = 'Not selected'; Document = $null },
@@ -1544,6 +1652,13 @@ if ($UserMcp) {
         exit 0
     }
     $userMigrations = @(Get-UserMcpMigrationConfigs -RepoRoot $RepoPath -Binary (Join-Path $InstallDir 'xray.exe') -IsGitRepo $isGitRepo -Consent $MigrateLegacy)
+    $preservedSettings = if ($PreserveSettings) { Get-PreservedWorkspaceSettings -Profile $profile -Migrations $userMigrations -RepoRoot $RepoPath } else { $null }
+    if ($preservedSettings) {
+        if ($Extensions -and (Normalize-ExtensionList $Extensions) -cne $preservedSettings.Extensions) {
+            throw '-Extensions cannot override existing settings with -PreserveSettings.'
+        }
+        $Extensions = $preservedSettings.Extensions
+    }
 }
 $excludePath = if ($isGitRepo) { Get-ResolvedGitPath -RepoRoot $RepoPath -Name 'info/exclude' } else { $null }
 
@@ -1673,7 +1788,7 @@ foreach ($target in ($targets | Where-Object { $_.Selected })) {
         }
         if ($UserMcp) {
             $entry = $target.Document.Value.($target.Container).PSObject.Properties['xray']
-            if ($entry -and -not (Test-ManagedUserMcpEntry $entry.Value (Join-Path $InstallDir 'xray.exe') $profilesPath) -and -not $Force) {
+            if ($entry -and -not (Test-ManagedUserMcpEntry $entry.Value (Join-Path $InstallDir 'xray.exe') $profilesPath) -and (-not $Force -or $PreserveSettings)) {
                 if (-not $interactive -or -not (Read-YesNo -Prompt "Replace the existing personal Xray entry in $($target.Path)?" -Default $false)) {
                     throw "Personal Xray entry was not replaced: $($target.Path). Use -Force to approve replacement."
                 }
@@ -1693,6 +1808,17 @@ if ($UserMcp -and @($targets | Where-Object { $_.Selected -and $_.Status -ne 'Re
 if (@($targets | Where-Object { $_.Status -eq 'Ready' }).Count -eq 0) {
     Write-Error 'No eligible MCP configuration could be prepared. No MCP config was written.'
     exit 1
+}
+if ($PlanOnly) {
+    [PSCustomObject]@{
+        RepoPath = $RepoPath
+        Existing = $null -ne $profile.Text -or $userMigrations.Count -gt 0
+        HasLegacy = $userMigrations.Count -gt 0
+        Source = if ($null -ne $profile.Text) { 'Profile' } elseif ($userMigrations.Count -gt 0) { 'Legacy' } else { 'New' }
+        Extensions = $Extensions
+        Arguments = if ($preservedSettings) { $preservedSettings.Arguments } else { @() }
+    }
+    exit 0
 }
 if (-not $isGitRepo) { Write-Warning 'This folder is not a Git worktree. MCP files will be written without Git exclude protection.' }
 Write-Host "`n=== Setting up xray MCP for: $RepoPath ===" -ForegroundColor Cyan
@@ -1739,7 +1865,7 @@ if (-not $SkipDownload) {
             Move-Item -LiteralPath $downloaded -Destination $xrayPath -Force -ErrorAction Stop
         }
         catch [System.IO.IOException], [System.UnauthorizedAccessException] {
-            $running = @(Get-Process -Name 'xray' -ErrorAction SilentlyContinue)
+            $running = @(Get-Process -Name 'xray' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $xrayPath })
             if ($running.Count -eq 0) {
                 Remove-Item $tempDir -Recurse -Force
                 Write-Error "Cannot replace $xrayPath but no xray.exe process is running. Original error: $($_.Exception.Message)"
@@ -1749,7 +1875,7 @@ if (-not $SkipDownload) {
             Write-Host "$xrayPath is in use by $($running.Count) running xray.exe process(es):" -ForegroundColor Yellow
             $running | ForEach-Object { Write-Host ("  PID $($_.Id)  $($_.Path)") -ForegroundColor Yellow }
 
-            $kill = $KillRunning -or (Read-YesNo -Prompt 'Kill these processes and continue?' -Default $false -ForceYes:$Force)
+            $kill = $KillRunning -or (-not $PreserveSettings -and (Read-YesNo -Prompt 'Kill these processes and continue?' -Default $false -ForceYes:$Force))
             if (-not $kill) {
                 Remove-Item $tempDir -Recurse -Force
                 Write-Error "Aborted: xray.exe is in use. Re-run with -KillRunning to terminate it automatically, or close the MCP hosts manually."
@@ -1777,6 +1903,7 @@ else {
     }
     Write-Host "Using existing xray at $xrayPath" -ForegroundColor Yellow
 }
+if ($null -ne $BinaryPrepared) { $BinaryPrepared.Value = $true }
 
 if ($Extensions) {
     $selectedExts = Normalize-ExtensionList -Value $Extensions
@@ -1791,7 +1918,8 @@ else {
     $extCounts = Get-DetectedExtensions -RootPath $RepoPath -KnownExtensions $KnownCodeExtensions -SkipDirectoryNames $SkipDirs
 
     if ($extCounts.Count -eq 0) {
-        Write-Error "No recognized code/text files found in $RepoPath"
+        $guidance = if ($PreserveSettings) { ' Supply -Extensions for this new repository.' } else { '' }
+        Write-Error "No recognized code/text files found in $RepoPath.$guidance"
         exit 1
     }
 
@@ -1837,7 +1965,10 @@ else {
     }
 
     if (-not $selectedExts) {
-        Write-Error 'No extensions were selected'
+        if ($PreserveSettings) {
+            Write-Error 'No extensions meet the installer threshold. Supply -Extensions for new repositories; existing settings are unchanged.'
+        }
+        else { Write-Error 'No extensions were selected' }
         exit 1
     }
 
@@ -1860,9 +1991,17 @@ if ($UserMcp) {
     if ($LASTEXITCODE -ne 0) { Write-Error "The installed Xray does not support serve-workspace. Upgrade the executable before using -UserMcp. $($capability -join ' ')"; exit 1 }
     $profile = Resolve-WorkspaceProfile $profilesPath $RepoPath -Migrate -ReportedWarnings $profileWarnings
     $profilePath = $profile.Path
+    if ($PreserveSettings) {
+        $currentMigrations = @(Get-UserMcpMigrationConfigs -RepoRoot $RepoPath -Binary $xrayPath -IsGitRepo $isGitRepo -Consent $MigrateLegacy)
+        $currentSettings = Get-PreservedWorkspaceSettings -Profile $profile -Migrations $currentMigrations -RepoRoot $RepoPath
+        if (($null -eq $currentSettings) -ne ($null -eq $preservedSettings) -or
+            ($currentSettings -and $currentSettings.Signature -cne $preservedSettings.Signature)) {
+            throw 'Workspace settings changed during setup. Retry instead of overwriting them.'
+        }
+    }
     $profile.Value = [PSCustomObject][ordered]@{
         version = 1; workspaceRoot = $RepoPath
-        args = @('--ext', $selectedExts, '--watch', '--definitions', '--debug-log')
+        args = if ($preservedSettings) { $preservedSettings.Arguments } else { @('--ext', $selectedExts, '--watch', '--definitions', '--debug-log') }
     }
     [void](Write-SetupJson -Document $profile -Backup)
     $xrayArgs = @('serve-workspace', '--profiles', $profilesPath)
@@ -1879,6 +2018,12 @@ foreach ($target in ($targets | Where-Object { $_.Status -eq 'Ready' })) {
         }
         if ($UserMcp) {
             $entry | Add-Member -NotePropertyName '_xrayUserMcp' -NotePropertyValue 1
+            if ($PreserveSettings) {
+                $existing = $target.Document.Value.($target.Container).PSObject.Properties['xray']
+                if ($existing -and (Test-ManagedUserMcpEntry $existing.Value $xrayPath $profilesPath)) {
+                    $entry = $existing.Value
+                }
+            }
         }
         $target.Document.Value.($target.Container) | Add-Member -NotePropertyName 'xray' -NotePropertyValue $entry -Force
         $changed = Write-SetupJson -Document $target.Document -Backup

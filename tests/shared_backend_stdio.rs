@@ -516,6 +516,85 @@ fn write_workspace_profile(profiles: &Path, id: &str, root: &Path, ext: &str) {
 }
 
 #[test]
+fn workspace_profiles_clients_share_backend_across_git_prompt_environments() {
+    for (key, host_value, cli_value) in [
+        ("GIT_ASKPASS", "vscode-askpass-helper", "cli-askpass-helper"),
+        ("GIT_TERMINAL_PROMPT", "0", "1"),
+    ] {
+        for (first_value, second_value) in [
+            (Some(host_value), Some(cli_value)),
+            (Some(host_value), Some("")),
+            (Some(host_value), None),
+            (Some(""), None),
+        ] {
+            for reverse in [false, true] {
+                let values = if reverse { [second_value, first_value] } else { [first_value, second_value] };
+                let workspace = Workspace::new("git_prompt_marker");
+                let profiles = tempfile::tempdir().unwrap();
+                write_workspace_profile(profiles.path(), "registered", workspace.path(), "rs");
+                let mut clients: Vec<_> = values.into_iter().map(|value| {
+                    let mut command = workspace_profile_command(profiles.path(), workspace.path());
+                    command.env_remove("GIT_ASKPASS").env_remove("GIT_TERMINAL_PROMPT");
+                    if let Some(value) = value { command.env(key, value); }
+                    Client::start_command(command)
+                }).collect();
+                assert_eq!(clients[0].backend_pid, clients[1].backend_pid, "{key}, reverse={reverse}");
+                for client in &mut clients {
+                    client.wait_for_marker("git_prompt_marker");
+                    let start = Instant::now();
+                    loop {
+                        let info = Client::payload(&client.call("xray_info", json!({})));
+                        assert_eq!(fs::canonicalize(info["summary"]["serverDir"].as_str().unwrap()).unwrap(),
+                            fs::canonicalize(workspace.path()).unwrap());
+                        if info["indexes"].as_array().unwrap().iter()
+                            .any(|entry| entry["type"] == "definition" && entry.get("status").is_none()) { break; }
+                        assert!(start.elapsed() < WAIT, "definitions did not become ready: {info}");
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    let definitions = Client::payload(&client.call("xray_definitions", json!({
+                        "name": ["git_prompt_marker"], "file": ["sample.rs"], "includeBody": true,
+                    })));
+                    assert_eq!(definitions["definitions"][0]["name"], "git_prompt_marker");
+                    assert!(definitions["definitions"][0]["body"].as_array().unwrap().iter()
+                        .any(|line| line.as_str().unwrap().contains("pub fn git_prompt_marker")));
+                }
+                for client in &mut clients { client.close(); }
+                workspace.wait_for_shutdown();
+            }
+        }
+    }
+}
+
+#[test]
+fn shared_backend_rejects_git_repository_configuration_changes() {
+    let workspace = Workspace::new("git_configuration_marker");
+    let configured_command = || {
+        let mut command = command(workspace.path(), "rs");
+        command.env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "core.quotePath")
+            .env("GIT_CONFIG_VALUE_0", "false");
+        command
+    };
+    let mut client = Client::start_command(configured_command());
+    for key in [
+        "GIT_CONFIG_VALUE_0", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        let private_value = "xray-test-private-git-setting";
+        let rejected = configured_command().env(key, private_value).output().unwrap();
+        assert!(!rejected.status.success(), "{key} must remain incompatible");
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert!(stderr.contains(&format!("env:{key}")), "{stderr}");
+        assert!(!stderr.contains(private_value), "Git environment values must not be disclosed");
+        assert!(rejected.stdout.is_empty(), "configuration conflict must not start MCP");
+    }
+    client.wait_for_marker("git_configuration_marker");
+    client.close();
+    workspace.wait_for_shutdown();
+}
+
+#[test]
 fn workspace_profiles_reuse_explicit_serve_backend_and_reject_unknown_cwd() {
     let workspace = Workspace::new("profile_shared_marker");
     let profiles = tempfile::tempdir().unwrap();
