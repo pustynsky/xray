@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.9.2 (2026-10-20)
+
+- **Clarified installation, updates, and migration.** Quick-start examples select personal MCP explicitly. The update guide distinguishes repeat setup, one-time workspace migration, and binary-only replacement, uses the actual default installation path, and explains shared-process shutdown, extension selection, and post-update verification.
+
+- **Hardened MCP restore and uninstall.** Setup rejects simultaneous `-Restore -Uninstall`, including with `-DryRun`, before writing files. Personal uninstall checks that the config text still matches the entry whose ownership was approved, preserving concurrent replacements, unrelated server edits, and deleted configs without creating a backup.
+
+- **Prevented mixed-scope MCP registrations during upgrades.** Workspace setup and restore now stop before writing files when a personal Xray registration exists in Copilot CLI/SDK or the selected VS Code profile. They explain how to update or explicitly migrate with `-UserMcp -MigrateLegacy`, rather than recreating a workspace entry that can override personal setup. Other MCP servers are preserved, and workspace uninstall remains available.
+
+- **Added personal MCP setup with workspace-specific profiles.** `setup-xray.ps1 -UserMcp` registers one native `serve-workspace` launcher in personal Copilot CLI/SDK and VS Code configurations, keeping each repository's settings under the installation directory instead of changing tracked workspace MCP files. Personal entries contain no workspace variables or pinned `cwd`, so VS Code can forward them to the Copilot harness. Profiles resolve from the session launch directory, or a single MCP `roots/list` result when a client starts outside the workspace, and use the existing shared backend. Unknown or ambiguous roots fail explicitly. Migration requires consent and refuses genuine tracked Xray entries; verified local Git-filter overlays can be removed without writing the index. Uninstall preserves other workspaces and the shared executable. Legacy workspace-local installation remains the default.
+
 - **Missing explicit `--dir` no longer wedges the server.** A missing directory or a path to a file now leaves the workspace unresolved instead of pinning it and attempting to build indexes. Earlier versions could leave tools returning `INDEX_BUILDING` indefinitely while `xray_reindex dir=...` refused to switch workspaces; shared-backend startup could instead exit during path resolution. Tools now report `WORKSPACE_UNRESOLVED` with the invalid path, and clients advertising roots receive a `roots/list` request. Bind a valid root and reindex, or call `xray_reindex dir=<path>` directly to recover without restarting. Failed recovery attempts restore the previous workspace status, so another invalid path does not turn `WORKSPACE_UNRESOLVED` into a misleading `INDEX_BUILDING`. Invalid paths use a private server before shared-backend path resolution; existing explicit directories remain pinned.
 
 ## 0.9.1 (2026-10-20)

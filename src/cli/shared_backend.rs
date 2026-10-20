@@ -231,7 +231,16 @@ fn normalize(args: &mut ServeArgs) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn run(mut args: ServeArgs) -> io::Result<()> {
+pub(super) struct InitializedSession {
+    pub initialize: String,
+    pub buffered: Vec<u8>,
+}
+
+pub(super) fn run(args: ServeArgs) -> io::Result<()> {
+    run_with_session(args, None)
+}
+
+pub(super) fn run_with_session(mut args: ServeArgs, session: Option<InitializedSession>) -> io::Result<()> {
     // Roots-based and unresolved modes can change workspaces after initialize.
     // Keep it private rather than pinning it to an accidental startup directory.
     if !args.internal_backend
@@ -254,7 +263,7 @@ pub(super) fn run(mut args: ServeArgs) -> io::Result<()> {
         run_backend(args, workspace, configuration)
     } else {
         let stream = connect_or_start(&args, &workspace, &configuration)?;
-        proxy::run(stream, &args, &workspace, &configuration)
+        proxy::run(stream, &args, &workspace, &configuration, session)
     }
 }
 

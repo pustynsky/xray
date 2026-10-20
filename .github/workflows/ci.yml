@@ -76,6 +76,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test --workspace --locked
         run: cargo test --workspace --locked
+      - name: Test user MCP setup (PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          & .\scripts\test-mcp-setup.ps1 -UserMcpOnly -XrayBinary .\target\debug\xray.exe
+          exit $LASTEXITCODE
+      - name: Test user MCP setup (PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & .\scripts\test-mcp-setup.ps1 -UserMcpOnly -XrayBinary .\target\debug\xray.exe
+          exit $LASTEXITCODE
 
   feature-matrix:
     name: Feature matrix (${{ matrix.features }})

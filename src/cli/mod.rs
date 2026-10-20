@@ -4,6 +4,7 @@ pub mod args;
 mod info;
 mod serve;
 mod shared_backend;
+mod workspace_profiles;
 
 pub use args::*;
 
@@ -70,6 +71,9 @@ pub(crate) enum Commands {
     /// Start MCP (Model Context Protocol) server over stdio.
     Serve(ServeArgs),
 
+    /// Start MCP using the local profile for the current workspace.
+    ServeWorkspace(workspace_profiles::WorkspaceServeArgs),
+
     /// Build a code definition index (classes, methods, interfaces, etc.)
     DefIndex(definitions::DefIndexArgs),
 
@@ -99,6 +103,7 @@ pub fn run() {
         Commands::ContentIndex(args) => cmd_content_index(args),
         Commands::Grep(args) => cmd_grep(args),
         Commands::Serve(args) => shared_backend::run(args).map_err(SearchError::Io),
+        Commands::ServeWorkspace(args) => workspace_profiles::run(args).map_err(SearchError::Io),
         Commands::DefIndex(args) => cmd_def_index(args),
         Commands::DefAudit(args) => cmd_def_audit(args),
         Commands::Cleanup(args) => {

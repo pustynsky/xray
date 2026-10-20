@@ -48,6 +48,18 @@
     Select GitHub Copilot CLI setup in .github/mcp.json. Without either client
     switch, both clients are selected.
 
+.PARAMETER UserMcp
+    Register Xray in personal Copilot CLI/SDK and VS Code MCP configurations.
+    Store separate workspace profiles under InstallDir\workspaces. This mode
+    does not require a CLI wrapper or changes to tracked workspace files.
+    Without this switch, setup keeps the existing workspace-local behavior.
+    With -EnableVSCode, CLI/SDK registration is also configured for Agent Host.
+
+.PARAMETER VSCodeMcpPath
+    Personal VS Code MCP file for -UserMcp. By default, use the saved folder
+    profile association in stable VS Code. Specify this path for other editions,
+    custom user-data directories, or multi-root workspace profiles.
+
 .PARAMETER GitVisibility
     Deprecated. Accepted with a warning for existing callers. Both values now
     use local-only setup and never install a filter or modify a tracked config.
@@ -73,6 +85,8 @@
     binary. Without this switch, the script asks for confirmation interactively.
 
 .PARAMETER Restore
+    Cannot be combined with -Uninstall.
+    With -UserMcp: restore only the selected workspace profile backup.
     Restore .vscode/mcp.json and .github/mcp.json from the .bak files created on the
     previous setup run, then exit. Skips download and extension detection.
     Use this to undo the most recent setup-xray run.
@@ -85,6 +99,10 @@
     the script exits with an error.
 
 .PARAMETER Uninstall
+    Cannot be combined with -Restore.
+    With -UserMcp: remove the selected workspace profile. Keep shared client
+    registrations while other profiles remain; otherwise remove matching
+    managed registrations from the selected personal configs. Keep the binary.
     Fully remove xray from the target repository:
       - Strip the 'xray' server entry from local .vscode/mcp.json and
         .github/mcp.json (other servers preserved; tracked targets skipped).
@@ -139,6 +157,8 @@ param(
     [switch]$EnableVSCode,
     [switch]$EnableRoo,
     [switch]$EnableCopilotCli,
+    [switch]$UserMcp,
+    [string]$VSCodeMcpPath,
     [ValidateSet('Visible', 'Hidden')]
     [string]$GitVisibility,
     [switch]$MigrateLegacy,
@@ -874,11 +894,30 @@ function Get-LegacyMcpState {
     }
 }
 
-function Remove-XrayServerEntry {
-    param([Parameter(Mandatory)] [string]$Path, [Parameter(Mandatory)] [string]$ContainerKey, [switch]$DryRun, [switch]$KeepEmptyFile)
+function Get-XrayStrippedText {
+    param([string]$Text, [string]$ExpectedJson, [string]$Path, [switch]$AllowUnmarked)
+    $marker = if ($AllowUnmarked) { '' } else { '"_xrayMcpMarker"\s*:\s*"managed-by-setup-xray\.ps1-do-not-edit"[^\r\n]*' }
+    $pattern = '(?m)^[ \t]*"xray"\s*:\s*\{[^\r\n]*' + $marker + '\},?[ \t]*\r?\n'
+    $stripped = [Regex]::Replace($Text, $pattern, '')
+    if ($stripped -ceq $Text) { return $null }
+    try { $parsed = ConvertFrom-SetupJson -Text $stripped -Path $Path }
+    catch { return $null }
+    if ((ConvertTo-SetupJson -Value $parsed -Path $Path -Compress) -ceq $ExpectedJson) { return $stripped }
+    return $null
+}
 
-    if (-not (Test-Path -LiteralPath $Path)) { return 'absent' }
+function Remove-XrayServerEntry {
+    param([Parameter(Mandatory)] [string]$Path, [Parameter(Mandatory)] [string]$ContainerKey, [switch]$DryRun, [switch]$KeepEmptyFile,
+        [string]$ExpectedText)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        if ($PSBoundParameters.ContainsKey('ExpectedText')) { throw "File changed during setup: $Path. Retry rather than overwriting concurrent changes." }
+        return 'absent'
+    }
     $document = Read-SetupJson -Path $Path
+    if ($PSBoundParameters.ContainsKey('ExpectedText') -and $document.Text -cne $ExpectedText) {
+        throw "File changed during setup: $Path. Retry rather than overwriting concurrent changes."
+    }
     $containerProperty = $document.Value.PSObject.Properties[$ContainerKey]
     $container = if ($containerProperty) { $containerProperty.Value } elseif ($ContainerKey -eq 'mcpServers') { $document.Value } else { $null }
     if ($null -eq $container) { return 'no-xray-entry' }
@@ -900,26 +939,18 @@ function Remove-XrayServerEntry {
         return 'removed-and-deleted-empty-file'
     }
 
-    # Old filters injected a complete first member on one line. Removing that
-    # line preserves the upstream bytes; validate it before using the shortcut.
-    $pattern = '(?m)^[ \t]*"xray"\s*:\s*\{[^\r\n]*"_xrayMcpMarker"\s*:\s*"managed-by-setup-xray\.ps1-do-not-edit"[^\r\n]*\},?[ \t]*\r?\n'
-    $stripped = [Regex]::Replace($document.Text, $pattern, '')
     $expected = ConvertTo-SetupJson -Value $document.Value -Path $Path -Compress
-    if ($stripped -cne $document.Text) {
-        try { $parsed = ConvertFrom-SetupJson -Text $stripped -Path $Path }
-        catch { $parsed = $null }
-        if ($null -ne $parsed -and (ConvertTo-SetupJson -Value $parsed -Path $Path -Compress) -ceq $expected) {
-            [void](Write-SetupText -Path $Path -Text $stripped -OriginalText $document.Text -Backup)
-            return 'removed'
-        }
+    $stripped = Get-XrayStrippedText -Text $document.Text -ExpectedJson $expected -Path $Path
+    if ($null -ne $stripped) {
+        [void](Write-SetupText -Path $Path -Text $stripped -OriginalText $document.Text -Backup)
+        return 'removed'
     }
     [void](Write-SetupJson -Document $document -Backup)
     return 'removed'
 }
 
-function Remove-LegacyMcpState {
-    param([Parameter(Mandatory)] [string]$RepoRoot, [Parameter(Mandatory)] $State, [switch]$DryRun, [switch]$KeepEntry)
-
+function Assert-LegacyMcpMigration {
+    param([string]$RepoRoot, $State)
     if ($State.ParseError) { throw "Cannot migrate unreadable legacy config: $($State.Path)." }
     if ($State.FilterPresent) {
         $worktrees = Invoke-SetupGit -RepoRoot $RepoRoot -Arguments @('worktree', 'list', '--porcelain')
@@ -931,6 +962,12 @@ function Remove-LegacyMcpState {
             throw "Refusing to recursively remove a linked filter directory: $($State.FilterDirectory)."
         }
     }
+}
+
+function Remove-LegacyMcpState {
+    param([Parameter(Mandatory)] [string]$RepoRoot, [Parameter(Mandatory)] $State, [switch]$DryRun, [switch]$KeepEntry)
+
+    Assert-LegacyMcpMigration -RepoRoot $RepoRoot -State $State
     if (-not $KeepEntry) {
         [void](Remove-XrayServerEntry -Path $State.Path -ContainerKey $State.Container -KeepEmptyFile -DryRun:$DryRun)
     }
@@ -982,12 +1019,222 @@ function Request-LegacyMigration {
     return $false
 }
 
+function Get-CopilotHome {
+    $directory = if ([string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) { Join-Path $HOME '.copilot' } else { $env:COPILOT_HOME }
+    if (-not [IO.Path]::IsPathRooted($directory)) { $directory = Join-Path (Get-Location).ProviderPath $directory }
+    return [IO.Path]::GetFullPath($directory)
+}
+
+function Get-UserVSCodeMcpPath {
+    param([string]$RepoRoot, [string]$Override)
+    if ($Override) {
+        if (-not [IO.Path]::IsPathRooted($Override)) { $Override = Join-Path (Get-Location).ProviderPath $Override }
+        return [IO.Path]::GetFullPath($Override)
+    }
+    $user = if ($env:VSCODE_PORTABLE) { Join-Path $env:VSCODE_PORTABLE 'user-data\User' } else { Join-Path $env:APPDATA 'Code\User' }
+    $state = Read-SetupJson -Path (Join-Path $user 'globalStorage\storage.json')
+    $profileId = $null
+    if ($state.Value.profileAssociations.workspaces) {
+        $workspaceUri = [Uri]($RepoRoot.TrimEnd('\', '/') + '\')
+        $workspacePath = $workspaceUri.GetComponents([UriComponents]::Path, [UriFormat]::Unescaped).TrimEnd('/')
+        foreach ($association in $state.Value.profileAssociations.workspaces.PSObject.Properties) {
+            $uri = [Uri]$association.Name
+            if ($uri.IsFile -and $uri.Host -ieq $workspaceUri.Host -and
+                $uri.GetComponents([UriComponents]::Path, [UriFormat]::Unescaped).TrimEnd('/') -ieq $workspacePath) {
+                $profileId = $association.Value
+                break
+            }
+        }
+    }
+    if ($profileId -and $profileId -ne '__default__profile__') {
+        $profile = @($state.Value.userDataProfiles | Where-Object { $_.location -eq $profileId })
+        if ($profile.Count -ne 1) { throw "Cannot resolve VS Code profile $profileId. Supply -VSCodeMcpPath from 'MCP: Open User Configuration'." }
+        if (-not $profile[0].useDefaultFlags.mcp) {
+            $profiles = [IO.Path]::GetFullPath((Join-Path $user 'profiles')) + [IO.Path]::DirectorySeparatorChar
+            $directory = [IO.Path]::GetFullPath((Join-Path $profiles $profileId))
+            if (-not $directory.StartsWith($profiles, [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid VS Code profile location.' }
+            return Join-Path $directory 'mcp.json'
+        }
+    }
+    return Join-Path $user 'mcp.json'
+}
+
+function Get-UserMcpTargets {
+    param([string]$RepoRoot, [string]$VSCodeMcpPath, [bool]$IncludeVSCode)
+    [PSCustomObject]@{ Relative = ''; Container = 'mcpServers'; Client = 'Copilot CLI/SDK'; Selected = $true; Path = (Join-Path (Get-CopilotHome) 'mcp-config.json'); Status = 'Not selected'; Document = $null }
+    [PSCustomObject]@{ Relative = ''; Container = 'servers'; Client = 'VS Code'; Selected = $IncludeVSCode; Path = $(if ($IncludeVSCode) { Get-UserVSCodeMcpPath $RepoRoot $VSCodeMcpPath }); Status = 'Not selected'; Document = $null }
+}
+
+function Get-WorkspaceProfilePath {
+    param([string]$Profiles, [string]$RepoRoot)
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $key = [IO.Path]::GetFullPath($RepoRoot).TrimEnd('\', '/').ToLowerInvariant()
+        $id = ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($key)))).Replace('-', '').ToLowerInvariant()
+        return Join-Path (Join-Path $Profiles $id) 'config.json'
+    }
+    finally { $hash.Dispose() }
+}
+
+function Test-ManagedUserMcpEntry {
+    param($Entry, [string]$Binary, [string]$Profiles)
+    return $Entry -and $Entry._xrayUserMcp -eq 1 -and $Entry.command -ieq $Binary -and
+        @($Entry.args).Count -eq 3 -and $Entry.args[0] -ceq 'serve-workspace' -and
+        $Entry.args[1] -ceq '--profiles' -and $Entry.args[2] -ieq $Profiles
+}
+
+function Get-WorkspaceProfileFiles {
+    param([string]$Profiles)
+    if (-not (Test-Path -LiteralPath $Profiles)) { return }
+    Get-ChildItem -LiteralPath $Profiles -Directory | ForEach-Object {
+        $file = Join-Path $_.FullName 'config.json'
+        if (Test-Path -LiteralPath $file -PathType Leaf) { $file }
+    }
+}
+
+function Get-UserMcpMigrationConfigs {
+    param([string]$RepoRoot, [string]$Binary, [bool]$IsGitRepo, [bool]$Consent)
+    $legacyStates = @(Get-LegacyMcpState -RepoRoot $RepoRoot -IsGitRepo $IsGitRepo)
+    foreach ($definition in @(
+        @{ Relative = '.mcp.json'; Container = 'mcpServers' },
+        @{ Relative = '.github/mcp.json'; Container = 'mcpServers' },
+        @{ Relative = '.vscode/mcp.json'; Container = 'servers' }
+    )) {
+        $path = Join-Path $RepoRoot $definition.Relative
+        $document = Read-SetupJson -Path $path
+        $container = $document.Value.PSObject.Properties[$definition.Container]
+        $entry = if ($container -and $container.Value -is [PSCustomObject]) { $container.Value.PSObject.Properties['xray'] } else { $null }
+        if (-not $container -and $definition.Relative -eq '.mcp.json') { $entry = $document.Value.PSObject.Properties['xray'] }
+        $legacy = $legacyStates | Where-Object { $_.Relative -eq $definition.Relative -and $_.FilterPresent }
+        if (-not $entry -and -not $legacy) { continue }
+        if (-not $Consent) { throw "Workspace Xray entry or legacy filter in $path can override personal MCP. Re-run -UserMcp -MigrateLegacy to remove eligible local entries and filter metadata." }
+        if ($legacy) {
+            Assert-LegacyMcpMigration -RepoRoot $RepoRoot -State $legacy
+            if ($legacy.SkipWorktree -or $legacy.AssumeUnchanged) {
+                throw "Legacy index flags require separate cleanup before -UserMcp: $path. Setup will not change them."
+            }
+        }
+        $index = $null
+        if ($legacy -and $IsGitRepo -and (Test-IsTrackedFile $RepoRoot $definition.Relative)) {
+            $blob = Invoke-SetupGit -RepoRoot $RepoRoot -Arguments @('show', ":$($definition.Relative)")
+            $index = ConvertFrom-SetupJson -Text ($blob.Lines -join "`n") -Path $path
+            $indexContainer = $index.PSObject.Properties[$definition.Container]
+            $indexServers = if ($indexContainer) { $indexContainer.Value } else { $index }
+            if ($indexServers -isnot [PSCustomObject] -or $indexServers.PSObject.Properties['xray']) {
+                throw "Not migrating an Xray entry present in the Git index: $path."
+            }
+        }
+        if (-not $entry) {
+            [PSCustomObject]@{
+                Path = $path; Relative = $definition.Relative; Container = $definition.Container
+                LegacyState = $legacy; OriginalText = $document.Text; CleanText = $null; Binary = $Binary; MetadataOnly = $true
+            }
+            continue
+        }
+        if ($IsGitRepo -and (Test-IsTrackedFile $RepoRoot "$($definition.Relative).bak")) {
+            throw "Not migrating a tracked workspace config or backup: $path."
+        }
+        if ($IsGitRepo -and (Test-IsTrackedFile $RepoRoot $definition.Relative)) {
+            if ($definition.Relative -ne '.mcp.json' -or -not $legacy -or
+                (-not $legacy.Marked -and $entry.Value.command -ine $Binary)) {
+                throw "Not migrating a tracked workspace config or backup: $path."
+            }
+            $attributePattern = '(?m)^\s*\.mcp\.json\s+.*(?<!\S)filter=xray-mcp(?=\s|$)'
+            if (-not (Test-Path -LiteralPath $legacy.AttributesPath) -or
+                -not [Regex]::IsMatch([IO.File]::ReadAllText($legacy.AttributesPath), $attributePattern)) {
+                throw "Not migrating a legacy filter without an owned local info/attributes rule: $path."
+            }
+            $expected = ConvertTo-SetupJson -Value $index -Path $path -Compress
+            $clean = Get-XrayStrippedText -Text $document.Text -ExpectedJson $expected -Path $path -AllowUnmarked:($entry.Value.command -ieq $Binary)
+            if ($null -eq $clean) {
+                throw "Not migrating $path because removing the local Xray line does not reproduce the Git index JSON. Other local changes were preserved."
+            }
+            [PSCustomObject]@{
+                Path = $path; Relative = $definition.Relative; Container = $definition.Container
+                LegacyState = $legacy; OriginalText = $document.Text; CleanText = $clean; Binary = $Binary; MetadataOnly = $false
+            }
+            continue
+        }
+        if ($entry.Value.command -ine $Binary) { throw "Not migrating an Xray entry owned by another executable: $path." }
+        [PSCustomObject]@{
+            Path = $path; Relative = $definition.Relative; Container = $definition.Container
+            LegacyState = $legacy; OriginalText = $document.Text; CleanText = $null; Binary = $Binary; MetadataOnly = $false
+        }
+    }
+}
+
+function Remove-UserMcpWorkspaceEntry {
+    param([string]$RepoRoot, [bool]$IsGitRepo, [string]$ExcludePath, $Migration)
+    $current = @(Get-UserMcpMigrationConfigs -RepoRoot $RepoRoot -Binary $Migration.Binary -IsGitRepo $IsGitRepo -Consent $true |
+        Where-Object Path -eq $Migration.Path)
+    if ($current.Count -ne 1 -or $current[0].OriginalText -cne $Migration.OriginalText -or
+        $current[0].CleanText -cne $Migration.CleanText -or $current[0].MetadataOnly -ne $Migration.MetadataOnly) {
+        throw "Workspace config changed during setup: $($Migration.Path). Retry rather than overwriting it."
+    }
+    if ($Migration.MetadataOnly) {
+        Remove-LegacyMcpState -RepoRoot $RepoRoot -State $current[0].LegacyState -KeepEntry
+        return
+    }
+    if ($null -ne $Migration.CleanText) {
+        Protect-McpPath -RepoRoot $RepoRoot -RelativePath "$($Migration.Relative).bak" -ExcludePath $ExcludePath
+        [void](Write-SetupText -Path $Migration.Path -Text $Migration.CleanText -OriginalText $Migration.OriginalText -Backup)
+        Remove-LegacyMcpState -RepoRoot $RepoRoot -State $current[0].LegacyState -KeepEntry
+        return
+    }
+    if ($IsGitRepo) {
+        Protect-McpPath -RepoRoot $RepoRoot -RelativePath $Migration.Relative -ExcludePath $ExcludePath
+        Protect-McpPath -RepoRoot $RepoRoot -RelativePath "$($Migration.Relative).bak" -ExcludePath $ExcludePath
+    }
+    [void](Remove-XrayServerEntry -Path $Migration.Path -ContainerKey $Migration.Container -ExpectedText $Migration.OriginalText)
+    if ($current[0].LegacyState) {
+        Remove-LegacyMcpState -RepoRoot $RepoRoot -State $current[0].LegacyState -KeepEntry
+    }
+}
+
+function Remove-UserMcpWorkspace {
+    param([string]$ProfilePath, [string]$Profiles, [string]$Binary, [object[]]$Targets,
+        [switch]$DryRun, [switch]$KeepBinary, [switch]$KeepBackups)
+    foreach ($target in $Targets) {
+        $document = Read-SetupJson -Path $target.Path
+        $container = $document.Value.PSObject.Properties[$target.Container]
+        if ($container -and $container.Value -isnot [PSCustomObject]) {
+            throw "Expected an object for $($target.Container) in $($target.Path)."
+        }
+    }
+    $hadProfile = Test-Path -LiteralPath $ProfilePath -PathType Leaf
+    if ($hadProfile) {
+        if ($DryRun) { Write-Host "  [DryRun] Would remove workspace profile $ProfilePath" }
+        else { Remove-Item -LiteralPath $ProfilePath -Force }
+    }
+    if (-not $KeepBackups -and (Test-Path -LiteralPath "$ProfilePath.bak")) {
+        if ($DryRun) { Write-Host "  [DryRun] Would remove $ProfilePath.bak" }
+        else { Remove-Item -LiteralPath "$ProfilePath.bak" -Force }
+    }
+    $remaining = @(Get-WorkspaceProfileFiles $Profiles | Where-Object { $_ -ine $ProfilePath })
+    if ($remaining.Count -gt 0) {
+        Write-Host 'Other workspace profiles remain; keeping shared registrations and binary.'
+        return
+    }
+    foreach ($target in $Targets) {
+        $document = Read-SetupJson -Path $target.Path
+        $container = $document.Value.PSObject.Properties[$target.Container]
+        $entry = if ($container -and $container.Value -is [PSCustomObject]) { $container.Value.PSObject.Properties['xray'] } else { $null }
+        if ($entry) {
+            if (Test-ManagedUserMcpEntry $entry.Value $Binary $Profiles) {
+                $status = Remove-XrayServerEntry -Path $target.Path -ContainerKey $target.Container -ExpectedText $document.Text -KeepEmptyFile -DryRun:$DryRun
+                Write-Host "$($target.Client): $status"
+            }
+            else { Write-Warning "Preserving an unmanaged personal Xray entry: $($target.Path)" }
+        }
+    }
+    Write-Host 'Keeping the shared executable; other VS Code profiles or clients may still reference it.'
+}
+
 function Set-CopilotWorkspaceTrust {
     param([Parameter(Mandatory)] [string]$RepoRoot, [bool]$Interactive)
 
     try {
-        $copilotHome = if ([string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) { Join-Path $HOME '.copilot' } else { $env:COPILOT_HOME }
-        if (-not [IO.Path]::IsPathRooted($copilotHome)) { $copilotHome = Join-Path (Get-Location).ProviderPath $copilotHome }
+        $copilotHome = Get-CopilotHome
         $document = Read-SetupJson -Path (Join-Path ([IO.Path]::GetFullPath($copilotHome)) 'config.json')
         $property = $document.Value.PSObject.Properties['trustedFolders']
         $folders = @()
@@ -1173,6 +1420,7 @@ if ($gitMetadataRoot -and -not $isGitRepo) {
 if ($isGitRepo) { $RepoPath = $gitWorkTreeRoot }
 if ($GitVisibility) { Write-Warning '-GitVisibility is deprecated. All generated configs are now local; neither Visible nor Hidden installs a Git filter.' }
 if ($EnableRoo) { Write-Warning '-EnableRoo is disabled. Use -EnableVSCode or -EnableCopilotCli instead.' }
+if ($Restore -and $Uninstall) { Write-Error '-Restore and -Uninstall cannot be used together.'; exit 1 }
 if ($DryRun -and -not $Uninstall) { Write-Error '-DryRun is supported only with -Uninstall.'; exit 1 }
 $nonInteractiveHost = @([Environment]::GetCommandLineArgs() | Where-Object { $_ -match '^-NonI' }).Count -gt 0
 $interactive = -not $Force -and -not $nonInteractiveHost -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
@@ -1181,6 +1429,42 @@ $targets = @(
     [PSCustomObject]@{ Relative = '.github/mcp.json'; Container = 'mcpServers'; Client = 'Copilot CLI'; Selected = $selectAll -or $EnableCopilotCli; Path = (Join-Path $RepoPath '.github\mcp.json'); Status = 'Not selected'; Document = $null },
     [PSCustomObject]@{ Relative = '.vscode/mcp.json'; Container = 'servers'; Client = 'VS Code'; Selected = $selectAll -or $EnableVSCode; Path = (Join-Path $RepoPath '.vscode\mcp.json'); Status = 'Not selected'; Document = $null }
 )
+if ($VSCodeMcpPath -and -not $UserMcp) { Write-Error '-VSCodeMcpPath requires -UserMcp.'; exit 1 }
+if (-not $UserMcp -and -not $Uninstall) {
+    foreach ($target in @(Get-UserMcpTargets -RepoRoot $RepoPath -IncludeVSCode ($selectAll -or $EnableVSCode) | Where-Object Selected)) {
+        $document = Read-SetupJson -Path $target.Path
+        $container = $document.Value.PSObject.Properties[$target.Container]
+        if ($container -and $container.Value -isnot [PSCustomObject]) {
+            throw "Expected an object for $($target.Container) in $($target.Path)."
+        }
+        if ($container -and $container.Value.PSObject.Properties['xray']) {
+            throw "Personal Xray registration already exists in $($target.Path). Refusing workspace setup or restore because it can create an overriding duplicate. Use -UserMcp; add -MigrateLegacy to explicitly migrate eligible workspace entries. No workspace files were changed."
+        }
+    }
+}
+if ($UserMcp) {
+    if (-not [IO.Path]::IsPathRooted($InstallDir)) { $InstallDir = Join-Path (Get-Location).ProviderPath $InstallDir }
+    $InstallDir = [IO.Path]::GetFullPath($InstallDir)
+    $profilesPath = Join-Path $InstallDir 'workspaces'
+    $profilePath = Get-WorkspaceProfilePath $profilesPath $RepoPath
+    $targets = @(Get-UserMcpTargets -RepoRoot $RepoPath -VSCodeMcpPath $VSCodeMcpPath -IncludeVSCode ($selectAll -or $EnableVSCode))
+    $repoPrefix = $RepoPath.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    foreach ($path in @($profilePath) + @($targets | Where-Object { $_.Selected } | ForEach-Object { $_.Path })) {
+        if ([IO.Path]::GetFullPath($path).StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            Write-Error "-UserMcp files must be outside the repository: $path"; exit 1
+        }
+    }
+    if ($Restore) {
+        if (-not (Restore-McpJson -Path $profilePath)) { Write-Error "No workspace profile backup found: $profilePath.bak"; exit 1 }
+        exit 0
+    }
+    if ($Uninstall) {
+        Remove-UserMcpWorkspace -ProfilePath $profilePath -Profiles $profilesPath -Binary (Join-Path $InstallDir 'xray.exe') -Targets @($targets | Where-Object { $_.Selected }) -DryRun:$DryRun -KeepBinary:$KeepBinary -KeepBackups:$KeepBackups
+        Write-Host $(if ($DryRun) { 'Dry-run complete. No files were changed.' } else { 'User MCP uninstall complete.' })
+        exit 0
+    }
+    $userMigrations = @(Get-UserMcpMigrationConfigs -RepoRoot $RepoPath -Binary (Join-Path $InstallDir 'xray.exe') -IsGitRepo $isGitRepo -Consent $MigrateLegacy)
+}
 $excludePath = if ($isGitRepo) { Get-ResolvedGitPath -RepoRoot $RepoPath -Name 'info/exclude' } else { $null }
 
 if ($Restore) {
@@ -1219,9 +1503,9 @@ if ($Restore) {
     exit 0
 }
 
-$legacyStates = @(Get-LegacyMcpState -RepoRoot $RepoPath -IsGitRepo $isGitRepo | Where-Object {
+$legacyStates = if ($UserMcp) { @() } else { @(Get-LegacyMcpState -RepoRoot $RepoPath -IsGitRepo $isGitRepo | Where-Object {
     $_.Found -and ($Uninstall -or ($_.Client -eq 'VS Code' -and $targets[1].Selected) -or ($_.Client -eq 'Copilot CLI' -and $targets[0].Selected))
-})
+}) }
 $migrate = Request-LegacyMigration -States $legacyStates -Interactive $interactive -ExplicitConsent:$MigrateLegacy
 
 if ($Uninstall) {
@@ -1239,7 +1523,7 @@ if ($Uninstall) {
     }
     foreach ($target in $targets) {
         try {
-            if ($isGitRepo) {
+            if ($isGitRepo -and -not $UserMcp) {
                 foreach ($relative in @($target.Relative, "$($target.Relative).bak")) {
                     if (Test-IsTrackedFile -RepoRoot $RepoPath -RelativePath $relative) {
                         throw "Not uninstalling tracked config or backup: $relative."
@@ -1273,7 +1557,10 @@ if ($Uninstall) {
     }
     $binary = Join-Path $InstallDir 'xray.exe'
     if (-not $KeepBinary -and (Test-Path -LiteralPath $binary)) {
-        if ($DryRun) { Write-Host "  [DryRun] Would delete $binary" }
+        if (@(Get-WorkspaceProfileFiles (Join-Path $InstallDir 'workspaces')).Count -gt 0) {
+            Write-Host 'Keeping the shared executable because personal workspace profiles still reference it.'
+        }
+        elseif ($DryRun) { Write-Host "  [DryRun] Would delete $binary" }
         elseif (-not $failed) {
             try { Remove-Item -LiteralPath $binary -Force -ErrorAction Stop }
             catch { Write-Warning "Could not delete $binary (it may be running)."; $failed = $true }
@@ -1289,7 +1576,7 @@ foreach ($target in ($targets | Where-Object { $_.Selected })) {
         if (-not $migrate -and @($legacyStates | Where-Object { $_.Relative -eq $target.Relative }).Count -gt 0) {
             throw "Legacy config left untouched without migration consent: $($target.Path)."
         }
-        if ($isGitRepo) {
+        if ($isGitRepo -and -not $UserMcp) {
             foreach ($relative in @($target.Relative, "$($target.Relative).bak")) {
                 if (Test-IsTrackedFile -RepoRoot $RepoPath -RelativePath $relative) {
                     throw "$relative is tracked by Git. Setup will not modify it or change the index."
@@ -1304,13 +1591,24 @@ foreach ($target in ($targets | Where-Object { $_.Selected })) {
         if (-not $container) {
             $target.Document.Value | Add-Member -NotePropertyName $target.Container -NotePropertyValue ([PSCustomObject]@{})
         }
-        if ($isGitRepo) {
+        if ($UserMcp) {
+            $entry = $target.Document.Value.($target.Container).PSObject.Properties['xray']
+            if ($entry -and -not (Test-ManagedUserMcpEntry $entry.Value (Join-Path $InstallDir 'xray.exe') $profilesPath) -and -not $Force) {
+                if (-not $interactive -or -not (Read-YesNo -Prompt "Replace the existing personal Xray entry in $($target.Path)?" -Default $false)) {
+                    throw "Personal Xray entry was not replaced: $($target.Path). Use -Force to approve replacement."
+                }
+            }
+        }
+        if ($isGitRepo -and -not $UserMcp) {
             Protect-McpPath -RepoRoot $RepoPath -RelativePath $target.Relative -ExcludePath $excludePath
             Protect-McpPath -RepoRoot $RepoPath -RelativePath "$($target.Relative).bak" -ExcludePath $excludePath
         }
         $target.Status = 'Ready'
     }
     catch { Write-Warning $_.Exception.Message; $target.Status = 'Skipped (error)' }
+}
+if ($UserMcp -and @($targets | Where-Object { $_.Selected -and $_.Status -ne 'Ready' }).Count -gt 0) {
+    Write-Error 'Personal MCP preflight failed. No workspace profile or personal MCP config was written.'; exit 1
 }
 if (@($targets | Where-Object { $_.Status -eq 'Ready' }).Count -eq 0) {
     Write-Error 'No eligible MCP configuration could be prepared. No MCP config was written.'
@@ -1477,6 +1775,17 @@ $xrayArgs = @(
     '--definitions',
     '--debug-log'
 )
+if ($UserMcp) {
+    $capability = @(& $xrayPath serve-workspace --help 2>&1)
+    if ($LASTEXITCODE -ne 0) { Write-Error "The installed Xray does not support serve-workspace. Upgrade the executable before using -UserMcp. $($capability -join ' ')"; exit 1 }
+    $profile = Read-SetupJson -Path $profilePath
+    $profile.Value = [PSCustomObject][ordered]@{
+        version = 1; workspaceRoot = $RepoPath
+        args = @('--ext', $selectedExts, '--watch', '--definitions', '--debug-log')
+    }
+    [void](Write-SetupJson -Document $profile -Backup)
+    $xrayArgs = @('serve-workspace', '--profiles', $profilesPath)
+}
 
 $definition = @{ type = 'stdio'; command = $xrayPath; args = $xrayArgs }
 foreach ($target in ($targets | Where-Object { $_.Status -eq 'Ready' })) {
@@ -1487,14 +1796,34 @@ foreach ($target in ($targets | Where-Object { $_.Status -eq 'Ready' })) {
         else {
             [PSCustomObject][ordered]@{ type = $definition.type; command = $definition.command; args = $definition.args; tools = @('*') }
         }
+        if ($UserMcp) {
+            $entry | Add-Member -NotePropertyName '_xrayUserMcp' -NotePropertyValue 1
+        }
         $target.Document.Value.($target.Container) | Add-Member -NotePropertyName 'xray' -NotePropertyValue $entry -Force
         $changed = Write-SetupJson -Document $target.Document -Backup
         $target.Status = if ($changed) { 'Configured' } else { 'Up to date' }
-        if ($isGitRepo -and -not (Test-GitIgnoresPath -RepoRoot $RepoPath -RelativePath $target.Relative)) {
+        if ($isGitRepo -and -not $UserMcp -and -not (Test-GitIgnoresPath -RepoRoot $RepoPath -RelativePath $target.Relative)) {
             throw "Git exclusion verification failed for $($target.Relative)."
         }
     }
     catch { Write-Warning $_.Exception.Message; $target.Status = 'Failed' }
+}
+if ($UserMcp) {
+    $incomplete = @($targets | Where-Object { $_.Selected -and $_.Status -notin @('Configured', 'Up to date') }).Count -gt 0
+    if (-not $incomplete) {
+        foreach ($migration in $userMigrations) {
+            Remove-UserMcpWorkspaceEntry -RepoRoot $RepoPath -IsGitRepo $isGitRepo -ExcludePath $excludePath -Migration $migration
+        }
+        $launcherStatus = Remove-CopilotLauncher -RepoRoot $RepoPath -IsGitRepo $isGitRepo -ExcludePath $excludePath
+        Write-Host "Legacy CLI launcher: $launcherStatus"
+    }
+    Write-Host "`nUser MCP setup $(if ($incomplete) { 'incomplete' } else { 'completed' })."
+    Write-Host "Workspace profile: $profilePath"
+    foreach ($target in $targets) { Write-Host "$($target.Client): $($target.Path) ($($target.Status))" }
+    Write-Host 'Restart MCP connections in VS Code and CLI. No CLI wrapper is required.'
+    Write-Host 'Verify actual xray_info and xray_definitions calls in each client.'
+    if ($incomplete) { exit 1 }
+    exit 0
 }
 
 $legacyRemaining = $false

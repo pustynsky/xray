@@ -6,6 +6,16 @@ End-to-end setup for using `xray` as an MCP server with your AI coding agent.
 
 ## Quick Setup (recommended)
 
+For VS Code Agent Host, ordinary Copilot Chat, and standalone Copilot CLI,
+use the opt-in [personal MCP setup](#personal-mcp-with-workspace-profiles).
+It does not depend on a CLI wrapper or modify a tracked repository MCP config.
+Without `-UserMcp`, setup retains the workspace-local behavior described below.
+If a personal Xray registration already exists, workspace setup refuses to
+create a conflicting registration. Use `-UserMcp` to update personal setup.
+The examples below select personal mode explicitly. Use the same command for a
+fresh install and a personal update; the first migration from workspace setup
+also requires `-MigrateLegacy`. See [updating](#5-updating-to-a-new-version).
+
 The [`setup-xray.ps1`](../scripts/setup-xray.ps1) script automates the entire installation — download, extension detection, MCP config creation, and git protection — in one command.
 
 ### Requirements
@@ -23,7 +33,7 @@ Three ways to launch it. Pick whichever fits — they all run the same script an
 Shortest. The script is fetched and executed in-memory; nothing is left on disk. The script will prompt for the target repository path; pass `-RepoPath <path>` to skip the prompt.
 
 ```powershell
-& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content))
+& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content)) -UserMcp
 ```
 
 #### From Command Prompt (`cmd.exe`)
@@ -31,13 +41,13 @@ Shortest. The script is fetched and executed in-memory; nothing is left on disk.
 CMD has no PowerShell host, so launch the same installer through the built-in `powershell.exe`:
 
 ```cmd
-powershell.exe -NoLogo -NoProfile -Command "& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content))"
+powershell.exe -NoLogo -NoProfile -Command "& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content)) -UserMcp"
 ```
 
 Put installer parameters inside the outer double quotes. In CMD, wrap parameter values containing spaces in PowerShell single quotes, not additional double quotes:
 
 ```cmd
-powershell.exe -NoLogo -NoProfile -Command "& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content)) -RepoPath 'C:\My Repo' -EnableVSCode"
+powershell.exe -NoLogo -NoProfile -Command "& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content)) -RepoPath 'C:\My Repo' -UserMcp -EnableVSCode"
 ```
 
 ### A2. Download-then-run
@@ -47,7 +57,7 @@ Recommended if you want to read the script before executing it. Saves to `%TEMP%
 ```powershell
 $tmp = Join-Path $env:TEMP 'setup-xray.ps1'
 Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing -OutFile $tmp
-& $tmp
+& $tmp -UserMcp
 ```
 
 ### A3. From a clone of this repo
@@ -57,10 +67,10 @@ Use this if you want to pin a specific commit/tag, or if you're iterating on the
 ```powershell
 git clone https://github.com/pustynsky/xray
 cd xray
-.\scripts\setup-xray.ps1
+.\scripts\setup-xray.ps1 -UserMcp
 ```
 
-> **Pin a release.** Replace `main` in the URLs above with a tag (e.g. `v0.4.0`) to lock the script to a specific release for reproducibility.
+> **Pin a release.** Replace `main` in the URLs above with a tag (e.g. `v0.9.2`) to lock the script to a specific release for reproducibility. Use a release with `serve-workspace` support for `-UserMcp`.
 >
 > **Target a specific repo non-interactively.** Pass `-RepoPath <path>` to skip the path prompt.
 >
@@ -72,13 +82,10 @@ cd xray
 
 1. Downloads the latest `xray.exe` from [GitHub releases](https://github.com/pustynsky/xray/releases) to `%LOCALAPPDATA%\xray\`
 2. Scans the target repository and detects file extensions (shows the top 20, selects frequent extensions, and retains detected structural files below the normal threshold)
-3. Creates MCP configuration:
-   - `.vscode/mcp.json` — for **VS Code GitHub Copilot Chat**
-   - `.github/mcp.json` — for **GitHub Copilot CLI**
-   - Roo Code (`.roo/mcp.json`) — **not** written; see the Roo note below
-4. Keeps generated configs and backups local through Git's `info/exclude`, resolved with `git rev-parse --git-path info/exclude` for ordinary clones and worktrees. If repository rules re-include a config, setup creates a narrow, untracked per-directory ignore helper. The shared `.gitignore` is never modified.
+3. With `-UserMcp`, merges a personal registration into each selected client and writes a profile for the target workspace under the installation directory. Repository MCP files remain untouched unless an explicit, eligible migration is requested. See [personal config locations](#personal-mcp-with-workspace-profiles). Without `-UserMcp`, creates local `.vscode/mcp.json` and `.github/mcp.json` instead. Roo Code (`.roo/mcp.json`) is not written.
+4. In workspace mode, keeps generated configs and backups local through Git's `info/exclude`, resolved with `git rev-parse --git-path info/exclude` for ordinary clones and worktrees. If repository rules re-include a config, setup creates a narrow, untracked per-directory ignore helper. The shared `.gitignore` is never modified.
 5. Offers persistent Copilot CLI folder trust interactively. Enter means Yes. Existing trust and unrelated settings are preserved; `COPILOT_HOME` overrides the default home directory. Non-interactive runs and `-Force` skip granting trust.
-6. If a root `.mcp.json` exists, creates a local `copilot-xray.cmd` in the repository root. The launcher explicitly loads `.github/mcp.json` alongside the root servers; the root config remains untouched.
+6. In workspace mode, if a root `.mcp.json` exists, creates a local `copilot-xray.cmd` in the repository root. The launcher explicitly loads `.github/mcp.json` alongside the root servers; the root config remains untouched. Personal mode uses the native launcher without this wrapper.
 
 The CLI definition enables all advertised Xray tools with `tools: ["*"]`. This is separate from CLI tool approval permissions. The VS Code definition has no `tools` field.
 
@@ -86,19 +93,19 @@ The CLI definition enables all advertised Xray tools with `tools: ["*"]`. This i
 
 ```powershell
 # Interactive mode (prompts for repo path)
-.\scripts\setup-xray.ps1
+.\scripts\setup-xray.ps1 -UserMcp
 
 # Skip download if xray.exe is already installed
-.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -SkipDownload
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -UserMcp -SkipDownload
 
 # Custom install location
-.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -InstallDir C:\Tools
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -UserMcp -InstallDir C:\Tools
 
-# Update local configs non-interactively, without granting trust or migration
-.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -Force
+# Update personal setup non-interactively, without granting trust or migration
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -UserMcp -Force
 
 # Use existing xray from a specific location
-.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -InstallDir "$HOME\.cargo\bin" -SkipDownload
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -UserMcp -InstallDir "$HOME\.cargo\bin" -SkipDownload
 ```
 
 After setup, **reopen the repo folder in VS Code** to activate the MCP server.
@@ -250,6 +257,147 @@ Use this after changing source in a local clone. It builds and deploys the binar
 The script performs a locked release build, terminates all running `xray.exe` processes, verifies the staged binary, retries transient deployment locks, deploys to `%LOCALAPPDATA%\xray\xray.exe`, and verifies the installed hash and version. Restart the MCP host after it completes.
 
 ---
+
+## Personal MCP with workspace profiles
+
+This mode requires an executable that supports `xray serve-workspace`. Setup
+checks that command before writing a profile or personal MCP registration.
+An older release binary is rejected explicitly; a newer installer alone is
+not enough.
+
+Run once for each workspace, using the same installation directory:
+
+```powershell
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -UserMcp
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\OtherProject -UserMcp -Extensions rs,md
+```
+
+Setup merges one `xray` registration into each selected client's personal config.
+Other servers and settings are preserved. The registration runs
+`xray serve-workspace --profiles <InstallDir>\workspaces`, not a PowerShell
+dispatcher or `copilot-xray.cmd`.
+
+| Configuration | Default location |
+|---|---|
+| Copilot CLI and SDK Agent Host | `%USERPROFILE%\.copilot\mcp-config.json`, or `$COPILOT_HOME\mcp-config.json` when set |
+| VS Code default profile | `%APPDATA%\Code\User\mcp.json` |
+| VS Code named profile | `%APPDATA%\Code\User\profiles\<id>\mcp.json` |
+| Workspace-specific Xray settings | `<InstallDir>\workspaces\<workspace-id>\config.json` |
+
+`InstallDir` defaults to `%LOCALAPPDATA%\xray`. The workspace ID is a SHA256 of
+the normalized absolute workspace path. Neither profiles nor personal client
+configs may be stored inside the repository in this mode.
+
+For VS Code, setup resolves folder-to-profile associations in the standard
+user-data directory and honors profiles that inherit the default MCP config.
+Portable installations use `$VSCODE_PORTABLE\user-data\User`. For a custom
+user-data directory, another VS Code edition, a saved multi-root workspace,
+or a profile not identified by that association, open **MCP: Open User
+Configuration** in the intended window and supply its exact path:
+
+```powershell
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -UserMcp `
+    -VSCodeMcpPath 'C:\Users\you\AppData\Roaming\Code\User\profiles\<id>\mcp.json'
+```
+
+`-EnableCopilotCli` selects only the personal CLI/SDK registration.
+`-EnableVSCode` also configures CLI/SDK, because Agent Host uses that registration
+even when its chat is displayed inside VS Code. Without either switch, both
+registrations are configured. Repeat setup for another VS Code profile if
+needed; workspace settings stay in the same shared profile directory.
+
+Each Xray profile contains the workspace root and ordinary `serve` arguments:
+
+```json
+{
+  "version": 1,
+  "workspaceRoot": "C:\\Repos\\MyProject",
+  "args": ["--ext", "cs,ts,md", "--watch", "--definitions", "--debug-log"]
+}
+```
+
+Xray selects the nearest registered ancestor of its actual launch directory.
+Personal registrations contain no `cwd` or unresolved workspace variables, so
+VS Code can forward them to the Copilot harness. CLI/SDK sessions launch MCP
+in their session working directory. If no profile matches the launch directory,
+Xray asks clients advertising MCP roots for `roots/list` after initialization.
+Exactly one file root is required; it must select an installed profile. This
+also supports ordinary VS Code launching a user MCP server from the home
+directory. No backend or indexes start before workspace selection.
+Launching from a workspace subdirectory selects the same profile.
+Unknown workspaces, multiple roots during discovery, duplicate canonical
+roots, malformed profiles, or invalid arguments fail explicitly. Xray does not
+fall back to indexing an arbitrary host directory. Profiles cannot override
+`--dir`, select `--standalone`, or run an internal backend directly.
+
+The selected root is passed explicitly to the existing shared backend.
+Compatible sessions share indexes and a watcher, but keep separate MCP proxies.
+Three active workspaces with five sessions each use 15 proxies and 3 backends.
+Different workspace profiles may use different extensions and settings.
+Configuration conflicts within one active workspace still fail explicitly.
+
+### Migrating and removing personal setup
+
+Workspace setup and workspace `-Restore` check the personal Copilot CLI/SDK
+config and, when VS Code is selected, the active VS Code profile's MCP config
+before writing files. If either contains `xray`, they stop with instructions
+to use `-UserMcp` and, when migration is needed, `-MigrateLegacy`. `-Force`
+does not bypass this check. This prevents an ordinary reinstall or a restored
+backup from reintroducing a workspace entry that overrides personal setup.
+CLI-only setup does not read unrelated VS Code profile settings. Workspace
+uninstall remains available and preserves active personal profiles and their
+shared executable.
+
+`-Restore` and `-Uninstall` are mutually exclusive in both workspace and personal
+modes, including with `-DryRun`. Passing both stops setup before any file changes.
+
+A workspace-level `xray` entry can override the personal registration. Setup
+therefore refuses to proceed while one exists unless you pass
+`-UserMcp -MigrateLegacy`. Entries using this installation's executable in
+untracked configs can be removed. A recognized local `xray-mcp` filter
+overlay in the tracked root config can also be removed, but only when
+removing its injected line reproduces the Git index JSON exactly. Every
+other byte of the working file is preserved, and the index is not written.
+This cleanup requires an owned local attributes rule, a single worktree,
+and no skip-worktree or assume-unchanged flags. Other local changes or
+flags require separate cleanup rather than being discarded.
+
+Migration also removes legacy filter metadata when the workspace file has no
+`xray` entry or is missing. This still requires migration consent, a single
+worktree, and no legacy index flags; an unchanged or missing config is not
+written. Before removing an untracked entry, setup rechecks its ownership,
+the original file text, and Git tracking. Concurrent changes stop migration
+instead of deleting a replacement entry or overwriting another server.
+
+Xray entries actually present in the index and tracked backups are never
+migrated, even with `-Force`; those require a repository-owner change.
+The managed old CLI launcher
+is removed after the new registrations succeed.
+
+Existing unmanaged personal `xray` entries require replacement consent or
+`-Force`. Backups are preserved, and unchanged reruns do not rewrite files.
+
+```powershell
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -UserMcp -MigrateLegacy
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -UserMcp -Restore
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -UserMcp -Uninstall -DryRun
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -UserMcp -Uninstall
+```
+
+`-Restore` restores only that workspace's profile backup, not the shared client
+registrations. Uninstall removes the selected workspace profile. While other
+profiles remain, it keeps the shared registrations. After the last profile,
+it removes matching managed registrations from the selected personal configs.
+Unmanaged entries and personal config backups remain. Concurrent edits to a
+personal config stop entry removal rather than deleting a replacement entry or
+overwriting another server. The executable is kept, because other VS Code
+profiles or clients may still reference it.
+
+Restart affected MCP connections or open a fresh chat after setup. Verify a
+real `xray_info` call reports the intended root, wait for definition indexing
+to finish, then read a known symbol with `xray_definitions`. A config entry,
+a running process, or cached tool names alone does not establish that the
+current chat is connected.
 
 ## Local MCP configuration and legacy migration
 
@@ -693,21 +841,75 @@ If it returns ranked file paths with line numbers and scores in < 1 sec, you're 
 
 ## 5. Updating to a new version
 
-The MCP server holds an open handle on `xray.exe`, so the file is locked while VS Code is running. To upgrade:
+There is no separate `-Update` switch. Repeat setup in the mode you already use,
+or explicitly migrate from workspace mode to personal mode:
+
+| Situation | Action |
+|---|---|
+| Fresh personal installation | Run setup with `-RepoPath <repo> -UserMcp` |
+| Existing personal installation | Repeat the same command, using the same `-InstallDir` and client selection |
+| First migration from workspace setup | Add `-UserMcp -MigrateLegacy` |
+| Keep legacy workspace mode | Omit `-UserMcp`; setup refuses if a relevant personal Xray registration exists |
+| Replace only the executable | Follow the binary-only steps below; configs and profiles are not migrated |
+
+### Fresh personal install or ordinary personal update
+
+Use the current script from [Quick Setup](#quick-setup-recommended), or a local clone:
 
 ```powershell
-# 1. Stop all running xray instances (MCP servers + any CLI sessions)
-Get-Process xray -EA SilentlyContinue | Stop-Process -Force
-
-# 2. Replace the binary
-Copy-Item .\xray.exe "$env:LOCALAPPDATA\Programs\xray\xray.exe" -Force
-
-# 3. Restart the MCP server in your IDE
-#    VS Code:  Command Palette → "MCP: List Servers" → xray → Restart
-#    Roo/Cline: MCP Servers panel → Restart
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -UserMcp
 ```
 
-To grab the latest build, see the [releases page](https://github.com/pustynsky/xray/releases) — the newest `xray.exe` is always at the top, or use [`/releases/latest`](https://github.com/pustynsky/xray/releases/latest) for a permalink.
+Without `-SkipDownload`, setup downloads the latest release executable and applies
+the selected workspace's settings. `-SkipDownload` does the opposite: it reuses the
+installed executable and does not upgrade it. Personal mode needs a binary with
+`serve-workspace` support; a newer script with an older executable is not enough.
+
+Repeat setup once for each new workspace, using the same installation directory.
+Updating the shared executable does not require re-registering every existing
+workspace. Other workspace profiles remain in place. Re-running setup does
+rebuild the selected workspace's profile from the current options and extension
+selection; pass `-Extensions` explicitly to keep a particular extension list.
+
+### First migration from workspace setup
+
+```powershell
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -UserMcp -MigrateLegacy
+```
+
+Migration is a one-time, explicit cleanup, not part of every update. It removes
+eligible owned workspace entries and recognized legacy filter metadata while
+preserving other servers. Genuine tracked Xray entries require a repository-owner
+change. `-Force` neither approves migration nor bypasses the mixed-scope guard.
+See [migration safety rules](#migrating-and-removing-personal-setup).
+
+### Binary-only update and restart
+
+The default installed path is `%LOCALAPPDATA%\xray\xray.exe`. If you used
+`-InstallDir`, update that installation instead. Check the `command` in your active
+MCP registration rather than assuming another copy of Xray on `PATH` is the one
+your client runs.
+
+1. Stop the affected MCP connections through their clients and exit CLI sessions
+   using that executable. It is shared across registered workspaces, and active
+   proxies or backends can keep it locked. If a process remains, verify its full
+   executable path and terminate only that specific PID. Do not stop every process
+   named `xray` on the machine.
+2. Download `xray.exe` from the intended [release](https://github.com/pustynsky/xray/releases/latest)
+   and verify its SHA256 against the release notes or asset digest.
+3. Replace the installed executable. For the default path:
+
+   ```powershell
+   Copy-Item -LiteralPath .\xray.exe -Destination "$env:LOCALAPPDATA\xray\xray.exe" -Force
+   & "$env:LOCALAPPDATA\xray\xray.exe" --version
+   ```
+
+4. Restart the affected MCP connections or open a fresh chat. Verify that a real
+   `xray_info` call reports the intended workspace, then read a known definition.
+
+Use the same stop/restart procedure if ordinary setup reports that the binary is
+in use. Replacing the executable alone preserves configs and profiles, but does
+not remove legacy registrations or resolve personal/workspace duplicates.
 
 ---
 
