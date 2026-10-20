@@ -307,6 +307,22 @@ fn missing_explicit_dir_uses_private_server_and_recovers() {
     assert!(text.contains("does not exist"), "{text}");
     assert!(!text.contains("--dir ."), "{text}");
 
+    let result = client.call("xray_reindex", json!({"dir": workspace.path().join("still-missing")}));
+
+    assert_eq!(result["isError"], true, "{result}");
+    let result = client.call("xray_grep", json!({"terms": ["missing_dir_recovery_marker"], "countOnly": true}));
+    assert_eq!(result["isError"], true, "{result}");
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("WORKSPACE_UNRESOLVED"), "{text}");
+    assert!(!text.contains("INDEX_BUILDING"), "{text}");
+
+    let result = client.call("xray_reindex", json!({}));
+
+    assert_eq!(result["isError"], true, "{result}");
+    let result = client.call("xray_grep", json!({"terms": ["missing_dir_recovery_marker"], "countOnly": true}));
+    assert_eq!(result["isError"], true, "{result}");
+    assert!(result["content"][0]["text"].as_str().unwrap().contains("WORKSPACE_UNRESOLVED"), "{result}");
+
     let result = client.call("xray_reindex", json!({"dir": workspace.path()}));
 
     let payload = Client::payload(&result);

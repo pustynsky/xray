@@ -236,7 +236,7 @@ pub(super) fn run(mut args: ServeArgs) -> io::Result<()> {
     // Keep it private rather than pinning it to an accidental startup directory.
     if !args.internal_backend
         && (matches!(args.dir.as_str(), "." | "./" | ".\\") || !std::path::Path::new(&args.dir).is_dir()) {
-        eprintln!("Xray: dynamic workspace mode uses a private server; pass an explicit --dir to share indexes.");
+        eprintln!("Xray: dynamic workspace mode uses a private server; pass --dir pointing to an existing directory to share indexes.");
         serve::cmd_serve(args);
         return Ok(());
     }

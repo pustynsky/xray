@@ -259,7 +259,7 @@ fn wait_until(predicate: impl Fn() -> bool) -> bool {
 
 /// D1 — `rollback_workspace_state` must restore ALL four mutable fields of
 /// `WorkspaceBinding` (dir, canonical_dir-via-set_dir, mode, generation) AND
-/// force `status = Resolved`. Regression of any one of these would leave the
+/// restore the original status. Regression of any one of these would leave the
 /// server stuck in `Reindexing` or pointing at a corrupted dir after an error.
 #[test]
 fn test_rollback_workspace_state_restores_all_fields() {
@@ -288,7 +288,7 @@ fn test_rollback_workspace_state_restores_all_fields() {
     }
 
     // Roll back.
-    rollback_workspace_state(&ctx, &original_dir, original_mode, original_generation);
+    rollback_workspace_state(&ctx, &original_dir, original_mode, WorkspaceStatus::Resolved, original_generation);
 
     let ws = ctx.workspace.read().unwrap();
     assert_eq!(ws.dir, original_dir,
@@ -300,7 +300,7 @@ fn test_rollback_workspace_state_restores_all_fields() {
     assert_eq!(ws.generation, original_generation,
         "rollback must restore generation (regression: stale generation breaks generation-safe commits)");
     assert_eq!(ws.status, WorkspaceStatus::Resolved,
-        "rollback MUST force status=Resolved (regression: server stuck in Reindexing after error → all tools blocked)");
+        "rollback must restore the original Resolved status");
 }
 
 #[test]
@@ -1447,6 +1447,7 @@ fn test_workspace_switch_panic_guard_rolls_back_on_unwind() {
             &ctx,
             original_dir.clone(),
             original_mode,
+            WorkspaceStatus::Resolved,
             original_generation,
             true,
         );
@@ -1497,6 +1498,7 @@ fn test_workspace_switch_panic_guard_no_op_on_normal_drop() {
             &ctx,
             original_dir.clone(),
             WorkspaceBindingMode::ManualOverride,
+            WorkspaceStatus::Resolved,
             5,
             true,
         );
@@ -1548,6 +1550,7 @@ fn test_workspace_switch_panic_guard_dismiss_blocks_rollback_on_panic() {
             &ctx,
             original_dir.clone(),
             original_mode,
+            WorkspaceStatus::Resolved,
             original_generation,
             true,
         );
@@ -1563,4 +1566,85 @@ fn test_workspace_switch_panic_guard_dismiss_blocks_rollback_on_panic() {
         "after dismiss(), generation must stay at the new value");
     assert_eq!(ws.status, WorkspaceStatus::Resolved,
         "after dismiss(), status must remain Resolved");
+}
+
+#[test]
+fn test_workspace_switch_panic_guard_preserves_unresolved_and_reindexing_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let original_dir = temp.path().join("missing").to_string_lossy().into_owned();
+    for (old_mode, old_status, old_generation) in [
+        (WorkspaceBindingMode::Unresolved, WorkspaceStatus::Unresolved, 0),
+        (WorkspaceBindingMode::ClientRoots, WorkspaceStatus::Reindexing, 1),
+    ] {
+        for workspace_changed in [false, true] {
+            let ctx = HandlerContext::default();
+            {
+                let mut ws = ctx.workspace.write().unwrap();
+                ws.set_dir(original_dir.clone());
+                ws.mode = old_mode;
+                ws.status = old_status;
+                ws.generation = old_generation;
+            }
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                {
+                    let mut ws = ctx.workspace.write().unwrap();
+                    if workspace_changed {
+                        ws.set_dir(temp.path().join("other").to_string_lossy().into_owned());
+                        ws.mode = WorkspaceBindingMode::ManualOverride;
+                        ws.generation += 1;
+                    }
+                    ws.status = WorkspaceStatus::Reindexing;
+                }
+                let _guard = WorkspaceSwitchPanicGuard::new(
+                    &ctx, original_dir.clone(), old_mode, old_status, old_generation, workspace_changed,
+                );
+                panic!("simulated reindex panic");
+            }));
+
+            assert!(result.is_err());
+            let ws = ctx.workspace.read().unwrap();
+            assert_eq!(ws.dir, original_dir);
+            assert_eq!(ws.mode, old_mode);
+            assert_eq!(ws.status, old_status);
+            assert_eq!(ws.generation, old_generation);
+        }
+    }
+}
+
+#[test]
+fn test_definition_reindex_publish_failure_preserves_unresolved_workspace() {
+    for workspace_changed in [false, true] {
+        let (temp, ctx, roots) = definition_switch_fixture();
+        let missing = temp.path().join("missing").to_string_lossy().into_owned();
+        *ctx.workspace.write().unwrap() = super::WorkspaceBinding::unresolved(missing.clone());
+        ctx.content_ready.store(false, std::sync::atomic::Ordering::Release);
+        ctx.def_ready.store(false, std::sync::atomic::Ordering::Release);
+        let def_index = ctx.def_index.as_ref().unwrap();
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _lock = def_index.write().unwrap();
+            panic!("poison the definition index before publication");
+        }));
+        assert!(poisoned.is_err());
+        let args = if workspace_changed {
+            json!({"dir": roots[1], "ext": ["rs"]})
+        } else {
+            json!({"ext": ["rs"]})
+        };
+
+        let result = handle_xray_reindex_definitions_inner(&ctx, &args);
+
+        assert!(result.is_error);
+        let ws = ctx.workspace.read().unwrap();
+        assert_eq!(ws.dir, missing);
+        assert_eq!(ws.mode, WorkspaceBindingMode::Unresolved);
+        assert_eq!(ws.status, WorkspaceStatus::Unresolved);
+        assert_eq!(ws.generation, 0);
+        drop(ws);
+        let probe = super::dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["test"]}));
+        assert!(probe.is_error);
+        assert!(probe.content[0].text.contains("WORKSPACE_UNRESOLVED"), "{:?}", probe);
+        assert!(!ctx.content_ready.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!ctx.def_ready.load(std::sync::atomic::Ordering::Acquire));
+    }
 }

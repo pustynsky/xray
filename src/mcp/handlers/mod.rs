@@ -2108,6 +2108,7 @@ struct WorkspaceSwitchPanicGuard<'a> {
     ctx: &'a HandlerContext,
     previous_dir: String,
     old_mode: WorkspaceBindingMode,
+    old_status: WorkspaceStatus,
     old_generation: u64,
     workspace_changed: bool,
     dismissed: bool,
@@ -2118,10 +2119,11 @@ impl<'a> WorkspaceSwitchPanicGuard<'a> {
         ctx: &'a HandlerContext,
         previous_dir: String,
         old_mode: WorkspaceBindingMode,
+        old_status: WorkspaceStatus,
         old_generation: u64,
         workspace_changed: bool,
     ) -> Self {
-        Self { ctx, previous_dir, old_mode, old_generation, workspace_changed, dismissed: false }
+        Self { ctx, previous_dir, old_mode, old_status, old_generation, workspace_changed, dismissed: false }
     }
 
     /// Disarm the guard once the new index has been published and the
@@ -2144,14 +2146,12 @@ impl Drop for WorkspaceSwitchPanicGuard<'_> {
                 self.ctx,
                 &self.previous_dir,
                 self.old_mode,
+                self.old_status,
                 self.old_generation,
             );
         } else {
-            // No dir change to revert, but status may have advanced to
-            // Reindexing inside the reindex path; force it back so the
-            // workspace is not wedged on unwind.
             let mut ws = self.ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-            ws.status = WorkspaceStatus::Resolved;
+            ws.status = self.old_status;
         }
     }
 }
@@ -2178,13 +2178,14 @@ fn rollback_workspace_state(
     ctx: &HandlerContext,
     previous_dir: &str,
     old_mode: WorkspaceBindingMode,
+    old_status: WorkspaceStatus,
     old_generation: u64,
 ) {
     let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
     ws.set_dir(previous_dir.to_string());
     ws.mode = old_mode;
     ws.generation = old_generation;
-    ws.status = WorkspaceStatus::Resolved;
+    ws.status = old_status;
 }
 
 /// Build or load a content index for the given directory.
@@ -2683,9 +2684,9 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
     }
 
     // Save old state for rollback on error
-    let (old_mode, old_generation) = {
+    let (old_mode, old_status, old_generation) = {
         let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
-        (ws.mode, ws.generation)
+        (ws.mode, ws.status, ws.generation)
     };
 
     // Update workspace binding if dir changed
@@ -2713,6 +2714,7 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
         ctx,
         previous_dir.clone(),
         old_mode,
+        old_status,
         old_generation,
         workspace_changed,
     );
@@ -2736,7 +2738,7 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
         Ok(result) => result,
         Err(e) => {
             if workspace_changed {
-                rollback_workspace_state(ctx, &previous_dir, old_mode, old_generation);
+                rollback_workspace_state(ctx, &previous_dir, old_mode, old_status, old_generation);
             }
             return ToolCallResult::error(e);
         }
@@ -2764,10 +2766,10 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
         Err(e) => {
             // Rollback workspace state to avoid getting stuck in Reindexing
             if workspace_changed {
-                rollback_workspace_state(ctx, &previous_dir, old_mode, old_generation);
+                rollback_workspace_state(ctx, &previous_dir, old_mode, old_status, old_generation);
             } else {
                 let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-                ws.status = WorkspaceStatus::Resolved;
+                ws.status = old_status;
             }
             return ToolCallResult::error(format!("Failed to update in-memory index: {}", e));
         }
@@ -2898,9 +2900,9 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
     }
 
     // Save old state for rollback on error
-    let (old_mode, old_generation) = {
+    let (old_mode, old_status, old_generation) = {
         let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
-        (ws.mode, ws.generation)
+        (ws.mode, ws.status, ws.generation)
     };
 
     // Update workspace binding if dir changed
@@ -2918,6 +2920,7 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
         ctx,
         previous_dir.clone(),
         old_mode,
+        old_status,
         old_generation,
         workspace_changed,
     );
@@ -2983,10 +2986,10 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
         Err(e) => {
             // Rollback workspace state to avoid getting stuck in Reindexing
             if workspace_changed {
-                rollback_workspace_state(ctx, &previous_dir, old_mode, old_generation);
+                rollback_workspace_state(ctx, &previous_dir, old_mode, old_status, old_generation);
             } else {
                 let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-                ws.status = WorkspaceStatus::Resolved;
+                ws.status = old_status;
             }
             return ToolCallResult::error(format!("Failed to update in-memory definition index: {}", e));
         }

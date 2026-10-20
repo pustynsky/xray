@@ -588,7 +588,7 @@ protection uses a separate `content_building` flag with `compare_exchange`.
 2. Start `xray serve --dir C:\Repos\DoesNotExist_XrayE2E --ext rs,md --definitions`.
 3. Send `initialize` without capabilities, then `notifications/initialized`.
 4. Call `xray_grep {"terms":["xray"],"countOnly":true}`.
-5. Call `xray_reindex {"dir":"<repo>\docs"}`, then repeat the grep.
+5. Try `xray_reindex {"dir":"<another-missing-directory>"}`, then `xray_reindex {}`. After each error, repeat the grep and confirm it still reports `WORKSPACE_UNRESOLVED`. Then call `xray_reindex {"dir":"<repo>\docs"}` and repeat the grep.
 6. In a fresh process, initialize with `capabilities.roots.listChanged=true`.
 7. Answer the server's `roots/list` request with `{"roots":[{"uri":"file:///<repo>/docs"}]}`.
 8. Call `xray_reindex {}`.
@@ -601,11 +601,14 @@ protection uses a separate `content_building` flag with `compare_exchange`.
 - Manual reindex returns `status: "ok"` and `files > 0`; the next grep has `summary.totalOccurrences > 0`.
 - The roots-capable session receives `roots/list`; after the reply, reindex returns `status: "ok"` and `summary.serverDir` points to `<repo>\docs`.
 - Neither recovery path requires restarting the server.
+- A failed reindex preserves the previous workspace status, including unresolved startup and an unfinished roots-based switch.
 - An existing explicit directory, even an empty one, remains pinned and resolved.
 
 **Unit tests:** `test_determine_initial_binding_explicit_path`, `test_determine_initial_binding_missing_explicit_path_is_unresolved`, `test_determine_initial_binding_explicit_file_path_is_unresolved`, `test_unresolved_missing_dir_reports_missing_directory`, `test_unresolved_existing_dir_reports_no_source_files`.
 
 **Integration tests:** `missing_explicit_dir_uses_private_server_and_recovers`, `explicit_file_dir_uses_private_unresolved_server`.
+
+**Rollback tests:** `test_rollback_workspace_state_restores_all_fields`, `test_workspace_switch_panic_guard_preserves_unresolved_and_reindexing_status`, `test_definition_reindex_publish_failure_preserves_unresolved_workspace`.
 
 ---
 
