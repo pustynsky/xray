@@ -105,7 +105,19 @@ and removal steps. This is a preference, not an exclusive-tool guarantee.
 
 ### Installation
 
-**Option A — automated setup (recommended).** Run the [setup script](scripts/setup-xray.ps1). It downloads the latest `xray.exe`, detects your project's file extensions, and configures both VS Code and GitHub Copilot CLI. Pass `-EnableVSCode` or `-EnableCopilotCli` to select only those clients.
+**Option A — automated setup (recommended).** Run the [setup script](scripts/setup-xray.ps1). It downloads the latest `xray.exe`, detects your project's file extensions, and configures both VS Code and GitHub Copilot CLI.
+
+The examples below use `-UserMcp` for VS Code SDK Agent Host, ordinary
+Copilot Chat, and CLI. This opt-in mode registers Xray in personal client configs and
+keeps separate workspace profiles outside Git, without a CLI wrapper.
+It requires a binary with `serve-workspace` support.
+Without `-UserMcp`, setup still uses the legacy workspace-local mode.
+Personal mode always includes the CLI/SDK registration used by Agent Host;
+`-EnableCopilotCli` selects CLI/SDK-only setup. `-EnableVSCode` also includes
+CLI/SDK in personal mode. In workspace mode, either switch selects only that client.
+See [personal MCP setup](docs/installation.md#personal-mcp-with-workspace-profiles)
+for profile selection and verification, and
+[updating](docs/installation.md#5-updating-to-a-new-version) for updates and first-time migration.
 
 Requirements: Windows x64 and Windows PowerShell 5.1+ or PowerShell 7+. Public releases download directly over HTTPS, so GitHub CLI is not required. Git-managed operations, including restore, require working Git. Non-Git folders remain supported without exclusion protection. No bash/perl filter runtime is needed.
 
@@ -114,19 +126,19 @@ Three ways to launch it. Pick whichever fits. Same script, same parameters.
 **A1. One-liner (download and run inline).** Shortest path. The script is fetched and run in memory; nothing is written to disk. The script will prompt for the target repo path; pass `-RepoPath <path>` to skip the prompt.
 
 ```powershell
-& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content))
+& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content)) -UserMcp
 ```
 
 **A1 from Command Prompt (`cmd.exe`).** CMD has no PowerShell host, so launch the same installer through the built-in `powershell.exe`:
 
 ```cmd
-powershell.exe -NoLogo -NoProfile -Command "& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content))"
+powershell.exe -NoLogo -NoProfile -Command "& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content)) -UserMcp"
 ```
 
 Put installer parameters inside the outer double quotes. In CMD, wrap parameter values containing spaces in PowerShell single quotes, not additional double quotes:
 
 ```cmd
-powershell.exe -NoLogo -NoProfile -Command "& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content)) -RepoPath 'C:\My Repo' -EnableVSCode"
+powershell.exe -NoLogo -NoProfile -Command "& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content)) -RepoPath 'C:\My Repo' -UserMcp -EnableVSCode"
 ```
 
 **A2. Download, then run.** Saves the script to `%TEMP%` so you can read it before running.
@@ -134,13 +146,13 @@ powershell.exe -NoLogo -NoProfile -Command "& ([scriptblock]::Create((Invoke-Web
 ```powershell
 $tmp = Join-Path $env:TEMP 'setup-xray.ps1'
 Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing -OutFile $tmp
-& $tmp
+& $tmp -UserMcp
 ```
 
 **A3. From a clone of this repo.** Use this if you want to pin a specific commit or tag, or if you're already iterating on the script locally.
 
 ```powershell
-.\scripts\setup-xray.ps1
+.\scripts\setup-xray.ps1 -UserMcp
 ```
 
 Pin to a release tag instead of `main` for reproducibility: replace `main` in the URL with e.g. `v0.4.0`. Pass `-RepoPath <path>` to target a specific repo non-interactively. Add `-EnableCopilotCli` and `-EnableVSCode` to skip the interactive client prompts. `-UseBasicParsing` is required on Windows PowerShell 5.1 (no-op on PowerShell 7+) and avoids the IE-engine security prompt.

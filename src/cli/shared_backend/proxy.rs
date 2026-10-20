@@ -1,4 +1,4 @@
-use super::{Configuration, MAX_INPUT_CHUNK, POLL, STARTUP_TIMEOUT, ServeArgs, Stream, Workspace, connect_or_start_until, platform, retryable, send_payload};
+use super::{Configuration, InitializedSession, MAX_INPUT_CHUNK, POLL, STARTUP_TIMEOUT, ServeArgs, Stream, Workspace, connect_or_start_until, platform, retryable, send_payload};
 use interprocess::local_socket::traits::Stream as _;
 use serde_json::{Value, json};
 use std::{
@@ -51,8 +51,8 @@ fn read_backend_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
     Ok(Some(line))
 }
 
-fn input_thread(events: mpsc::SyncSender<Event>, ready: mpsc::Receiver<()>) {
-    let mut reader = io::stdin().lock();
+fn input_thread(events: mpsc::SyncSender<Event>, ready: mpsc::Receiver<()>, buffered: Vec<u8>) {
+    let mut reader = BufReader::new(io::Cursor::new(buffered).chain(io::stdin().lock()));
     loop {
         let result = read_client_line(&mut reader);
         if matches!(&result, Ok(Some(line)) if line.is_empty()) {
@@ -135,20 +135,25 @@ fn restore_session(stream: &mut Stream, initialize: Option<&str>, initialized: b
     Ok(())
 }
 
-pub(super) fn run(stream: Stream, args: &ServeArgs, workspace: &Workspace, configuration: &Configuration) -> io::Result<()> {
+pub(super) fn run(mut stream: Stream, args: &ServeArgs, workspace: &Workspace, configuration: &Configuration, session: Option<InitializedSession>) -> io::Result<()> {
+    let (mut initialize, mut initialized, buffered) = match session {
+        Some(session) => {
+            restore_session(&mut stream, Some(&session.initialize), true, Instant::now() + STARTUP_TIMEOUT)?;
+            (Some(session.initialize), true, session.buffered)
+        }
+        None => (None, false, Vec::new()),
+    };
     let mut stream = Arc::new(stream);
     let mut generation = 1;
     let (events, received) = mpsc::sync_channel(4);
     let (ready, input_ready) = mpsc::sync_channel(1);
     let input_events = events.clone();
-    thread::spawn(move || input_thread(input_events, input_ready));
+    thread::spawn(move || input_thread(input_events, input_ready, buffered));
     let output = Arc::clone(&stream);
     let output_events = events.clone();
     thread::spawn(move || output_thread(output, generation, output_events));
     let mut writer = io::stdout().lock();
     let mut pending: Option<Pending> = None;
-    let mut initialize = None;
-    let mut initialized = false;
     let mut closing = false;
     loop {
         let lost = match received.recv().map_err(io::Error::other)? {

@@ -174,7 +174,21 @@ impl Client {
         Self::attach_with_backend(child, true)
     }
 
-    fn attach_with_backend(mut child: Child, shared: bool) -> Self {
+    fn attach_with_backend(child: Child, shared: bool) -> Self {
+        let mut client = Self::attach_uninitialized(child);
+        if shared {
+            client.backend_pid = client.backend_pids.recv_timeout(WAIT).unwrap_or_else(|error| {
+                panic!("Backend connection failed: {error}; {}", client.stderr.lock().unwrap())
+            });
+        }
+        let capabilities = if shared { json!({"roots": {"listChanged": true}}) } else { json!({}) };
+        client.request(1, "initialize", json!({"protocolVersion": "2025-03-26",
+            "capabilities": capabilities, "clientInfo": {"name": "shared-test", "version": "1"}}));
+        client.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        client
+    }
+
+    fn attach_uninitialized(mut child: Child) -> Self {
         let input = child.stdin.take();
         let stdout = child.stdout.take().unwrap();
         let stderr_pipe = child.stderr.take().unwrap();
@@ -202,17 +216,7 @@ impl Client {
             }
             let _ = stderr_done.send(());
         });
-        let mut client = Self { child, input, replies, stderr, stdout_closed, stderr_closed, backend_pid: 0, backend_pids: pids };
-        if shared {
-            client.backend_pid = client.backend_pids.recv_timeout(WAIT).unwrap_or_else(|error| {
-                panic!("Backend connection failed: {error}; {}", client.stderr.lock().unwrap())
-            });
-        }
-        let capabilities = if shared { json!({"roots": {"listChanged": true}}) } else { json!({}) };
-        client.request(1, "initialize", json!({"protocolVersion": "2025-03-26",
-            "capabilities": capabilities, "clientInfo": {"name": "shared-test", "version": "1"}}));
-        client.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
-        client
+        Self { child, input, replies, stderr, stdout_closed, stderr_closed, backend_pid: 0, backend_pids: pids }
     }
 
     fn send(&mut self, value: Value) {
@@ -490,6 +494,160 @@ fn shared_backend_isolates_workspaces_and_checks_configuration() {
     b.close();
     first.wait_for_shutdown();
     second.wait_for_shutdown();
+}
+
+fn workspace_profile_command(profiles: &Path, cwd: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_xray"));
+    command.args(["serve-workspace", "--profiles"]).arg(profiles)
+        .current_dir(cwd)
+        .env("XRAY_BACKEND_IDLE_SECONDS", "1")
+        .env("XRAY_GUIDANCE_PREFIX", "0")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+}
+
+fn write_workspace_profile(profiles: &Path, id: &str, root: &Path, ext: &str) {
+    let directory = profiles.join(id);
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("config.json"), serde_json::to_vec(&json!({
+        "version": 1, "workspaceRoot": root,
+        "args": ["--ext", ext, "--definitions", "--debounce-ms", "20", "--no-periodic-rescan", "--watch"],
+    })).unwrap()).unwrap();
+}
+
+#[test]
+fn workspace_profiles_reuse_explicit_serve_backend_and_reject_unknown_cwd() {
+    let workspace = Workspace::new("profile_shared_marker");
+    let profiles = tempfile::tempdir().unwrap();
+    write_workspace_profile(profiles.path(), "registered", workspace.path(), "rs");
+    let nested = workspace.path().join("nested");
+    fs::create_dir(&nested).unwrap();
+    let mut direct = Client::start(workspace.path());
+    let mut selected = Client::start_command(workspace_profile_command(profiles.path(), &nested));
+    assert_eq!(direct.backend_pid, selected.backend_pid);
+    direct.close();
+    selected.wait_for_marker("profile_shared_marker");
+    selected.close();
+    workspace.wait_for_shutdown();
+    let unknown = tempfile::tempdir().unwrap();
+    let rejected = workspace_profile_command(profiles.path(), unknown.path()).output().unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("No Xray profile is installed"));
+    assert!(rejected.stdout.is_empty(), "an unregistered workspace must not start MCP");
+}
+
+#[test]
+fn workspace_profiles_client_roots_from_unrelated_host_share_the_correct_backend() {
+    let profiles = tempfile::tempdir().unwrap();
+    let host = tempfile::tempdir().unwrap();
+    let workspaces = [Workspace::new("roots_profile_first"), Workspace::new("roots_profile_second")];
+    for (index, workspace) in workspaces.iter().enumerate() {
+        write_workspace_profile(profiles.path(), &index.to_string(), workspace.path(), "rs");
+    }
+    for (index, workspace) in workspaces.iter().enumerate() {
+        let mut direct = Client::start(workspace.path());
+        let mut command = workspace_profile_command(profiles.path(), host.path());
+        let mut selected = Client::attach_uninitialized(command.spawn().unwrap());
+        let initialized = selected.request(1, "initialize", json!({"protocolVersion": "2025-03-26",
+            "capabilities": {"roots": {}}, "clientInfo": {"name": "vscode-user-mcp", "version": "1"}}));
+        assert_eq!(initialized["serverInfo"]["name"], "xray");
+        selected.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        let roots = selected.replies.recv_timeout(WAIT).unwrap();
+        assert_eq!(roots["method"], "roots/list");
+        // VS Code can ask for tools while its roots request is still in flight.
+        selected.send(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}}));
+        selected.send(json!({"jsonrpc": "2.0", "id": roots["id"], "result": {"roots": [{
+            "uri": url::Url::from_directory_path(workspace.path()).unwrap().as_str(),
+        }]}}));
+        selected.backend_pid = selected.backend_pids.recv_timeout(WAIT).unwrap_or_else(|error| {
+            panic!("Root-selected backend failed: {error}; {}", selected.stderr.lock().unwrap())
+        });
+        assert_eq!(direct.backend_pid, selected.backend_pid);
+        let tools = selected.response(3);
+        assert!(tools["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "xray_info"));
+        selected.wait_for_marker(["roots_profile_first", "roots_profile_second"][index]);
+        let info = Client::payload(&selected.call("xray_info", json!({})));
+        assert_eq!(fs::canonicalize(info["summary"]["serverDir"].as_str().unwrap()).unwrap(),
+            fs::canonicalize(workspace.path()).unwrap());
+        let marker = ["roots_profile_first", "roots_profile_second"][index];
+        let start = Instant::now();
+        let definitions = loop {
+            let result = selected.call("xray_definitions", json!({"name": [marker], "includeBody": true}));
+            if result["isError"] != true { break Client::payload(&result); }
+            assert!(start.elapsed() < WAIT, "root-selected definitions did not become ready: {result}");
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(definitions["definitions"][0]["name"], marker);
+        selected.close();
+        direct.close();
+        workspace.wait_for_shutdown();
+    }
+}
+
+#[test]
+fn workspace_profiles_three_workspaces_five_sessions_each() {
+    let profiles = tempfile::tempdir().unwrap();
+    let workspaces: Vec<_> = (0..3).map(|index| Workspace::new(&format!("profile_marker_{index}"))).collect();
+    for (index, workspace) in workspaces.iter().enumerate() {
+        write_workspace_profile(profiles.path(), &index.to_string(), workspace.path(), ["rs", "rs,md", "rs,txt"][index]);
+        fs::create_dir(workspace.path().join("nested")).unwrap();
+        fs::write(workspace.path().join("extra.md"), "profile_markdown_only").unwrap();
+    }
+    let barrier = Arc::new(Barrier::new(15));
+    let mut starts = Vec::new();
+    for (index, workspace) in workspaces.iter().enumerate() {
+        for session in 0..5 {
+            let cwd = if session % 2 == 0 { workspace.path().to_owned() } else { workspace.path().join("nested") };
+            let profiles = profiles.path().to_owned();
+            let barrier = Arc::clone(&barrier);
+            starts.push((index, thread::spawn(move || {
+                barrier.wait();
+                Client::start_command(workspace_profile_command(&profiles, &cwd))
+            })));
+        }
+    }
+    let mut clients: Vec<_> = starts.into_iter().map(|(index, start)| (index, start.join().unwrap())).collect();
+    let backends: std::collections::BTreeSet<_> = clients.iter().map(|(_, client)| client.backend_pid).collect();
+    let proxies: std::collections::BTreeSet<_> = clients.iter().map(|(_, client)| client.child.id()).collect();
+    assert_eq!(backends.len(), 3);
+    assert_eq!(proxies.len(), 15);
+    assert!(backends.is_disjoint(&proxies));
+    let expected = [clients[0].1.backend_pid, clients[5].1.backend_pid, clients[10].1.backend_pid];
+    for (index, client) in &mut clients {
+        assert_eq!(client.backend_pid, expected[*index]);
+        client.wait_for_marker(&format!("profile_marker_{index}"));
+        let info = Client::payload(&client.call("xray_info", json!({})));
+        assert_eq!(fs::canonicalize(info["summary"]["serverDir"].as_str().unwrap()).unwrap(),
+            fs::canonicalize(workspaces[*index].path()).unwrap());
+        let extra = Client::payload(&client.call("xray_grep", json!({
+            "terms": ["profile_markdown_only"], "countOnly": true,
+        })));
+        assert_eq!(extra["summary"]["totalFiles"], usize::from(*index == 1));
+        let start = Instant::now();
+        loop {
+            let info = Client::payload(&client.call("xray_info", json!({})));
+            if info["indexes"].as_array().unwrap().iter().any(|entry| entry["type"] == "definition" && entry.get("status").is_none()) { break; }
+            assert!(start.elapsed() < WAIT, "profile definitions did not become ready");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let definitions = Client::payload(&client.call("xray_definitions", json!({
+            "name": [format!("profile_marker_{index}")], "file": ["sample.rs"], "includeBody": true,
+        })));
+        assert_eq!(definitions["definitions"][0]["name"], format!("profile_marker_{index}"));
+        assert!(definitions["definitions"][0]["body"].as_array().unwrap().iter()
+            .any(|line| line.as_str().unwrap().contains("pub fn")));
+    }
+    for index in 0..3 {
+        clients[index * 5].1.close();
+        clients[index * 5 + 1].1.wait_for_marker(&format!("profile_marker_{index}"));
+        let workspace = &workspaces[index];
+        let log = fs::read_to_string(workspace.runtime.join(format!("{}.log", workspace.key))).unwrap();
+        assert_eq!(log.matches("Starting MCP server").count(), 1, "one index owner per workspace");
+    }
+    for (position, (_, client)) in clients.iter_mut().enumerate() {
+        if position % 5 != 0 { client.close(); }
+    }
+    for workspace in &workspaces { workspace.wait_for_shutdown(); }
 }
 
 #[test]

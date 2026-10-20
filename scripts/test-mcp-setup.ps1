@@ -3,7 +3,7 @@
 .SYNOPSIS
     Isolated regression tests for local MCP setup and explicit legacy migration.
 #>
-param()
+param([string]$XrayBinary, [switch]$UserMcpOnly, [string]$CasePattern = '*')
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -28,6 +28,7 @@ function Assert-True {
 
 function Test-Case {
     param([string]$Name, [scriptblock]$Body)
+    if ($CasePattern -and $Name -notlike $CasePattern) { return }
     try {
         & $Body
         Write-Host "PASS $Name" -ForegroundColor Green
@@ -99,7 +100,25 @@ exit $LASTEXITCODE
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
     $info.EnvironmentVariables['COPILOT_HOME'] = $Fixture.Home
+    $info.EnvironmentVariables['APPDATA'] = Join-Path $Fixture.Home 'appdata'
+    $info.EnvironmentVariables.Remove('VSCODE_PORTABLE')
     return Invoke-FixtureProcess -Info $info -Label 'Setup'
+}
+
+function New-UserMcpFixture {
+    if (-not $XrayBinary -or -not (Test-Path -LiteralPath $XrayBinary -PathType Leaf)) {
+        throw 'User MCP tests require -XrayBinary pointing to a freshly built executable.'
+    }
+    $fixture = New-Fixture
+    Copy-Item -LiteralPath $XrayBinary -Destination (Join-Path $fixture.Install 'xray.exe') -Force
+    return $fixture
+}
+
+function Invoke-UserMcpSetup {
+    param($Fixture, [hashtable]$Parameters = @{})
+    $options = @{ UserMcp = $true; VSCodeMcpPath = (Join-Path $Fixture.Home 'vscode\mcp.json') }
+    foreach ($key in $Parameters.Keys) { $options[$key] = $Parameters[$key] }
+    Invoke-FixtureSetup $Fixture $options
 }
 
 function Invoke-FixtureProcess {
@@ -176,6 +195,680 @@ try {
         . ([scriptblock]::Create($assignment.Extent.Text))
     }
 
+    if ($UserMcpOnly -and -not $XrayBinary) { throw '-UserMcpOnly requires -XrayBinary.' }
+    if ($XrayBinary) {
+        Test-Case 'personal lifecycle rejects restore and uninstall together before writes' {
+            $f = New-UserMcpFixture
+            Assert-Success (Invoke-UserMcpSetup $f)
+            $profilePath = Get-WorkspaceProfilePath (Join-Path $f.Install 'workspaces') $f.Repo
+            Write-FixtureFile "$profilePath.bak" ([IO.File]::ReadAllText($profilePath))
+            $workspaceCli = Join-Path $f.Repo '.github\mcp.json'
+            $workspaceVSCode = Join-Path $f.Repo '.vscode\mcp.json'
+            Write-FixtureFile $workspaceCli '{"mcpServers":{"other":{"command":"other.exe"}}}'
+            Write-FixtureFile $workspaceVSCode '{"servers":{"other":{"command":"other.exe"}}}'
+            Write-FixtureFile "$workspaceCli.bak" '{"mcpServers":{"xray":{"command":"old-xray.exe"},"other":{"command":"other.exe"}}}'
+            Write-FixtureFile "$workspaceVSCode.bak" '{"servers":{"xray":{"command":"old-xray.exe"},"other":{"command":"other.exe"}}}'
+            $paths = @($profilePath, "$profilePath.bak", $workspaceCli, "$workspaceCli.bak", $workspaceVSCode, "$workspaceVSCode.bak",
+                (Join-Path $f.Home 'mcp-config.json'), (Join-Path $f.Home 'vscode\mcp.json'),
+                (Join-Path $f.Repo '.git\index'), (Join-Path $f.Repo '.git\info\exclude'),
+                (Join-Path $f.Repo '.git\config'), (Join-Path $f.Install 'xray.exe'))
+            $before = @{}
+            foreach ($path in $paths) { $before[$path] = (Get-FileHash $path).Hash }
+            foreach ($personal in @($false, $true)) {
+                foreach ($dryRun in @($false, $true)) {
+                    foreach ($inline in @($false, $true)) {
+                        $options = @{ Restore = $true; Uninstall = $true; DryRun = $dryRun }
+                        if ($personal) {
+                            $options.UserMcp = $true
+                            $options.VSCodeMcpPath = Join-Path $f.Home 'vscode\mcp.json'
+                        }
+                        $result = Invoke-FixtureSetup $f $options -Inline:$inline
+                        $label = "UserMcp=$personal, DryRun=$dryRun, Inline=$inline"
+                        Assert-True ($result.ExitCode -ne 0 -and $result.Output -like '*-Restore and -Uninstall cannot be used together*') "Incompatible actions rejected: $label"
+                        foreach ($path in $paths) {
+                            Assert-True ((Get-FileHash $path).Hash -ceq $before[$path]) "Incompatible actions preserve $path`: $label"
+                        }
+                    }
+                }
+            }
+        }
+
+        Test-Case 'personal upgrade refuses workspace duplicates from CLI and active VS Code profiles' {
+            foreach ($source in @('cli', 'vscode', 'named-profile', 'inherited-profile', 'foreign-cli', 'foreign-vscode')) {
+                $modes = @(@{}, @{ EnableVSCode = $true })
+                if ($source -in @('cli', 'foreign-cli')) { $modes += @{ EnableCopilotCli = $true } }
+                foreach ($mode in $modes) {
+                    $f = New-UserMcpFixture
+                    $user = Join-Path $f.Home 'appdata\Code\User'
+                    $personal = Join-Path $user 'mcp.json'
+                    $container = 'servers'
+                    if ($source -in @('cli', 'foreign-cli')) {
+                        $personal = Join-Path $f.Home 'mcp-config.json'
+                        $container = 'mcpServers'
+                    }
+                    if ($source -in @('named-profile', 'inherited-profile')) {
+                        $associations = @{}
+                        $associations[([Uri]($f.Repo + '\')).AbsoluteUri.TrimEnd('/')] = 'named-profile'
+                        $state = @{ profileAssociations = @{ workspaces = $associations }; userDataProfiles = @(@{ location = 'named-profile'; useDefaultFlags = @{ mcp = ($source -eq 'inherited-profile') } }) }
+                        Write-FixtureFile (Join-Path $user 'globalStorage\storage.json') ($state | ConvertTo-Json -Depth 8)
+                        if ($source -eq 'named-profile') { $personal = Join-Path $user 'profiles\named-profile\mcp.json' }
+                    }
+                    $binary = if ($source -like 'foreign-*') { 'foreign.exe' } else { Join-Path $f.Install 'xray.exe' }
+                    $text = @{ $container = @{ xray = @{ command = $binary; args = @('serve-workspace', '--profiles', (Join-Path $f.Install 'workspaces')); _xrayUserMcp = 1 }; other = @{ command = 'other.exe' } } } | ConvertTo-Json -Depth 8
+                    Write-FixtureFile $personal $text
+                    $paths = @($personal, (Join-Path $f.Repo '.git\index'), (Join-Path $f.Repo '.git\config'),
+                        (Join-Path $f.Repo '.git\info\exclude'), (Join-Path $f.Install 'xray.exe'))
+                    $before = @{}
+                    foreach ($path in $paths) { $before[$path] = if (Test-Path $path) { (Get-FileHash $path).Hash } else { $null } }
+                    $result = Invoke-FixtureSetup $f $mode
+                    Assert-True ($result.ExitCode -ne 0 -and $result.Output -like '*-UserMcp*' -and $result.Output -like '*-MigrateLegacy*') "Workspace setup rejects personal registration with migration guidance: $source"
+                    foreach ($path in $paths) {
+                        $after = if (Test-Path $path) { (Get-FileHash $path).Hash } else { $null }
+                        Assert-True ($after -ceq $before[$path]) "Preflight preserves $path"
+                    }
+                    Assert-True (-not (Test-Path (Join-Path $f.Repo '.github\mcp.json')) -and -not (Test-Path (Join-Path $f.Repo '.vscode\mcp.json'))) 'No workspace duplicate created'
+                    Assert-True (-not (Test-Path (Join-Path $f.Install 'workspaces')) -and -not (Test-Path "$personal.bak")) 'No profile or personal backup written on conflict'
+                }
+            }
+        }
+
+        Test-Case 'personal upgrade migrates an old workspace install and blocks ordinary reinstall or restore' {
+            $f = New-UserMcpFixture
+            $corporate = Join-Path $f.Repo '.mcp.json'
+            $corporateText = '{"mcpServers":{"corporate":{"command":"corporate.exe"}}}'
+            Write-FixtureFile $corporate $corporateText
+            [void](Invoke-SetupGit $f.Repo @('add', '--', '.mcp.json'))
+            [void](Invoke-SetupGit $f.Repo @('commit', '--quiet', '-m', 'corporate MCP'))
+            $index = (Get-FileHash (Join-Path $f.Repo '.git\index')).Hash
+            $workspaceCli = Join-Path $f.Repo '.github\mcp.json'
+            $workspaceVSCode = Join-Path $f.Repo '.vscode\mcp.json'
+            Write-FixtureFile $workspaceCli '{"mcpServers":{"other":{"command":"other.exe"}}}'
+            Write-FixtureFile $workspaceVSCode '{"servers":{"other":{"command":"other.exe"}}}'
+            Assert-Success (Invoke-FixtureSetup $f)
+            Assert-True ((Get-FixtureJson $workspaceCli).mcpServers.xray.command -eq (Join-Path $f.Install 'xray.exe')) 'Old workspace CLI installation created'
+            Assert-True ((Get-FixtureJson $workspaceVSCode).servers.xray.command -eq (Join-Path $f.Install 'xray.exe')) 'Old workspace VS Code installation created'
+            Assert-True (Test-Path (Join-Path $f.Repo 'copilot-xray.cmd')) 'Old CLI launcher exists before migration'
+            $personalVSCode = Join-Path $f.Home 'appdata\Code\User\mcp.json'
+            $parameters = @{ VSCodeMcpPath = $personalVSCode }
+            $result = Invoke-UserMcpSetup $f $parameters
+            Assert-True ($result.ExitCode -ne 0) 'Upgrade requires explicit workspace migration consent'
+            Assert-True (-not (Test-Path (Join-Path $f.Home 'mcp-config.json'))) 'Refused migration creates no personal registration'
+            $parameters.MigrateLegacy = $true
+            Assert-Success (Invoke-UserMcpSetup $f $parameters)
+            $cli = Get-FixtureJson $workspaceCli
+            $vscode = Get-FixtureJson $workspaceVSCode
+            Assert-True (-not $cli.mcpServers.PSObject.Properties['xray'] -and $cli.mcpServers.other.command -eq 'other.exe') 'Migrated CLI workspace keeps only unrelated servers'
+            Assert-True (-not $vscode.servers.PSObject.Properties['xray'] -and $vscode.servers.other.command -eq 'other.exe') 'Migrated VS Code workspace keeps only unrelated servers'
+            Assert-True (-not (Test-Path (Join-Path $f.Repo 'copilot-xray.cmd'))) 'Migration removes old CLI launcher'
+            Assert-True ([IO.File]::ReadAllText($corporate) -ceq $corporateText) 'Corporate config byte-identical after upgrade'
+            Assert-True ((Get-FileHash (Join-Path $f.Repo '.git\index')).Hash -ceq $index) 'Git index byte-identical after upgrade'
+            $profile = Get-WorkspaceProfilePath (Join-Path $f.Install 'workspaces') $f.Repo
+            $personalCli = Join-Path $f.Home 'mcp-config.json'
+            $paths = @($corporate, $workspaceCli, $workspaceVSCode, "$workspaceCli.bak", "$workspaceVSCode.bak",
+                $profile, $personalCli, $personalVSCode, (Join-Path $f.Repo '.git\index'),
+                (Join-Path $f.Repo '.git\info\exclude'), (Join-Path $f.Repo '.git\config'), (Join-Path $f.Install 'xray.exe'))
+            $before = @{}
+            foreach ($path in $paths) { $before[$path] = (Get-FileHash $path).Hash }
+            foreach ($operation in @(@{}, @{ Restore = $true }, @{ MigrateLegacy = $true })) {
+                $result = Invoke-FixtureSetup $f $operation
+                Assert-True ($result.ExitCode -ne 0 -and $result.Output -like '*-UserMcp*') 'Ordinary reinstall or restore cannot reintroduce a workspace duplicate'
+                foreach ($path in $paths) { Assert-True ((Get-FileHash $path).Hash -ceq $before[$path]) "Refused operation preserves $path" }
+            }
+            Assert-Success (Invoke-UserMcpSetup $f @{ VSCodeMcpPath = $personalVSCode })
+            foreach ($path in $paths) { Assert-True ((Get-FileHash $path).Hash -ceq $before[$path]) "Explicit personal update is idempotent: $path" }
+            Assert-Success (Invoke-FixtureSetup $f @{ Uninstall = $true })
+            Assert-True ((Get-FileHash $personalCli).Hash -ceq $before[$personalCli] -and (Get-FileHash $personalVSCode).Hash -ceq $before[$personalVSCode]) 'Legacy uninstall leaves personal registrations intact'
+            Assert-True ((Test-Path $profile) -and (Test-Path (Join-Path $f.Install 'xray.exe'))) 'Legacy uninstall retains the active personal profile and executable'
+        }
+
+        Test-Case 'personal upgrade refuses unreadable selected personal configs before workspace writes' {
+            foreach ($source in @('cli', 'vscode')) {
+                foreach ($malformed in @($true, $false)) {
+                    $f = New-UserMcpFixture
+                    $path = if ($source -eq 'cli') { Join-Path $f.Home 'mcp-config.json' } else { Join-Path $f.Home 'appdata\Code\User\mcp.json' }
+                    $text = if ($malformed) { '{' } elseif ($source -eq 'cli') { '{"mcpServers":[]}' } else { '{"servers":[]}' }
+                    Write-FixtureFile $path $text
+                    $result = Invoke-FixtureSetup $f
+                    Assert-True ($result.ExitCode -ne 0) "Unreadable personal config blocks unsafe workspace installation: $source"
+                    Assert-True ([IO.File]::ReadAllText($path) -ceq $text) 'Unreadable personal config untouched'
+                    Assert-True (-not (Test-Path (Join-Path $f.Repo '.github\mcp.json')) -and -not (Test-Path (Join-Path $f.Repo '.vscode\mcp.json'))) 'Failed personal preflight creates no workspace config'
+                }
+            }
+        }
+
+        Test-Case 'personal upgrade allows unrelated personal servers and ignores unselected VS Code state' {
+            foreach ($cliOnly in @($true, $false)) {
+                $f = New-UserMcpFixture
+                $personalCli = Join-Path $f.Home 'mcp-config.json'
+                $personalVSCode = Join-Path $f.Home 'appdata\Code\User\mcp.json'
+                Write-FixtureFile $personalCli '{"mcpServers":{"other":{"command":"other.exe"}}}'
+                $vscode = if ($cliOnly) { '{"servers":{"xray":{"command":"foreign.exe"}}}' } else { '{"servers":{"other":{"command":"other.exe"}}}' }
+                Write-FixtureFile $personalVSCode $vscode
+                if ($cliOnly) { Write-FixtureFile (Join-Path $f.Home 'appdata\Code\User\globalStorage\storage.json') '{' }
+                $parameters = if ($cliOnly) { @{ EnableCopilotCli = $true } } else { @{} }
+                Assert-Success (Invoke-FixtureSetup $f $parameters)
+                Assert-True ([IO.File]::ReadAllText($personalCli) -ceq '{"mcpServers":{"other":{"command":"other.exe"}}}') 'Unrelated personal CLI servers preserved'
+                Assert-True ([IO.File]::ReadAllText($personalVSCode) -ceq $vscode) 'Unrelated or unselected personal VS Code config preserved'
+                Assert-True ((Get-FixtureJson (Join-Path $f.Repo '.github\mcp.json')).mcpServers.xray.command -eq (Join-Path $f.Install 'xray.exe')) 'No false-positive conflict for selected CLI client'
+                if ($cliOnly) { Assert-True (-not (Test-Path (Join-Path $f.Repo '.vscode\mcp.json'))) 'CLI-only workspace installation does not select VS Code' }
+            }
+        }
+
+        Test-Case 'personal setup preserves tracked corporate configs and index' {
+            $f = New-UserMcpFixture
+            $corporate = Join-Path $f.Repo '.mcp.json'
+            $text = '{"mcpServers":{"corporate":{"command":"corporate.exe"}}}'
+            Write-FixtureFile $corporate $text
+            [void](Invoke-SetupGit $f.Repo @('add', '.mcp.json'))
+            [void](Invoke-SetupGit $f.Repo @('commit', '--quiet', '-m', 'corporate MCP'))
+            $index = (Get-FileHash -LiteralPath (Join-Path $f.Repo '.git\index')).Hash
+            $cli = Join-Path $f.Home 'mcp-config.json'
+            $vscode = Join-Path $f.Home 'vscode\mcp.json'
+            Write-FixtureFile $cli '{"mcpServers":{"other":{"command":"other.exe"}},"setting":true}'
+            Write-FixtureFile $vscode '{"servers":{"other":{"command":"other.exe"}}}'
+            $result = Invoke-UserMcpSetup $f
+            Assert-Success $result
+            Assert-True ([IO.File]::ReadAllText($corporate) -ceq $text) 'Tracked corporate MCP unchanged'
+            Assert-True ((Get-FileHash -LiteralPath (Join-Path $f.Repo '.git\index')).Hash -ceq $index) 'Index byte-identical'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.Repo '.github\mcp.json'))) 'No workspace CLI config'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.Repo '.vscode\mcp.json'))) 'No workspace VS Code config'
+            $entry = (Read-SetupJson $cli).Value.mcpServers
+            Assert-True ($entry.other.command -eq 'other.exe') 'Other CLI server preserved'
+            Assert-True ($entry.xray.args[0] -eq 'serve-workspace') 'Native workspace dispatcher registered'
+            $vscodeEntry = (Read-SetupJson $vscode).Value.servers.xray
+            Assert-True (-not $vscodeEntry.PSObject.Properties['cwd']) 'Personal entry does not pin a workspace or contain an unresolved CWD'
+            Assert-True (($vscodeEntry | ConvertTo-Json -Depth 10) -notmatch '\$\{') 'Personal entry is portable to Copilot harness'
+            $profile = Get-WorkspaceProfilePath (Join-Path $f.Install 'workspaces') $f.Repo
+            Assert-True ((Read-SetupJson $profile).Value.workspaceRoot -eq $f.Repo) 'Profile binds actual workspace'
+            $before = [IO.File]::ReadAllText($cli)
+            $result = Invoke-UserMcpSetup $f
+            Assert-Success $result
+            Assert-True ([IO.File]::ReadAllText($cli) -ceq $before) 'Personal registration idempotent'
+        }
+
+        Test-Case 'personal setup upgrades the old variable-based VS Code registration' {
+            $f = New-UserMcpFixture
+            Assert-Success (Invoke-UserMcpSetup $f)
+            $vscode = Join-Path $f.Home 'vscode\mcp.json'
+            $document = Read-SetupJson $vscode
+            $document.Value.servers.xray | Add-Member -NotePropertyName cwd -NotePropertyValue '${workspaceFolder}'
+            $document.Value.servers | Add-Member -NotePropertyName other -NotePropertyValue ([PSCustomObject]@{ command = 'other.exe' })
+            [void](Write-SetupJson $document)
+            Assert-Success (Invoke-UserMcpSetup $f)
+            $updated = (Read-SetupJson $vscode).Value.servers
+            Assert-True (-not $updated.xray.PSObject.Properties['cwd']) 'Old unresolved workspace variable removed'
+            Assert-True ($updated.other.command -eq 'other.exe') 'Other VS Code servers preserved during upgrade'
+        }
+
+        Test-Case 'two workspace profiles share registrations and uninstall safely' {
+            $a = New-UserMcpFixture
+            $b = New-Fixture
+            $b.Install = $a.Install
+            $b.Home = $a.Home
+            $result = Invoke-UserMcpSetup $a
+            Assert-Success $result
+            $cli = Join-Path $a.Home 'mcp-config.json'
+            $registration = [IO.File]::ReadAllText($cli)
+            $result = Invoke-UserMcpSetup $b @{ Extensions = 'ts' }
+            Assert-Success $result
+            Assert-True ([IO.File]::ReadAllText($cli) -ceq $registration) 'One shared registration'
+            $profiles = Join-Path $a.Install 'workspaces'
+            $aProfile = Get-WorkspaceProfilePath $profiles $a.Repo
+            $bProfile = Get-WorkspaceProfilePath $profiles $b.Repo
+            Assert-True ((Read-SetupJson $bProfile).Value.args[1] -eq 'ts') 'Independent workspace settings'
+            $result = Invoke-UserMcpSetup $a @{ Uninstall = $true; DryRun = $true }
+            Assert-True ($result.ExitCode -eq 0 -and (Test-Path -LiteralPath $aProfile)) 'Dry run preserves profile'
+            $result = Invoke-UserMcpSetup $a @{ Uninstall = $true }
+            Assert-Success $result
+            Assert-True (-not (Test-Path -LiteralPath $aProfile)) 'Only selected profile removed'
+            Assert-True (Test-Path -LiteralPath $bProfile) 'Other profile retained'
+            Assert-True ([IO.File]::ReadAllText($cli) -ceq $registration) 'Registration retained for other workspace'
+            $result = Invoke-UserMcpSetup $b @{ Uninstall = $true }
+            Assert-Success $result
+            Assert-True (-not (Read-SetupJson $cli).Value.mcpServers.PSObject.Properties['xray']) 'Last managed registration removed'
+            Assert-True (Test-Path -LiteralPath (Join-Path $a.Install 'xray.exe')) 'Shared binary retained for other VS Code profiles'
+        }
+
+        Test-Case 'personal profile backup and restore do not roll back shared registrations' {
+            $f = New-UserMcpFixture
+            $result = Invoke-UserMcpSetup $f @{ Extensions = 'rs' }
+            Assert-Success $result
+            $profile = Get-WorkspaceProfilePath (Join-Path $f.Install 'workspaces') $f.Repo
+            $before = [IO.File]::ReadAllText($profile)
+            $result = Invoke-UserMcpSetup $f @{ Extensions = 'ts' }
+            Assert-Success $result
+            $result = Invoke-UserMcpSetup $f @{ Restore = $true }
+            Assert-Success $result
+            Assert-True ([IO.File]::ReadAllText($profile) -ceq $before) 'Selected workspace settings restored'
+            Assert-True ((Read-SetupJson (Join-Path $f.Home 'mcp-config.json')).Value.mcpServers.xray.args[0] -eq 'serve-workspace') 'Shared registration unchanged'
+        }
+
+        Test-Case 'malformed and unmanaged personal configs fail before writing profiles' {
+            foreach ($content in @('{', '{"mcpServers":{"xray":{"command":"foreign.exe"}}}')) {
+                $f = New-UserMcpFixture
+                $cli = Join-Path $f.Home 'mcp-config.json'
+                Write-FixtureFile $cli $content
+                $result = Invoke-UserMcpSetup $f @{ Force = $false }
+                Assert-True ($result.ExitCode -ne 0) 'Unsafe replacement rejected'
+                Assert-True ([IO.File]::ReadAllText($cli) -ceq $content) 'Personal data unchanged'
+                Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.Install 'workspaces'))) 'No success-shaped profile written'
+            }
+        }
+
+        Test-Case 'personal migration requires consent and never modifies tracked Xray entries' {
+            $f = New-UserMcpFixture
+            $local = Join-Path $f.Repo '.vscode\mcp.json'
+            $text = @{ servers = @{ xray = @{ command = (Join-Path $f.Install 'xray.exe'); args = @('serve', '--dir', $f.Repo) }; other = @{ command = 'other.exe' } } } | ConvertTo-Json -Depth 8
+            Write-FixtureFile $local $text
+            $result = Invoke-UserMcpSetup $f
+            Assert-True ($result.ExitCode -ne 0) 'Migration consent required even with Force'
+            Assert-True ([IO.File]::ReadAllText($local) -ceq $text) 'Local entry retained without consent'
+            $result = Invoke-UserMcpSetup $f @{ MigrateLegacy = $true }
+            Assert-Success $result
+            Assert-True (-not (Read-SetupJson $local).Value.servers.PSObject.Properties['xray']) 'Approved local entry removed'
+            Assert-True ((Read-SetupJson $local).Value.servers.other.command -eq 'other.exe') 'Other local server retained'
+            $f = New-UserMcpFixture
+            $local = Join-Path $f.Repo '.mcp.json'
+            $text = @{ mcpServers = @{ xray = @{ command = (Join-Path $f.Install 'xray.exe') } } } | ConvertTo-Json -Depth 8
+            Write-FixtureFile $local $text
+            [void](Invoke-SetupGit $f.Repo @('add', '.mcp.json'))
+            $result = Invoke-UserMcpSetup $f @{ MigrateLegacy = $true }
+            Assert-True ($result.ExitCode -ne 0) 'Tracked entry migration refused'
+            Assert-True ([IO.File]::ReadAllText($local) -ceq $text) 'Tracked Xray config unchanged'
+        }
+
+        Test-Case 'uninstall preflights personal JSON before deleting the workspace profile' {
+            $f = New-UserMcpFixture
+            $result = Invoke-UserMcpSetup $f
+            Assert-Success $result
+            $profile = Get-WorkspaceProfilePath (Join-Path $f.Install 'workspaces') $f.Repo
+            Write-FixtureFile (Join-Path $f.Home 'mcp-config.json') '{'
+            $result = Invoke-UserMcpSetup $f @{ Uninstall = $true }
+            Assert-True ($result.ExitCode -ne 0) 'Malformed uninstall config rejected'
+            Assert-True (Test-Path -LiteralPath $profile) 'Profile preserved on preflight failure'
+        }
+
+        Test-Case 'personal migration removes only a filtered local overlay and preserves the index' {
+            $f = New-UserMcpFixture
+            $canonical = Add-LegacyFixture $f
+            [void](Invoke-SetupGit $f.Repo @('update-index', '--no-skip-worktree', '--no-assume-unchanged', '--', '.mcp.json'))
+            $index = (Get-FileHash (Join-Path $f.Repo '.git\index')).Hash
+            $result = Invoke-UserMcpSetup $f @{ MigrateLegacy = $true }
+            Assert-Success $result
+            Assert-True ([IO.File]::ReadAllText((Join-Path $f.Repo '.mcp.json')) -ceq $canonical) 'Only injected line removed; corporate bytes preserved'
+            Assert-True ((Get-FileHash (Join-Path $f.Repo '.git\index')).Hash -ceq $index) 'Index byte-identical after filter migration'
+            Assert-True (-not (Test-Path (Join-Path $f.Repo '.git\xray-mcp'))) 'Owned filter directory removed'
+            Assert-True ((Invoke-SetupGit $f.Repo @('config', '--local', '--get', 'filter.xray-mcp.clean') @(0, 1)).ExitCode -eq 1) 'Owned filter registration removed'
+            Assert-True ([IO.File]::ReadAllText((Join-Path $f.Repo '.git\info\attributes')).Contains('*.txt eol=lf')) 'Unrelated attributes retained'
+            Assert-Success (Invoke-UserMcpSetup $f)
+        }
+
+        Test-Case 'personal orphan migration disables a real smudge filter before recheckout' {
+            $f = New-UserMcpFixture
+            $canonical = Add-LegacyFixture $f
+            $path = Join-Path $f.Repo '.mcp.json'
+            $injected = [IO.File]::ReadAllText($path)
+            [void](Invoke-SetupGit $f.Repo @('update-index', '--no-skip-worktree', '--no-assume-unchanged', '--', '.mcp.json'))
+            Write-FixtureFile (Join-Path $f.Repo '.git\xray-mcp\injected.json') $injected
+            [void](Invoke-SetupGit $f.Repo @('config', 'filter.xray-mcp.smudge', 'cat .git/xray-mcp/injected.json'))
+            Remove-Item -LiteralPath $path -Force
+            [void](Invoke-SetupGit $f.Repo @('checkout-index', '--force', '--', '.mcp.json'))
+            Assert-True ($null -ne (Get-FixtureJson $path).mcpServers.PSObject.Properties['xray']) 'Fixture really reinjects Xray on checkout'
+            Write-FixtureFile $path $canonical
+            $index = (Get-FileHash (Join-Path $f.Repo '.git\index')).Hash
+            $result = Invoke-UserMcpSetup $f
+            Assert-True ($result.ExitCode -ne 0) 'Orphan filter requires migration consent'
+            Assert-True (Test-Path (Join-Path $f.Repo '.git\xray-mcp')) 'Filter retained without consent'
+            Assert-True (-not (Test-Path (Join-Path $f.Home 'mcp-config.json'))) 'No registration without migration consent'
+            Assert-Success (Invoke-UserMcpSetup $f @{ MigrateLegacy = $true })
+            Assert-True ([IO.File]::ReadAllText($path) -ceq $canonical) 'Metadata-only cleanup preserves workspace bytes'
+            Assert-True ((Get-FileHash (Join-Path $f.Repo '.git\index')).Hash -ceq $index) 'Metadata-only cleanup preserves index bytes'
+            Assert-True (-not (Test-Path "$path.bak")) 'Unchanged workspace file needs no backup'
+            Assert-True (-not (Test-Path (Join-Path $f.Repo '.git\xray-mcp'))) 'Orphan filter resources removed'
+            Assert-True ((Invoke-SetupGit $f.Repo @('config', '--local', '--get', 'filter.xray-mcp.smudge') @(0, 1)).ExitCode -eq 1) 'Smudge registration removed'
+            $attributes = [IO.File]::ReadAllText((Join-Path $f.Repo '.git\info\attributes'))
+            Assert-True ($attributes.Contains('*.txt eol=lf') -and $attributes -notmatch 'filter=xray-mcp') 'Only legacy attributes removed'
+            Remove-Item -LiteralPath $path -Force
+            [void](Invoke-SetupGit $f.Repo @('checkout-index', '--force', '--', '.mcp.json'))
+            $json = Get-FixtureJson $path
+            Assert-True ($null -eq $json.mcpServers.PSObject.Properties['xray'] -and $json.mcpServers.notes.command -eq 'notes') 'Real recheckout cannot restore the old workspace entry'
+            Assert-Success (Invoke-UserMcpSetup $f)
+        }
+
+        Test-Case 'personal orphan migration cleans missing root and VS Code configs without creating files' {
+            foreach ($definition in @(
+                @{ Relative = '.mcp.json'; Filter = 'xray-mcp' },
+                @{ Relative = '.vscode/mcp.json'; Filter = 'xray-vscode-mcp' }
+            )) {
+                $f = New-UserMcpFixture
+                $path = Join-Path $f.Repo $definition.Relative
+                $filterDirectory = Join-Path (Join-Path $f.Repo '.git') $definition.Filter
+                Write-FixtureFile (Join-Path $filterDirectory 'snapshot.txt') 'orphan'
+                [void](Invoke-SetupGit $f.Repo @('config', "filter.$($definition.Filter).smudge", 'cat'))
+                Write-FixtureFile (Join-Path $f.Repo '.git\info\attributes') "$($definition.Relative) filter=$($definition.Filter) text eol=lf`n*.txt eol=lf`n"
+                $index = (Get-FileHash (Join-Path $f.Repo '.git\index')).Hash
+                Assert-Success (Invoke-UserMcpSetup $f @{ MigrateLegacy = $true })
+                Assert-True (-not (Test-Path $path) -and -not (Test-Path "$path.bak")) 'Metadata cleanup does not create a config or backup'
+                Assert-True (-not (Test-Path $filterDirectory)) 'Orphan filter directory removed'
+                Assert-True ((Invoke-SetupGit $f.Repo @('config', '--local', '--get', "filter.$($definition.Filter).smudge") @(0, 1)).ExitCode -eq 1) 'Orphan filter configuration removed'
+                $attributes = [IO.File]::ReadAllText((Join-Path $f.Repo '.git\info\attributes'))
+                Assert-True ($attributes.Contains('text eol=lf') -and $attributes.Contains('*.txt eol=lf') -and $attributes -notmatch 'filter=') 'Other attributes preserved'
+                Assert-True ((Get-FileHash (Join-Path $f.Repo '.git\index')).Hash -ceq $index) 'Missing config cleanup preserves the index'
+            }
+        }
+
+        Test-Case 'personal orphan migration refuses shared worktrees, index entries and index flags' {
+            foreach ($kind in @('skip-worktree', 'assume-unchanged', 'multiple-worktrees', 'index-entry')) {
+                $f = New-UserMcpFixture
+                $canonical = Add-LegacyFixture $f
+                $path = Join-Path $f.Repo '.mcp.json'
+                [void](Invoke-SetupGit $f.Repo @('update-index', '--no-skip-worktree', '--no-assume-unchanged', '--', '.mcp.json'))
+                Write-FixtureFile $path $canonical
+                if ($kind -eq 'multiple-worktrees') {
+                    [void](Invoke-SetupGit $f.Repo @('worktree', 'add', '--quiet', '--detach', (Join-Path (Split-Path $f.Repo -Parent) 'second worktree')))
+                }
+                elseif ($kind -eq 'index-entry') {
+                    $text = $canonical.Replace('"notes":', '"xray":')
+                    Write-FixtureFile $path $text
+                    [void](Invoke-SetupGit $f.Repo @('add', '--', '.mcp.json'))
+                    Write-FixtureFile $path $canonical
+                }
+                else { [void](Invoke-SetupGit $f.Repo @('update-index', "--$kind", '--', '.mcp.json')) }
+                $index = (Get-FileHash (Join-Path $f.Repo '.git\index')).Hash
+                $result = Invoke-UserMcpSetup $f @{ MigrateLegacy = $true }
+                Assert-True ($result.ExitCode -ne 0) "Unsafe orphan cleanup refused: $kind"
+                Assert-True ([IO.File]::ReadAllText($path) -ceq $canonical) 'Workspace bytes preserved on refusal'
+                Assert-True ((Get-FileHash (Join-Path $f.Repo '.git\index')).Hash -ceq $index) 'Index bytes preserved on refusal'
+                Assert-True (Test-Path (Join-Path $f.Repo '.git\xray-mcp')) 'Filter resources preserved on refusal'
+                Assert-True (-not (Test-Path (Join-Path $f.Home 'mcp-config.json'))) 'Unsafe orphan cleanup does not register personal MCP'
+            }
+        }
+
+        Test-Case 'personal migration cleans legacy metadata for an untracked owned entry' {
+            $f = New-UserMcpFixture
+            $path = Join-Path $f.Repo '.mcp.json'
+            $text = @{ mcpServers = @{ xray = @{ command = (Join-Path $f.Install 'xray.exe') }; other = @{ command = 'other.exe' } } } | ConvertTo-Json -Depth 8
+            Write-FixtureFile $path $text
+            Write-FixtureFile (Join-Path $f.Repo '.git\xray-mcp\snapshot.txt') 'legacy'
+            Write-FixtureFile (Join-Path $f.Repo '.git\info\attributes') ".mcp.json filter=xray-mcp`n"
+            [void](Invoke-SetupGit $f.Repo @('config', 'filter.xray-mcp.smudge', 'cat'))
+            Assert-Success (Invoke-UserMcpSetup $f @{ MigrateLegacy = $true })
+            $json = Get-FixtureJson $path
+            Assert-True ($null -eq $json.mcpServers.PSObject.Properties['xray'] -and $json.mcpServers.other.command -eq 'other.exe') 'Only owned untracked entry removed'
+            Assert-True ([IO.File]::ReadAllText("$path.bak") -ceq $text) 'Original untracked entry backed up'
+            Assert-True (-not (Test-Path (Join-Path $f.Repo '.git\xray-mcp'))) 'Untracked entry filter resources removed'
+            Assert-True ((Invoke-SetupGit $f.Repo @('config', '--local', '--get', 'filter.xray-mcp.smudge') @(0, 1)).ExitCode -eq 1) 'Untracked entry filter registration removed'
+        }
+
+        Test-Case 'personal migration revalidates untracked entries and Git protection before writing' {
+            foreach ($definition in @(
+                @{ Relative = '.mcp.json'; Container = 'mcpServers' },
+                @{ Relative = '.github/mcp.json'; Container = 'mcpServers' },
+                @{ Relative = '.vscode/mcp.json'; Container = 'servers' }
+            )) {
+                foreach ($kind in @('foreign-owner', 'changed-owned-entry', 'changed-other-server', 'deleted-config', 'tracked-config', 'tracked-backup')) {
+                    $f = New-UserMcpFixture
+                    $path = Join-Path $f.Repo $definition.Relative
+                    $text = @{ $definition.Container = @{ xray = @{ command = (Join-Path $f.Install 'xray.exe'); args = @('serve') }; other = @{ command = 'other.exe' } } } | ConvertTo-Json -Depth 8
+                    Write-FixtureFile $path $text
+                    $plan = @(Get-UserMcpMigrationConfigs $f.Repo (Join-Path $f.Install 'xray.exe') $true $true)[0]
+                    $changed = $text
+                    switch ($kind) {
+                        'foreign-owner' { $changed = $text.Replace('xray.exe', 'foreign.exe') }
+                        'changed-owned-entry' { $changed = $text.Replace('"serve"', '"serve-workspace"') }
+                        'changed-other-server' { $changed = $text.Replace('other.exe', 'updated-other.exe') }
+                        'deleted-config' { Remove-Item -LiteralPath $path -Force }
+                        'tracked-config' { [void](Invoke-SetupGit $f.Repo @('add', '--', $definition.Relative)) }
+                        'tracked-backup' {
+                            Write-FixtureFile "$path.bak" 'tracked backup'
+                            [void](Invoke-SetupGit $f.Repo @('add', '--', "$($definition.Relative).bak"))
+                        }
+                    }
+                    if ($kind -notin @('deleted-config', 'tracked-config', 'tracked-backup')) { Write-FixtureFile $path $changed }
+                    $index = (Get-FileHash (Join-Path $f.Repo '.git\index')).Hash
+                    $excludePath = Join-Path $f.Repo '.git\info\exclude'
+                    $excludeBefore = if (Test-Path $excludePath) { [IO.File]::ReadAllText($excludePath) } else { $null }
+                    $rejected = $false
+                    try {
+                        Remove-UserMcpWorkspaceEntry -RepoRoot $f.Repo -IsGitRepo $true -ExcludePath (Join-Path $f.Repo '.git\info\exclude') -Migration $plan
+                    }
+                    catch { $rejected = $true }
+                    Assert-True $rejected "Concurrent change refused: $($definition.Relative), $kind"
+                    if ($kind -eq 'deleted-config') { Assert-True (-not (Test-Path $path)) 'Deleted config not recreated' }
+                    else { Assert-True ([IO.File]::ReadAllText($path) -ceq $changed) 'Concurrent workspace text preserved' }
+                    if ($kind -eq 'tracked-backup') { Assert-True ([IO.File]::ReadAllText("$path.bak") -ceq 'tracked backup') 'Tracked backup preserved' }
+                    else { Assert-True (-not (Test-Path "$path.bak")) 'No backup written on refusal' }
+                    Assert-True ((Get-FileHash (Join-Path $f.Repo '.git\index')).Hash -ceq $index) 'Concurrent index state preserved'
+                    $excludeAfter = if (Test-Path $excludePath) { [IO.File]::ReadAllText($excludePath) } else { $null }
+                    Assert-True ($excludeAfter -ceq $excludeBefore) 'No exclusions changed before revalidation'
+                }
+            }
+        }
+
+        Test-Case 'personal migration entry removal pins the approved text through reread' {
+            $f = New-UserMcpFixture
+            $path = Join-Path $f.Repo '.mcp.json'
+            $text = '{"mcpServers":{"xray":{"command":"xray.exe"},"other":{"command":"other.exe"}}}'
+            $changed = $text.Replace('xray.exe', 'foreign.exe')
+            Write-FixtureFile $path $changed
+            $rejected = $false
+            try { [void](Remove-XrayServerEntry -Path $path -ContainerKey 'mcpServers' -ExpectedText $text) }
+            catch { $rejected = $_.Exception.Message -like '*changed during setup*' }
+            Assert-True $rejected 'Replacement between migration validation and removal rejected explicitly'
+            Assert-True ([IO.File]::ReadAllText($path) -ceq $changed) 'Replacement entry preserved'
+            Assert-True (-not (Test-Path "$path.bak")) 'Replacement entry never backed up or mutated'
+        }
+
+        Test-Case 'personal orphan migration revalidates metadata-only plans' {
+            $f = New-UserMcpFixture
+            $canonical = Add-LegacyFixture $f
+            $path = Join-Path $f.Repo '.mcp.json'
+            [void](Invoke-SetupGit $f.Repo @('update-index', '--no-skip-worktree', '--no-assume-unchanged', '--', '.mcp.json'))
+            Write-FixtureFile $path $canonical
+            $plan = @(Get-UserMcpMigrationConfigs $f.Repo (Join-Path $f.Install 'xray.exe') $true $true)[0]
+            Assert-True ($null -ne $plan) 'Orphan filter produces a migration plan'
+            $changed = $canonical.Replace('"notes"', '"updated-notes"')
+            Write-FixtureFile $path $changed
+            $rejected = $false
+            try {
+                Remove-UserMcpWorkspaceEntry -RepoRoot $f.Repo -IsGitRepo $true -ExcludePath (Join-Path $f.Repo '.git\info\exclude') -Migration $plan
+            }
+            catch { $rejected = $_.Exception.Message -like '*changed during setup*' }
+            Assert-True $rejected 'Metadata-only plan rejects changed workspace text'
+            Assert-True ([IO.File]::ReadAllText($path) -ceq $changed) 'Metadata-only revalidation preserves changed text'
+            Assert-True (Test-Path (Join-Path $f.Repo '.git\xray-mcp')) 'Filter retained after metadata-only plan invalidation'
+        }
+
+        Test-Case 'personal filtered migration refuses other local changes, index entries and index flags' {
+            foreach ($kind in @('local-changes', 'index-entry', 'index-flags', 'multiple-worktrees')) {
+                $f = New-UserMcpFixture
+                $null = Add-LegacyFixture $f
+                $path = Join-Path $f.Repo '.mcp.json'
+                if ($kind -ne 'index-flags') {
+                    [void](Invoke-SetupGit $f.Repo @('update-index', '--no-skip-worktree', '--no-assume-unchanged', '--', '.mcp.json'))
+                }
+                if ($kind -eq 'local-changes') {
+                    Write-FixtureFile $path ([IO.File]::ReadAllText($path).Replace('"notes"', '"other-notes"'))
+                }
+                if ($kind -eq 'index-entry') { [void](Invoke-SetupGit $f.Repo @('add', '.mcp.json')) }
+                if ($kind -eq 'multiple-worktrees') {
+                    [void](Invoke-SetupGit $f.Repo @('worktree', 'add', '--quiet', '--detach', (Join-Path (Split-Path $f.Repo -Parent) 'second worktree')))
+                }
+                $before = [IO.File]::ReadAllText($path)
+                $index = (Get-FileHash (Join-Path $f.Repo '.git\index')).Hash
+                $result = Invoke-UserMcpSetup $f @{ MigrateLegacy = $true }
+                Assert-True ($result.ExitCode -ne 0) "Unsafe filtered migration refused: $kind"
+                Assert-True ([IO.File]::ReadAllText($path) -ceq $before) "Working copy preserved: $kind"
+                Assert-True ((Get-FileHash (Join-Path $f.Repo '.git\index')).Hash -ceq $index) "Index preserved: $kind"
+                Assert-True (Test-Path (Join-Path $f.Repo '.git\xray-mcp')) "Filter resources preserved: $kind"
+                Assert-True (-not (Test-Path (Join-Path $f.Home 'mcp-config.json'))) "No partial registration: $kind"
+            }
+        }
+
+        Test-Case 'personal filtered migration revalidates the index before writing' {
+            $f = New-UserMcpFixture
+            $canonical = Add-LegacyFixture $f
+            [void](Invoke-SetupGit $f.Repo @('update-index', '--no-skip-worktree', '--no-assume-unchanged', '--', '.mcp.json'))
+            $plan = @(Get-UserMcpMigrationConfigs $f.Repo (Join-Path $f.Install 'xray.exe') $true $true)[0]
+            $path = Join-Path $f.Repo '.mcp.json'
+            $injected = [IO.File]::ReadAllText($path)
+            Write-FixtureFile $path ($canonical.Replace('"notes"', '"updated-notes"'))
+            [void](Invoke-SetupGit $f.Repo @('add', '.mcp.json'))
+            Write-FixtureFile $path $injected
+            $index = (Get-FileHash (Join-Path $f.Repo '.git\index')).Hash
+            $rejected = $false
+            try {
+                Remove-UserMcpWorkspaceEntry -RepoRoot $f.Repo -IsGitRepo $true -ExcludePath (Join-Path $f.Repo '.git\info\exclude') -Migration $plan
+            }
+            catch { $rejected = $true }
+            Assert-True $rejected 'Concurrent index change refused'
+            Assert-True ([IO.File]::ReadAllText($path) -ceq $injected) 'Concurrent staged changes do not overwrite working copy'
+            Assert-True ((Get-FileHash (Join-Path $f.Repo '.git\index')).Hash -ceq $index) 'New staged state retained'
+        }
+
+        Test-Case 'personal setup rejects unsupported executable before writing configs' {
+            $f = New-Fixture
+            $result = Invoke-UserMcpSetup $f
+            Assert-True ($result.ExitCode -ne 0) 'Unsupported executable rejected'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.Home 'mcp-config.json'))) 'No unusable registration'
+        }
+
+        Test-Case 'VS Code named profile, inherited MCP and explicit path selection' {
+            $f = New-UserMcpFixture
+            $oldAppData = $env:APPDATA
+            $oldPortable = $env:VSCODE_PORTABLE
+            try {
+                $env:APPDATA = Join-Path $f.Home 'appdata'
+                $env:VSCODE_PORTABLE = $null
+                $user = Join-Path $env:APPDATA 'Code\User'
+                $state = Join-Path $user 'globalStorage\storage.json'
+                $associations = @{}
+                $associations[([Uri]($f.Repo + '\')).AbsoluteUri.TrimEnd('/')] = 'named-profile'
+                $value = @{ profileAssociations = @{ workspaces = $associations }; userDataProfiles = @(@{ location = 'named-profile'; useDefaultFlags = @{ mcp = $false } }) }
+                Write-FixtureFile $state ($value | ConvertTo-Json -Depth 8)
+                Assert-True ((Get-UserVSCodeMcpPath $f.Repo '') -eq (Join-Path $user 'profiles\named-profile\mcp.json')) 'Named profile resolved'
+                $encodedUri = ([Uri]($f.Repo + '\')).AbsoluteUri.TrimEnd('/') -replace '^file:///([A-Za-z]):/', 'file:///$1%3A/'
+                $value.profileAssociations.workspaces = [ordered]@{ 'file:///Z%3A/Unrelated%20Folder' = 'unrelated-profile' }
+                $value.profileAssociations.workspaces[$encodedUri.ToLowerInvariant() + '/'] = 'named-profile'
+                Write-FixtureFile $state ($value | ConvertTo-Json -Depth 8)
+                Assert-True ((Get-UserVSCodeMcpPath $f.Repo '') -eq (Join-Path $user 'profiles\named-profile\mcp.json')) 'Encoded drive, spaces, case and trailing slash resolved'
+                $value.profileAssociations.workspaces = [ordered]@{ 'file://other-server/share/Repo' = 'unrelated-profile'; 'file://server/share/Repo' = 'named-profile' }
+                Write-FixtureFile $state ($value | ConvertTo-Json -Depth 8)
+                Assert-True ((Get-UserVSCodeMcpPath '\\server\share\Repo' '') -eq (Join-Path $user 'profiles\named-profile\mcp.json')) 'UNC profile matches its host and share'
+                Assert-True ((Get-UserVSCodeMcpPath '\\unregistered-server\share\Repo' '') -eq (Join-Path $user 'mcp.json')) 'Different UNC host does not select another profile'
+                $value.profileAssociations.workspaces = [ordered]@{}
+                $value.profileAssociations.workspaces[$encodedUri] = 'named-profile'
+                $value.userDataProfiles[0].useDefaultFlags.mcp = $true
+                Write-FixtureFile $state ($value | ConvertTo-Json -Depth 8)
+                Assert-True ((Get-UserVSCodeMcpPath $f.Repo '') -eq (Join-Path $user 'mcp.json')) 'Inherited MCP uses default'
+                $override = Join-Path $f.Home 'custom\mcp.json'
+                Assert-True ((Get-UserVSCodeMcpPath $f.Repo $override) -eq $override) 'Explicit profile override respected'
+            }
+            finally { $env:APPDATA = $oldAppData; $env:VSCODE_PORTABLE = $oldPortable }
+        }
+
+        Test-Case 'CLI-only setup does not depend on VS Code state' {
+            $f = New-UserMcpFixture
+            Write-FixtureFile (Join-Path $f.Home 'appdata\Code\User\globalStorage\storage.json') '{'
+            $result = Invoke-UserMcpSetup $f @{ EnableCopilotCli = $true; VSCodeMcpPath = '' }
+            Assert-Success $result
+            Assert-True ((Read-SetupJson (Join-Path $f.Home 'mcp-config.json')).Value.mcpServers.xray.args[0] -eq 'serve-workspace') 'CLI/SDK configured independently'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.Home 'appdata\Code\User\mcp.json'))) 'VS Code not selected'
+        }
+
+        Test-Case 'personal relative paths use PowerShell location, not process CWD' {
+            $f = New-UserMcpFixture
+            $location = Split-Path $f.Install -Parent
+            $result = Invoke-FixtureSetup $f @{
+                UserMcp = $true; InstallDir = 'install with spaces'; VSCodeMcpPath = 'personal vscode\mcp.json'
+            } -Location $location
+            Assert-Success $result
+            $profile = Get-WorkspaceProfilePath (Join-Path $f.Install 'workspaces') $f.Repo
+            Assert-True (Test-Path -LiteralPath $profile) 'Relative install resolved from shell location'
+            Assert-True (Test-Path -LiteralPath (Join-Path $location 'personal vscode\mcp.json')) 'Relative MCP override resolved from shell location'
+        }
+
+        Test-Case 'legacy uninstall cannot remove an executable used by personal profiles' {
+            $f = New-UserMcpFixture
+            Assert-Success (Invoke-FixtureSetup $f)
+            Assert-Success (Invoke-UserMcpSetup $f @{ MigrateLegacy = $true })
+            Assert-Success (Invoke-FixtureSetup $f @{ Uninstall = $true })
+            Assert-True (Test-Path -LiteralPath (Join-Path $f.Install 'xray.exe')) 'Personal workspace executable retained'
+            $profile = Get-WorkspaceProfilePath (Join-Path $f.Install 'workspaces') $f.Repo
+            Assert-True (Test-Path -LiteralPath $profile) 'Personal workspace profile retained'
+        }
+
+        Test-Case 'personal uninstall preserves entries replaced by another owner' {
+            $f = New-UserMcpFixture
+            Assert-Success (Invoke-UserMcpSetup $f)
+            $cli = Join-Path $f.Home 'mcp-config.json'
+            $text = '{"mcpServers":{"xray":{"command":"foreign.exe"},"other":{"command":"other.exe"}}}'
+            Write-FixtureFile $cli $text
+            Assert-Success (Invoke-UserMcpSetup $f @{ Uninstall = $true })
+            Assert-True ([IO.File]::ReadAllText($cli) -ceq $text) 'Unmanaged personal entry retained byte-for-byte'
+        }
+
+        Test-Case 'personal lifecycle uninstall pins ownership through entry removal' {
+            $managedCheck = (Get-Item Function:\Test-ManagedUserMcpEntry).ScriptBlock
+            foreach ($container in @('mcpServers', 'servers')) {
+                foreach ($change in @('foreign-owner', 'other-server', 'deleted-config')) {
+                    foreach ($dryRun in @($false, $true)) {
+                        $f = New-Fixture
+                        $binary = Join-Path $f.Install 'xray.exe'
+                        $profiles = Join-Path $f.Install 'workspaces'
+                        $profilePath = Get-WorkspaceProfilePath $profiles $f.Repo
+                        Write-FixtureFile $profilePath (@{ version = 1; workspaceRoot = $f.Repo; args = @() } | ConvertTo-Json -Depth 8)
+                        $path = Join-Path $f.Home 'personal-mcp.json'
+                        $text = @{ $container = @{
+                            xray = @{ command = $binary; args = @('serve-workspace', '--profiles', $profiles); _xrayUserMcp = 1 }
+                            other = @{ command = 'other.exe' }
+                        } } | ConvertTo-Json -Depth 8
+                        Write-FixtureFile $path $text
+                        $replacement = if ($change -eq 'foreign-owner') { $text.Replace('xray.exe', 'foreign.exe') } else { $text.Replace('other.exe', 'updated-other.exe') }
+                        $race = @{ Path = $path; Text = $replacement; Delete = $change -eq 'deleted-config'; Validations = 0 }
+                        $rejected = $false
+                        try {
+                            function Test-ManagedUserMcpEntry {
+                                param($Entry, [string]$Binary, [string]$Profiles)
+                                $managed = & $managedCheck $Entry $Binary $Profiles
+                                if ($managed) {
+                                    # Simulate another writer after the real ownership check succeeds.
+                                    $race.Validations++
+                                    if ($race.Delete) { Remove-Item -LiteralPath $race.Path -Force }
+                                    else { Write-FixtureFile $race.Path $race.Text }
+                                }
+                                return $managed
+                            }
+                            $target = [PSCustomObject]@{ Path = $path; Container = $container; Client = 'Test personal client' }
+                            try { Remove-UserMcpWorkspace -ProfilePath $profilePath -Profiles $profiles -Binary $binary -Targets @($target) -DryRun:$dryRun }
+                            catch { $rejected = $_.Exception.Message -like '*changed during setup*' }
+                        }
+                        finally { Set-Item Function:\Test-ManagedUserMcpEntry -Value $managedCheck }
+                        $label = "$container, $change, DryRun=$dryRun"
+                        Assert-True ($race.Validations -eq 1) "Actual managed-entry validation succeeded before replacement: $label"
+                        Assert-True $rejected "Concurrent personal config change rejected: $label"
+                        if ($race.Delete) { Assert-True (-not (Test-Path $path)) "Deleted personal config not recreated: $label" }
+                        else { Assert-True ([IO.File]::ReadAllText($path) -ceq $replacement) "Concurrent personal config bytes preserved: $label" }
+                        Assert-True (-not (Test-Path "$path.bak")) "No backup of an unapproved replacement created: $label"
+                    }
+                }
+            }
+        }
+
+        Test-Case 'personal files and profiles must remain outside the repository' {
+            $f = New-UserMcpFixture
+            foreach ($options in @(
+                @{ InstallDir = (Join-Path $f.Repo 'install') },
+                @{ VSCodeMcpPath = (Join-Path $f.Repo 'personal-mcp.json') }
+            )) {
+                $result = Invoke-UserMcpSetup $f $options
+                Assert-True ($result.ExitCode -ne 0) 'Repository-local personal state refused'
+                Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.Home 'mcp-config.json'))) 'No partial personal registration'
+            }
+        }
+    }
+
+    if (-not $UserMcpOnly) {
     Test-Case 'fresh setup, exact client formats, absolute paths, flags and exclusions' {
         $f = New-Fixture
         $result = Invoke-FixtureSetup $f
@@ -1044,6 +1737,7 @@ public static class CliStub {
         Assert-True ((Set-CopilotWorkspaceTrust $f.Repo $true) -eq 'Yes (already trusted)') 'Parent directory trust respected'
         Assert-True ($script:trustPrompts -eq 0) 'No duplicate child prompt'
     }
+    }
 }
 finally {
     $env:GIT_CONFIG_GLOBAL = $oldGlobal
@@ -1052,5 +1746,6 @@ finally {
     Remove-Item -LiteralPath $root -Recurse -Force
 }
 Write-Host "MCP setup assertions passed: $script:passes; cases failed: $script:failures"
+if ($script:passes -eq 0 -and $script:failures -eq 0) { Write-Error "No test cases matched: $CasePattern"; exit 1 }
 if ($script:failures -gt 0) { exit 1 }
 exit 0

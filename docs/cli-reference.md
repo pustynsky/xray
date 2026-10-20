@@ -417,6 +417,26 @@ The `notify` crate (and `ReadDirectoryChangesW` on Windows) is best-effort and m
 
 ---
 
+## `xray serve-workspace` - Select an installed workspace profile
+
+```powershell
+xray serve-workspace --profiles C:\Users\you\AppData\Local\xray\workspaces
+```
+
+Selects the nearest registered ancestor of the process working directory,
+loads its versioned `config.json`, and starts an ordinary explicit-root shared
+MCP proxy. Profiles retain each workspace's `serve` arguments; clients need
+only one personal MCP registration, without a `cwd` variable. When the launch
+directory has no profile, clients advertising MCP roots can supply exactly one
+file root through `roots/list` after initialization. This supports user-scoped
+VS Code servers launched outside the workspace. Unknown workspaces, multiple
+discovery roots, and invalid or ambiguous profiles fail explicitly, without
+starting a private index.
+
+Use `setup-xray.ps1 -UserMcp -RepoPath <workspace>` to install profiles.
+See [personal MCP setup](installation.md#personal-mcp-with-workspace-profiles)
+for locations, schema, migration, and client configuration.
+
 ## `xray tips` — Best Practices Guide
 
 Prints the same best practices and strategy recipes available via the `xray_help` MCP tool. Includes step-by-step patterns for common tasks (architecture exploration, call chain investigation, stack trace analysis) with a target of ≤3 search calls per task.

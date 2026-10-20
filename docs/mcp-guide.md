@@ -106,6 +106,12 @@ shorter than the old idle timeout, rather than imposing a CPU-dependent startup 
 
 ## Setup in VS Code
 
+For a setup shared by ordinary Copilot Chat, SDK Agent Host, and standalone
+Copilot CLI, use [personal MCP with workspace profiles](installation.md#personal-mcp-with-workspace-profiles).
+The native `serve-workspace` command selects per-repository settings without
+editing a tracked workspace MCP config or requiring a CLI wrapper.
+The manual workspace registration below does not configure SDK Agent Host.
+
 1. **Install xray** (if not already):
 
    ```bash
