@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Missing explicit `--dir` no longer wedges the server.** A missing directory or a path to a file now leaves the workspace unresolved instead of pinning it and attempting to build indexes. Earlier versions could leave tools returning `INDEX_BUILDING` indefinitely while `xray_reindex dir=...` refused to switch workspaces; shared-backend startup could instead exit during path resolution. Tools now report `WORKSPACE_UNRESOLVED` with the invalid path, and clients advertising roots receive a `roots/list` request. Bind a valid root and reindex, or call `xray_reindex dir=<path>` directly to recover without restarting. Failed recovery attempts restore the previous workspace status, so another invalid path does not turn `WORKSPACE_UNRESOLVED` into a misleading `INDEX_BUILDING`. Invalid paths use a private server before shared-backend path resolution; existing explicit directories remain pinned.
+
 ## 0.9.1 (2026-10-20)
 
 - **Keep idle workspace backends alive for 10 minutes by default.** After the last client disconnects, the default shutdown delay is now 600 seconds instead of 60. Explicit `XRAY_BACKEND_IDLE_SECONDS` overrides (1 to 3600 seconds) are unchanged. This does not change recovery when a Windows host terminates the backend's process group.

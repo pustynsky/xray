@@ -140,7 +140,12 @@ fn build_context_with_index_dir(args: ServeArgs, idx_base: PathBuf) -> mcp::hand
     let ws_binding = mcp::handlers::determine_initial_binding(&dir_str, &extensions_vec, args.respect_git_exclude);
     let is_unresolved = ws_binding.status == mcp::handlers::WorkspaceStatus::Unresolved;
     if is_unresolved {
-        warn!(target: "xray::startup", dir = %ws_binding.dir, "workspace UNRESOLVED (no source files), skipping index build");
+        let reason = if std::path::Path::new(&ws_binding.dir).is_dir() {
+            "no source files"
+        } else {
+            "directory does not exist"
+        };
+        warn!(target: "xray::startup", dir = %ws_binding.dir, reason, "workspace UNRESOLVED, skipping index build");
     }
 
     let workspace = Arc::new(RwLock::new(ws_binding));
