@@ -39,6 +39,7 @@
 
 .PARAMETER EnableVSCode
     Select VS Code setup. Without either client switch, both clients are selected.
+    With -UserMcp, the CLI/SDK registration is also included for Agent Host.
 
 .PARAMETER EnableRoo
     DISABLED. Kept as a no-op switch for backward compat with caller scripts.
@@ -47,6 +48,8 @@
 .PARAMETER EnableCopilotCli
     Select GitHub Copilot CLI setup in .github/mcp.json. Without either client
     switch, both clients are selected.
+    With -UserMcp, select personal CLI/SDK setup and omit VS Code unless
+    -EnableVSCode is also supplied.
 
 .PARAMETER UserMcp
     Register Xray in personal Copilot CLI/SDK and VS Code MCP configurations.

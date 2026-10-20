@@ -105,13 +105,16 @@ and removal steps. This is a preference, not an exclusive-tool guarantee.
 
 ### Installation
 
-**Option A — automated setup (recommended).** Run the [setup script](scripts/setup-xray.ps1). It downloads the latest `xray.exe`, detects your project's file extensions, and configures both VS Code and GitHub Copilot CLI. Pass `-EnableVSCode` or `-EnableCopilotCli` to select only those clients.
+**Option A — automated setup (recommended).** Run the [setup script](scripts/setup-xray.ps1). It downloads the latest `xray.exe`, detects your project's file extensions, and configures both VS Code and GitHub Copilot CLI.
 
 The examples below use `-UserMcp` for VS Code SDK Agent Host, ordinary
 Copilot Chat, and CLI. This opt-in mode registers Xray in personal client configs and
 keeps separate workspace profiles outside Git, without a CLI wrapper.
 It requires a binary with `serve-workspace` support.
 Without `-UserMcp`, setup still uses the legacy workspace-local mode.
+Personal mode always includes the CLI/SDK registration used by Agent Host;
+`-EnableCopilotCli` selects CLI/SDK-only setup. `-EnableVSCode` also includes
+CLI/SDK in personal mode. In workspace mode, either switch selects only that client.
 See [personal MCP setup](docs/installation.md#personal-mcp-with-workspace-profiles)
 for profile selection and verification, and
 [updating](docs/installation.md#5-updating-to-a-new-version) for updates and first-time migration.

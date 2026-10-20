@@ -74,7 +74,7 @@ cd xray
 >
 > **Target a specific repo non-interactively.** Pass `-RepoPath <path>` to skip the path prompt.
 >
-> **Select clients.** Both are configured by default. Add `-EnableCopilotCli` or `-EnableVSCode` to configure only the selected clients.
+> **Select clients.** Personal mode configures both by default and always includes CLI/SDK for Agent Host. Add `-EnableCopilotCli` for CLI/SDK-only setup; `-EnableVSCode` still includes CLI/SDK. In workspace mode, either switch selects only that client.
 >
 > **`-UseBasicParsing`.** Required on Windows PowerShell 5.1 (the default `powershell.exe` on Windows) — without it, `Invoke-WebRequest` uses the IE rendering engine which blocks with a security prompt and can dump the script's `.SYNOPSIS` block to the console. It's a no-op on PowerShell 7+.
 

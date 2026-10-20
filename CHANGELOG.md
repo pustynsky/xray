@@ -4,7 +4,7 @@
 
 ## 0.9.2 (2026-10-20)
 
-- **Clarified installation, updates, and migration.** Quick-start examples select personal MCP explicitly. The update guide distinguishes repeat setup, one-time workspace migration, and binary-only replacement, uses the actual default installation path, and explains shared-process shutdown, extension selection, and post-update verification.
+- **Clarified installation, updates, and migration.** Quick-start examples select personal MCP explicitly and explain that personal mode always includes CLI/SDK for Agent Host, even with `-EnableVSCode`. The update guide distinguishes repeat setup, one-time workspace migration, and binary-only replacement, uses the actual default installation path, and explains shared-process shutdown, extension selection, and post-update verification.
 
 - **Hardened MCP restore and uninstall.** Setup rejects simultaneous `-Restore -Uninstall`, including with `-DryRun`, before writing files. Personal uninstall checks that the config text still matches the entry whose ownership was approved, preserving concurrent replacements, unrelated server edits, and deleted configs without creating a backup.
 
