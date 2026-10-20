@@ -6,6 +6,17 @@ End-to-end setup for using `xray` as an MCP server with your AI coding agent.
 
 ## Quick Setup (recommended)
 
+Choose the scope before running setup:
+
+| Scope | Command options | Use it for |
+|---|---|---|
+| One repository | `setup-xray.ps1 -RepoPath <path> -UserMcp` | A first install or update for one checkout. Add `-MigrateLegacy` when moving from old workspace registrations. |
+| Previously configured repositories under one directory | `setup-xray-repos.ps1 -Root <path>` | A shared executable update and migration of existing Xray setups only. |
+| All discovered repositories under one directory | `setup-xray-repos.ps1 -Root <path> -IncludeNewRepos` | The same update/migration, plus new profiles for repositories without Xray. |
+
+The single-repository walkthrough follows below. For either bulk mode, start with
+`-DryRun` and follow [setup across a repository directory](#setup-across-a-repository-directory).
+
 For VS Code Agent Host, ordinary Copilot Chat, and standalone Copilot CLI,
 use the opt-in [personal MCP setup](#personal-mcp-with-workspace-profiles).
 It does not depend on a CLI wrapper or modify a tracked repository MCP config.
@@ -425,6 +436,74 @@ to finish, then read a known symbol with `xray_definitions`. A config entry,
 a running process, or cached tool names alone does not establish that the
 current chat is connected.
 
+## Setup across a repository directory
+
+Use [setup-xray-repos.ps1](../scripts/setup-xray-repos.ps1) with the adjacent
+[setup-xray.ps1](../scripts/setup-xray.ps1) from the same checkout or download.
+The bulk script reuses the installer's personal MCP setup and legacy migration
+checks. It does not install a separate executable per repository.
+
+Use the default mode after upgrading Xray or moving existing checkouts from
+workspace-local MCP entries to personal registrations and workspace profiles.
+It leaves repositories without Xray unconfigured. Use `-IncludeNewRepos` when
+you also want to enroll other discovered checkouts, such as on a new development
+machine. Use the single-repository script instead when only one checkout needs
+setup.
+
+```powershell
+# Inspect the plan without writes, downloads, scans of source extensions, or process stops.
+.\scripts\setup-xray-repos.ps1 -Root C:\Repos -DryRun
+
+# Update the shared executable once and migrate only previously configured repositories.
+.\scripts\setup-xray-repos.ps1 -Root C:\Repos
+
+# Also create profiles for repositories without Xray.
+.\scripts\setup-xray-repos.ps1 -Root C:\Repos -IncludeNewRepos -DryRun
+.\scripts\setup-xray-repos.ps1 -Root C:\Repos -IncludeNewRepos
+
+# Keep the installed executable, approve eligible migration without prompting.
+.\scripts\setup-xray-repos.ps1 -Root C:\Repos -SkipDownload -Force
+```
+
+The plan shows each checkout's source, action, extensions, and conflicts.
+Existing profiles and eligible legacy workspace MCP entries count as configured.
+New repositories are skipped unless `-IncludeNewRepos` is set. For new repositories,
+the installer detects extensions, or `-Extensions rs,md` supplies an explicit list.
+That option does not override existing repository settings.
+If a new repository has too few files to meet the installer's existing detection
+threshold, setup reports the missing selection and requests `-Extensions`.
+
+Discovery descends through grouping directories and recognizes both normal
+checkouts and Git worktree files. It stops at each checkout, so nested repositories
+inside a checkout are not discovered. Dependency/build directories and reparse
+points are skipped; paths outside `-Root` are not enrolled.
+
+Supported existing serve arguments are preserved, including watcher/definitions,
+metrics, logging, response limits and rescan settings. Extension case/order and
+argument order are normalized. Different settings across clients, unknown arguments,
+legacy command environments or working directories, malformed profiles, and
+foreign personal registrations are reported as conflicts instead of guessed.
+Tracked legacy entries retain the single-repository installer's protection.
+Eligible repositories can still proceed; any conflict or failed setup makes the
+batch exit nonzero. Completed repositories are not rolled back if a later one fails.
+The batch stops if its first binary preparation fails rather than retrying the
+download for every repository.
+
+**The executable is shared by all registered workspaces**, including those outside
+`-Root`. By default the first selected setup downloads the latest published release;
+the rest reuse it. Use `-SkipDownload` to keep a local/custom executable.
+`-Force` approves the migration plan but does not grant permission to stop processes.
+Close Xray connections before updating, or explicitly pass `-KillRunning` to permit
+stopping processes using that executable. Other executable paths are not stopped.
+Client/UI enablement is not changed; existing managed registration fields such as
+tool restrictions and environment overrides are retained.
+
+`-DryRun` performs only discovery and read-only preflight, including when combined
+with `-IncludeNewRepos` or `-KillRunning`. It does not create installation directories
+or rename old profiles. Conflicts still produce a nonzero exit code.
+`-InstallDir` and `-VSCodeMcpPath` can select nondefault personal locations; without
+the latter, the installer resolves the VS Code profile separately for each checkout.
+
 ## Local MCP configuration and legacy migration
 
 ### Configuration and Git protection
@@ -588,7 +667,10 @@ worktrees, standalone execution and explicit legacy cleanup in isolated
 temporary directories. It never modifies actual user or repository configs.
 [Extension](../scripts/test-detect-extensions.ps1) and
 [dependency](../scripts/test-setup-dependencies.ps1) regression tests remain.
-CI runs all three on Windows PowerShell 5.1 and PowerShell 7.
+[Bulk setup tests](../scripts/test-setup-xray-repos.ps1) cover discovery, worktrees,
+preserved settings, conflicts, no-write dry runs, one-time download dispatch and
+explicit process-stop consent. They require a built executable via `-XrayBinary`.
+CI runs these suites on Windows PowerShell 5.1 and PowerShell 7.
 
 ---
 

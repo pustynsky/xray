@@ -38,6 +38,12 @@ const MAX_SESSIONS: usize = 64;
 struct Configuration(BTreeMap<String, String>);
 
 impl Configuration {
+    fn includes_environment(key: &str) -> bool {
+        // Credential prompt controls belong to the MCP host, not the local indexes.
+        (key.starts_with("XRAY_") || key.starts_with("GIT_"))
+            && !matches!(key, "GIT_ASKPASS" | "GIT_TERMINAL_PROMPT")
+    }
+
     fn capture(args: &ServeArgs) -> io::Result<Self> {
         let mut args = args.clone();
         args.internal_backend = false;
@@ -52,7 +58,7 @@ impl Configuration {
         // Git configuration. Presence and value both participate in compatibility.
         for (key, value) in std::env::vars_os() {
             let key = key.to_string_lossy();
-            if key.starts_with("XRAY_") || key.starts_with("GIT_") {
+            if Self::includes_environment(&key) {
                 fields.insert(format!("env:{key}"), digest(value.as_encoded_bytes()));
             }
         }
@@ -777,6 +783,23 @@ mod tests {
         let first = Configuration(BTreeMap::from([("ext".into(), "rs".into()), ("env:GIT_CONFIG_VALUE_0".into(), "hash-a".into())]));
         let second = Configuration(BTreeMap::from([("ext".into(), "rs".into()), ("env:GIT_CONFIG_VALUE_0".into(), "hash-b".into())]));
         assert_eq!(first.differences(&second), ["env:GIT_CONFIG_VALUE_0"]);
+    }
+
+    #[test]
+    fn shared_configuration_excludes_only_git_prompt_controls() {
+        for key in ["GIT_ASKPASS", "GIT_TERMINAL_PROMPT", "VSCODE_GIT_ASKPASS_NODE", "SSH_ASKPASS", "PATH"] {
+            assert!(!Configuration::includes_environment(key), "{key}");
+        }
+        for key in [
+            "XRAY_BACKEND_IDLE_SECONDS", "XRAY_GUIDANCE_PREFIX",
+            "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+            "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
+            "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_NO_REPLACE_OBJECTS", "GIT_SHALLOW_FILE", "GIT_SSH_COMMAND", "GIT_TRACE",
+        ] {
+            assert!(Configuration::includes_environment(key), "{key}");
+        }
     }
 
     #[test]

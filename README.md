@@ -105,6 +105,14 @@ and removal steps. This is a preference, not an exclusive-tool guarantee.
 
 ### Installation
 
+Choose the setup scope:
+
+| What you need | Use | When to use it |
+|---|---|---|
+| One repository | [setup-xray.ps1](scripts/setup-xray.ps1) with `-RepoPath <path> -UserMcp` | First install, update, or migration for one checkout. Add `-MigrateLegacy` to migrate old workspace registrations. |
+| Existing Xray repositories under one directory | [setup-xray-repos.ps1](scripts/setup-xray-repos.ps1) with `-Root <path>` | Update the shared executable and migrate existing setups without enrolling other repositories. |
+| All discovered repositories under one directory | The bulk script with `-Root <path> -IncludeNewRepos` | Also create workspace profiles for checkouts that do not have Xray yet. |
+
 **Option A — automated setup (recommended).** Run the [setup script](scripts/setup-xray.ps1). It downloads the latest `xray.exe`, detects your project's file extensions, and configures both VS Code and GitHub Copilot CLI.
 
 The examples below use `-UserMcp` for VS Code SDK Agent Host, ordinary
@@ -168,6 +176,35 @@ The script does this:
 Ordinary setup leaves the root `.mcp.json` untouched. Legacy entries and filters require explicit migration consent, either an interactive confirmation or `-MigrateLegacy`. `-GitVisibility` is deprecated and accepted with a warning; it no longer selects an installation strategy.
 
 See the [Installation guide](docs/installation.md) for legacy migration, manual setup, Cline configuration, and the Roo Code note (the `-EnableRoo` switch is currently a no-op).
+
+**A4. Set up or migrate a directory of repositories.** Use the
+[bulk setup script](scripts/setup-xray-repos.ps1) when you have several checkouts,
+such as `C:\Repos\Service`, `C:\Repos\WebClient`, and `C:\Repos\Xray`.
+Run these commands from an Xray checkout, or download both setup scripts into
+the same directory and adjust the script path:
+
+```powershell
+# Existing Xray setups only: inspect the plan, then apply it.
+.\scripts\setup-xray-repos.ps1 -Root C:\Repos -DryRun
+.\scripts\setup-xray-repos.ps1 -Root C:\Repos
+
+# Also enroll repositories without Xray: inspect this broader plan first.
+.\scripts\setup-xray-repos.ps1 -Root C:\Repos -IncludeNewRepos -DryRun
+.\scripts\setup-xray-repos.ps1 -Root C:\Repos -IncludeNewRepos
+```
+
+Both bulk modes use one shared executable and separate workspace profiles
+outside Git. Existing supported settings are preserved; conflicting setups are
+reported rather than overwritten. Discovery stops at each checkout, so this
+does not include nested repositories inside it.
+
+`-DryRun` makes no changes or downloads. Applying the plan downloads the latest
+published executable once, affecting **all workspaces using it**, even outside
+`-Root`. Add `-SkipDownload` to keep a local/custom build. Close active Xray
+connections before replacing the executable, or explicitly allow `-KillRunning`;
+`-Force` only approves the plan, not process stops.
+See [bulk setup details](docs/installation.md#setup-across-a-repository-directory)
+for discovery rules, conflicts, and extension selection.
 
 **Option B — pre-built binary (manual).** Grab `xray.exe` from the [GitHub releases page](https://github.com/pustynsky/xray/releases) ([direct link](https://github.com/pustynsky/xray/releases/latest)), drop it into a folder, and follow the [Installation guide](docs/installation.md) for manual VS Code Copilot Chat / Roo Code / Cline setup.
 

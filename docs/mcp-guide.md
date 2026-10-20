@@ -15,7 +15,15 @@ Different workspaces have separate backends. Existing MCP configuration does not
 need to change, and no manual backend startup or administrator privileges are required.
 
 Connections must use the same normalized serve arguments, executable build, and
-`XRAY_*` / `GIT_*` environment settings. A conflict reports the differing setting
+`XRAY_*` / `GIT_*` environment settings, except `GIT_ASKPASS` and
+`GIT_TERMINAL_PROMPT`. These two credential-prompt controls belong to the MCP host,
+so VS Code and Copilot CLI can share a backend even when their values differ,
+are empty, or are missing. Git configuration, repository, index and object-path
+settings still participate in compatibility. This exception does not change the
+environment inherited by the backend or forward per-client credentials; Git
+commands use the backend's launch environment.
+
+A conflict reports the differing setting
 names instead of silently using the first client's settings or loading another
 copy. Extension order, case and duplicates are normalized. Reindex can rebuild the
 shared indexes, but cannot switch the workspace or change the indexed extensions.

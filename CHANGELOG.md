@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.9.3 (2026-10-21)
+
+- **Added repository-directory setup and migration.** `scripts/setup-xray-repos.ps1 -Root C:\Repos` plans personal MCP setup only for previously configured checkouts; `-IncludeNewRepos` also enrolls new ones. The script reuses the existing installer, preserves supported per-repository serve arguments and managed client fields, skips conflicting configurations with a nonzero exit code, and downloads the shared executable only once. `-DryRun` does not write, download, rename profiles, or stop processes. `-Force` approves the plan, while stopping processes for binary replacement requires separate `-KillRunning` consent.
+
+- **Fixed cross-client workspace backend conflicts from Git credential prompts.** VS Code and Copilot CLI/SDK can share a backend when `GIT_ASKPASS` or `GIT_TERMINAL_PROMPT` differs, is empty, or is absent. These MCP-host prompt controls no longer participate in compatibility; Git configuration, repository, index and object-path settings still do, and environment values remain hashed rather than disclosed. The backend's inherited Git environment is unchanged. Apply this native fix by updating the executable and restarting existing connections.
 
 - **Made workspace profile directories readable.** Personal MCP setup uses names such as `c_repos_myproject-22bf3ee8f773` instead of a full path hash. Repeat setup renames only the selected workspace's old directory, preserving its contents and backups without changing shared registrations or other workspace profiles. Restore migrates the directory too and can recover malformed or missing current JSON from a valid matching backup. Uninstall and dry-run handle old or malformed profiles without creating replacements, and an unused malformed backup does not block setup. Repeated checks warn once per unchanged malformed file; ordinary setup refuses a malformed current profile without overwriting its good backup. Conflicting profiles and mismatched roots are refused rather than overwritten.
 
