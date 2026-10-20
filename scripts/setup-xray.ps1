@@ -1069,14 +1069,84 @@ function Get-UserMcpTargets {
 }
 
 function Get-WorkspaceProfilePath {
-    param([string]$Profiles, [string]$RepoRoot)
+    param([string]$Profiles, [string]$RepoRoot, [switch]$Legacy)
     $hash = [Security.Cryptography.SHA256]::Create()
     try {
         $key = [IO.Path]::GetFullPath($RepoRoot).TrimEnd('\', '/').ToLowerInvariant()
         $id = ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($key)))).Replace('-', '').ToLowerInvariant()
+        if (-not $Legacy) {
+            $label = ($key -replace '[^a-z0-9]+', '_').Trim('_')
+            if ($label.Length -gt 64) { $label = $label.Substring(0, 64).TrimEnd('_') }
+            if (-not $label) { $label = 'workspace' }
+            $id = "$label-$($id.Substring(0, 12))"
+        }
         return Join-Path (Join-Path $Profiles $id) 'config.json'
     }
     finally { $hash.Dispose() }
+}
+
+function Resolve-WorkspaceProfile {
+    param([string]$Profiles, [string]$RepoRoot, [switch]$Migrate,
+        [ValidateSet('Setup', 'Restore', 'Uninstall')] [string]$Action = 'Setup',
+        [hashtable]$ReportedWarnings)
+    $profilePath = Get-WorkspaceProfilePath $Profiles $RepoRoot
+    $legacyPath = Get-WorkspaceProfilePath $Profiles $RepoRoot -Legacy
+    $root = [IO.Path]::GetFullPath($RepoRoot).TrimEnd('\', '/')
+    $found = @()
+    $profile = $null
+    foreach ($path in @($profilePath, $legacyPath)) {
+        $exists = $false
+        foreach ($candidate in @($path, "$path.bak")) {
+            if (-not (Test-Path -LiteralPath $candidate)) { continue }
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+                throw "Invalid workspace profile path: $candidate. Expected a file."
+            }
+            $document = [PSCustomObject]@{ Path = $candidate; Text = [IO.File]::ReadAllText($candidate); Value = $null }
+            try {
+                $document.Value = ConvertFrom-SetupJson -Text $document.Text -Path $candidate
+                if ($null -eq $document.Value) { throw "Expected a JSON object in $candidate." }
+            }
+            catch [Management.Automation.RuntimeException] {
+                $required = ($Action -eq 'Setup' -and $candidate -ceq $path) -or
+                    ($Action -eq 'Restore' -and $candidate -ceq "$path.bak")
+                if ($required) { throw }
+                if ($null -eq $ReportedWarnings -or -not $ReportedWarnings.ContainsKey($candidate) -or
+                    $ReportedWarnings[$candidate] -cne $document.Text) {
+                    Write-Warning "Invalid workspace profile JSON in $candidate. Continuing $Action without using its contents. $($_.Exception.Message)"
+                    if ($null -ne $ReportedWarnings) { $ReportedWarnings[$candidate] = $document.Text }
+                }
+            }
+            if ($null -ne $document.Value) {
+                $storedRoot = $document.Value.workspaceRoot
+                if ($storedRoot -isnot [string] -or -not [IO.Path]::IsPathRooted($storedRoot) -or
+                    [IO.Path]::GetFullPath($storedRoot).TrimEnd('\', '/') -ine $root) {
+                    throw "Invalid workspace profile root in $candidate. Expected $RepoRoot. No profile was changed."
+                }
+            }
+            $exists = $true
+            if ($candidate -ceq $path) { $profile = $document }
+        }
+        if ($exists) { $found += $path }
+    }
+    if ($found.Count -gt 1) {
+        throw "Multiple workspace profiles for $RepoRoot`: $($found -join ', '). Resolve the duplicate before retrying setup."
+    }
+    if ($found.Count -eq 0) { return Read-SetupJson -Path $profilePath }
+    if ($found[0] -ceq $legacyPath) {
+        if ($Migrate) {
+            $oldDirectory = Split-Path -Parent $legacyPath
+            $newDirectory = Split-Path -Parent $profilePath
+            if (Test-Path -LiteralPath $newDirectory) {
+                throw "Cannot rename workspace profile to $newDirectory`: the destination already exists. No profile was changed."
+            }
+            Rename-Item -LiteralPath $oldDirectory -NewName (Split-Path -Leaf $newDirectory) -ErrorAction Stop
+            Write-Host "Renamed workspace profile: $oldDirectory -> $newDirectory"
+        }
+        else { $profilePath = $legacyPath }
+    }
+    if ($null -eq $profile) { return [PSCustomObject]@{ Path = $profilePath; Text = $null; Value = [PSCustomObject]@{} } }
+    $profile.Path = $profilePath
+    return $profile
 }
 
 function Test-ManagedUserMcpEntry {
@@ -1457,7 +1527,14 @@ if ($UserMcp) {
             Write-Error "-UserMcp files must be outside the repository: $path"; exit 1
         }
     }
+    $profileAction = if ($Restore) { 'Restore' } elseif ($Uninstall) { 'Uninstall' } else { 'Setup' }
+    $profileWarnings = @{}
+    $profile = Resolve-WorkspaceProfile $profilesPath $RepoPath -Action $profileAction -ReportedWarnings $profileWarnings
+    $profilePath = $profile.Path
     if ($Restore) {
+        if (-not (Test-Path -LiteralPath "$profilePath.bak")) { Write-Error "No workspace profile backup found: $profilePath.bak"; exit 1 }
+        $profile = Resolve-WorkspaceProfile $profilesPath $RepoPath -Migrate -Action Restore -ReportedWarnings $profileWarnings
+        $profilePath = $profile.Path
         if (-not (Restore-McpJson -Path $profilePath)) { Write-Error "No workspace profile backup found: $profilePath.bak"; exit 1 }
         exit 0
     }
@@ -1781,7 +1858,8 @@ $xrayArgs = @(
 if ($UserMcp) {
     $capability = @(& $xrayPath serve-workspace --help 2>&1)
     if ($LASTEXITCODE -ne 0) { Write-Error "The installed Xray does not support serve-workspace. Upgrade the executable before using -UserMcp. $($capability -join ' ')"; exit 1 }
-    $profile = Read-SetupJson -Path $profilePath
+    $profile = Resolve-WorkspaceProfile $profilesPath $RepoPath -Migrate -ReportedWarnings $profileWarnings
+    $profilePath = $profile.Path
     $profile.Value = [PSCustomObject][ordered]@{
         version = 1; workspaceRoot = $RepoPath
         args = @('--ext', $selectedExts, '--watch', '--definitions', '--debug-log')

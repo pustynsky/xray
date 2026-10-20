@@ -284,9 +284,35 @@ dispatcher or `copilot-xray.cmd`.
 | VS Code named profile | `%APPDATA%\Code\User\profiles\<id>\mcp.json` |
 | Workspace-specific Xray settings | `<InstallDir>\workspaces\<workspace-id>\config.json` |
 
-`InstallDir` defaults to `%LOCALAPPDATA%\xray`. The workspace ID is a SHA256 of
-the normalized absolute workspace path. Neither profiles nor personal client
-configs may be stored inside the repository in this mode.
+`InstallDir` defaults to `%LOCALAPPDATA%\xray`. The workspace ID combines a
+readable version of the normalized absolute path with the first 12 characters
+of its SHA256. For example, `C:\Repos\MyProject` uses
+`workspaces\c_repos_myproject-22bf3ee8f773\config.json`. Non-alphanumeric
+characters become underscores, and the readable prefix is limited to 64
+characters. The hash distinguishes paths with the same readable prefix.
+Neither profiles nor personal client configs may be stored inside the
+repository in this mode.
+
+On the next `-UserMcp` setup for a workspace, the installer renames its old
+hash-only directory after client and executable preflight succeeds. The
+configuration, backup, and other directory contents move together; profiles
+for other workspaces are left alone. This rename does not require
+`-MigrateLegacy`, which controls removal of old workspace MCP registrations.
+As with any repeat setup, the selected profile is then configured from the
+current setup options. `-Restore` also migrates the directory; uninstall
+can remove an old profile directly, and `-Uninstall -DryRun` never renames it.
+Conflicting profiles or a profile belonging to a different root are refused
+without overwriting them.
+
+`-Restore` requires a valid backup for the selected workspace, but can recover a
+malformed or missing current profile. Uninstall and dry-run warn about malformed
+profile JSON and can remove or report those files without parsing them
+successfully. A malformed backup does not block ordinary setup; it is not used
+as the source of the new settings. Valid JSON that names a different workspace
+is still refused in every mode, and filesystem read errors remain fatal.
+Repeated validation reports each unchanged malformed file only once per setup
+run. Ordinary setup refuses a malformed current profile without replacing its
+backup; use `-Restore` with a valid matching backup to recover it.
 
 For VS Code, setup resolves folder-to-profile associations in the standard
 user-data directory and honors profiles that inherit the default MCP config.

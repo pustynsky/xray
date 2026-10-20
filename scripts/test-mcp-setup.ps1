@@ -115,10 +115,27 @@ function New-UserMcpFixture {
 }
 
 function Invoke-UserMcpSetup {
-    param($Fixture, [hashtable]$Parameters = @{})
+    param($Fixture, [hashtable]$Parameters = @{}, [switch]$Inline)
     $options = @{ UserMcp = $true; VSCodeMcpPath = (Join-Path $Fixture.Home 'vscode\mcp.json') }
     foreach ($key in $Parameters.Keys) { $options[$key] = $Parameters[$key] }
-    Invoke-FixtureSetup $Fixture $options
+    Invoke-FixtureSetup $Fixture $options -Inline:$Inline
+}
+
+function Move-FixtureProfileToLegacy {
+    param($Fixture)
+    $profiles = Join-Path $Fixture.Install 'workspaces'
+    $current = Get-WorkspaceProfilePath $profiles $Fixture.Repo
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $key = [IO.Path]::GetFullPath($Fixture.Repo).TrimEnd('\', '/').ToLowerInvariant()
+        $id = ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($key)))).Replace('-', '').ToLowerInvariant()
+        $legacy = Join-Path (Join-Path $profiles $id) 'config.json'
+    }
+    finally { $hash.Dispose() }
+    if ($current -ine $legacy) {
+        [IO.Directory]::Move((Split-Path -Parent $current), (Split-Path -Parent $legacy))
+    }
+    return $legacy
 }
 
 function Invoke-FixtureProcess {
@@ -197,6 +214,289 @@ try {
 
     if ($UserMcpOnly -and -not $XrayBinary) { throw '-UserMcpOnly requires -XrayBinary.' }
     if ($XrayBinary) {
+        Test-Case 'personal profile names are readable stable bounded and distinct' {
+            $profiles = 'C:\Profiles'
+            $path = Get-WorkspaceProfilePath $profiles 'C:\Repos\MyProject'
+            Assert-True ($path -ceq 'C:\Profiles\c_repos_myproject-22bf3ee8f773\config.json') 'Readable path with the expected hash suffix'
+            Assert-True ((Get-WorkspaceProfilePath $profiles 'C:\REPOS\MyProject\') -ceq $path) 'Case and trailing separators do not change the name'
+            Assert-True ((Get-WorkspaceProfilePath $profiles 'C:\Repos\unused\..\MyProject') -ceq $path) 'Dot components are normalized'
+            $unc = Get-WorkspaceProfilePath $profiles '\\server\share\My Project'
+            Assert-True ((Split-Path -Leaf (Split-Path -Parent $unc)) -cmatch '^server_share_my_project-[a-f0-9]{12}$') 'UNC paths and spaces produce safe readable names'
+            $a = Get-WorkspaceProfilePath $profiles 'C:\Repos\foo_bar'
+            $b = Get-WorkspaceProfilePath $profiles 'C:\Repos\foo\bar'
+            Assert-True ($a -cne $b) 'Different roots with the same readable prefix remain distinct'
+            $long = Get-WorkspaceProfilePath $profiles ('C:\Repos\' + ('a' * 180))
+            $name = Split-Path -Leaf (Split-Path -Parent $long)
+            Assert-True ($name.Length -le 77 -and $name -cmatch '^[a-z0-9_]+-[a-f0-9]{12}$') 'Long paths produce bounded safe directory names'
+        }
+
+        Test-Case 'personal profile migration renames only the selected workspace and preserves backups' {
+            $a = New-UserMcpFixture
+            $b = New-Fixture
+            $b.Install = $a.Install
+            $b.Home = $a.Home
+            Assert-Success (Invoke-UserMcpSetup $a)
+            Assert-Success (Invoke-UserMcpSetup $b @{ Extensions = 'rs' })
+            $profiles = Join-Path $a.Install 'workspaces'
+            $aPath = Get-WorkspaceProfilePath $profiles $a.Repo
+            $bPath = Get-WorkspaceProfilePath $profiles $b.Repo
+            $before = [IO.File]::ReadAllText($aPath)
+            $backup = $before.Replace('cs,md', 'ts')
+            Write-FixtureFile "$aPath.bak" $backup
+            Write-FixtureFile (Join-Path (Split-Path -Parent $aPath) 'keep.txt') 'preserve this file'
+            $aLegacy = Move-FixtureProfileToLegacy $a
+            $bLegacy = Move-FixtureProfileToLegacy $b
+            $cli = Join-Path $a.Home 'mcp-config.json'
+            $vscode = Join-Path $a.Home 'vscode\mcp.json'
+            $unchanged = @{}
+            foreach ($path in @($bLegacy, $cli, $vscode)) { $unchanged[$path] = (Get-FileHash $path).Hash }
+            Assert-Success (Invoke-UserMcpSetup $a)
+            Assert-True (-not (Test-Path -LiteralPath (Split-Path -Parent $aLegacy))) 'Old selected workspace directory is gone'
+            Assert-True ([IO.File]::ReadAllText($aPath) -ceq $before) 'Renaming preserves unchanged profile bytes'
+            Assert-True ([IO.File]::ReadAllText("$aPath.bak") -ceq $backup) 'Existing backup follows the profile without being overwritten'
+            Assert-True ([IO.File]::ReadAllText((Join-Path (Split-Path -Parent $aPath) 'keep.txt')) -ceq 'preserve this file') 'Other directory contents are preserved'
+            foreach ($path in $unchanged.Keys) { Assert-True ((Get-FileHash $path).Hash -ceq $unchanged[$path]) "Unrelated profile or shared registration unchanged: $path" }
+            Assert-True (@(Get-WorkspaceProfileFiles $profiles).Count -eq 2) 'Migration leaves one profile per workspace'
+            $time = (Get-Item -LiteralPath $aPath).LastWriteTimeUtc
+            Assert-Success (Invoke-UserMcpSetup $a)
+            Assert-True ((Get-Item -LiteralPath $aPath).LastWriteTimeUtc -eq $time) 'Repeated setup does not rewrite the migrated profile'
+            Assert-True (-not (Test-Path -LiteralPath $aLegacy)) 'Repeated setup does not recreate the old profile'
+        }
+
+        Test-Case 'personal profile legacy restore and uninstall preserve lifecycle behavior' {
+            foreach ($action in @('restore', 'uninstall')) {
+                $f = New-UserMcpFixture
+                Assert-Success (Invoke-UserMcpSetup $f)
+                $profile = Get-WorkspaceProfilePath (Join-Path $f.Install 'workspaces') $f.Repo
+                $before = [IO.File]::ReadAllText($profile)
+                Assert-Success (Invoke-UserMcpSetup $f @{ Extensions = 'ts' })
+                $legacy = Move-FixtureProfileToLegacy $f
+                $cli = Join-Path $f.Home 'mcp-config.json'
+                $registration = [IO.File]::ReadAllText($cli)
+                if ($action -eq 'restore') {
+                    Assert-Success (Invoke-UserMcpSetup $f @{ Restore = $true })
+                    Assert-True ([IO.File]::ReadAllText($profile) -ceq $before) 'Restore migrates the directory and restores the old settings'
+                    Assert-True (-not (Test-Path -LiteralPath $legacy)) 'Restore does not leave the old profile'
+                    Assert-True ([IO.File]::ReadAllText($cli) -ceq $registration) 'Restore leaves the shared registration unchanged'
+                }
+                else {
+                    $paths = @($legacy, "$legacy.bak", $cli, (Join-Path $f.Home 'vscode\mcp.json'))
+                    $hashes = @{}
+                    foreach ($path in $paths) { $hashes[$path] = (Get-FileHash $path).Hash }
+                    Assert-Success (Invoke-UserMcpSetup $f @{ Uninstall = $true; DryRun = $true })
+                    foreach ($path in $paths) { Assert-True ((Get-FileHash $path).Hash -ceq $hashes[$path]) "Dry run preserves legacy state: $path" }
+                    Assert-True (-not (Test-Path -LiteralPath $profile)) 'Dry run does not create a readable profile'
+                    Assert-Success (Invoke-UserMcpSetup $f @{ Uninstall = $true })
+                    Assert-True (-not (Test-Path -LiteralPath $legacy) -and -not (Test-Path -LiteralPath "$legacy.bak")) 'Uninstall removes the old profile and backup'
+                    Assert-True (-not (Test-Path -LiteralPath $profile)) 'Uninstall does not create a replacement profile'
+                    Assert-True (-not (Get-FixtureJson $cli).mcpServers.PSObject.Properties['xray']) 'Last legacy profile uninstall removes the managed registration'
+                }
+            }
+        }
+
+        Test-Case 'personal profile migration refuses wrong roots and duplicate profiles without writes' {
+            foreach ($kind in @('legacy-root', 'readable-root', 'backup-root', 'duplicate')) {
+                $f = New-UserMcpFixture
+                Assert-Success (Invoke-UserMcpSetup $f)
+                $profile = Get-WorkspaceProfilePath (Join-Path $f.Install 'workspaces') $f.Repo
+                $original = [IO.File]::ReadAllText($profile)
+                $legacy = if ($kind -eq 'readable-root') { $null } else { Move-FixtureProfileToLegacy $f }
+                $path = if ($legacy) { $legacy } else { $profile }
+                if ($kind -eq 'duplicate') { Write-FixtureFile $profile $original }
+                else {
+                    $changed = Get-FixtureJson $path
+                    $changed.workspaceRoot = Join-Path $f.Repo 'other'
+                    if ($kind -eq 'backup-root') { $path = "$path.bak" }
+                    Write-FixtureFile $path ($changed | ConvertTo-Json -Depth 10)
+                }
+                $files = @(Get-ChildItem -LiteralPath $f.Install, $f.Home -Recurse -File)
+                $before = @{}
+                foreach ($file in $files) { $before[$file.FullName] = (Get-FileHash $file.FullName).Hash }
+                foreach ($options in @(@{}, @{ Restore = $true }, @{ Uninstall = $true }, @{ Uninstall = $true; DryRun = $true })) {
+                    $result = Invoke-UserMcpSetup $f $options
+                    Assert-True ($result.ExitCode -ne 0 -and $result.Output -match 'workspace profile') "Unsafe profile operation explicitly refused: $kind"
+                    foreach ($file in $before.Keys) { Assert-True ((Get-FileHash $file).Hash -ceq $before[$file]) "Refusal preserves bytes: $kind, $file" }
+                    Assert-True (@(Get-ChildItem -LiteralPath $f.Install, $f.Home -Recurse -File).Count -eq $files.Count) 'Refusal creates no files or backups'
+                }
+            }
+        }
+
+        Test-Case 'personal profile recovery restores corrupt or missing current JSON from a matching backup' {
+            foreach ($legacy in @($false, $true)) {
+                foreach ($inline in @($false, $true)) {
+                    $f = New-UserMcpFixture
+                    Assert-Success (Invoke-UserMcpSetup $f)
+                    $profile = Get-WorkspaceProfilePath (Join-Path $f.Install 'workspaces') $f.Repo
+                    $original = [IO.File]::ReadAllText($profile)
+                    Write-FixtureFile "$profile.bak" $original
+                    $current = if ($legacy) { Move-FixtureProfileToLegacy $f } else { $profile }
+                    $corrupt = if ($inline) { '' } elseif ($legacy) { '[]' } else { '{' }
+                    Write-FixtureFile $current $corrupt
+                    $cli = Join-Path $f.Home 'mcp-config.json'
+                    $vscode = Join-Path $f.Home 'vscode\mcp.json'
+                    $before = @{}
+                    foreach ($path in @($cli, $vscode)) { $before[$path] = (Get-FileHash $path).Hash }
+                    $result = Invoke-UserMcpSetup $f @{ Restore = $true } -Inline:$inline
+                    Assert-Success $result
+                    Assert-True ([regex]::Matches($result.Output, 'Invalid workspace profile JSON').Count -eq 1) 'Recovery warns once about the unchanged corrupt current profile'
+                    Assert-True ([IO.File]::ReadAllText($profile) -ceq $original) 'Exact matching backup restored over corrupt JSON'
+                    Assert-True (-not (Test-Path -LiteralPath "$profile.bak")) 'Successful restore consumes the backup'
+                    if ($legacy) { Assert-True (-not (Test-Path -LiteralPath (Split-Path -Parent $current))) 'Restore migrates the old directory without leaving a duplicate' }
+                    foreach ($path in $before.Keys) { Assert-True ((Get-FileHash $path).Hash -ceq $before[$path]) 'Recovery leaves shared registrations unchanged' }
+                    Write-FixtureFile "$profile.bak" $original
+                    Remove-Item -LiteralPath $profile -Force
+                    if ($legacy) { $null = Move-FixtureProfileToLegacy $f }
+                    Assert-Success (Invoke-UserMcpSetup $f @{ Restore = $true } -Inline:$inline)
+                    Assert-True ([IO.File]::ReadAllText($profile) -ceq $original) 'Backup-only directory restores without requiring a current profile'
+                }
+            }
+        }
+
+        Test-Case 'personal profile recovery uninstall handles corrupt JSON and preserves dry run and other workspaces' {
+            foreach ($legacy in @($false, $true)) {
+                foreach ($damage in @('current', 'backup', 'both')) {
+                    $f = New-UserMcpFixture
+                    $other = New-Fixture
+                    $other.Install = $f.Install
+                    $other.Home = $f.Home
+                    Assert-Success (Invoke-UserMcpSetup $f)
+                    Assert-Success (Invoke-UserMcpSetup $other)
+                    $profiles = Join-Path $f.Install 'workspaces'
+                    $readable = Get-WorkspaceProfilePath $profiles $f.Repo
+                    $otherProfile = Get-WorkspaceProfilePath $profiles $other.Repo
+                    $original = [IO.File]::ReadAllText($readable)
+                    Write-FixtureFile "$readable.bak" $original
+                    $profile = if ($legacy) { Move-FixtureProfileToLegacy $f } else { $readable }
+                    if ($damage -in @('current', 'both')) { Write-FixtureFile $profile $(if ($damage -eq 'both') { '[]' } else { '{' }) }
+                    if ($damage -in @('backup', 'both')) { Write-FixtureFile "$profile.bak" $(if ($damage -eq 'both') { '' } else { '{' }) }
+                    $cli = Join-Path $f.Home 'mcp-config.json'
+                    $vscode = Join-Path $f.Home 'vscode\mcp.json'
+                    $paths = @($profile, "$profile.bak", $otherProfile, $cli, $vscode)
+                    $before = @{}
+                    foreach ($path in $paths) { $before[$path] = (Get-FileHash $path).Hash }
+                    $result = Invoke-UserMcpSetup $f @{ Uninstall = $true; DryRun = $true } -Inline:$legacy
+                    Assert-Success $result
+                    Assert-True ($result.Output -match 'Invalid workspace profile JSON') 'Dry run reports malformed profile JSON explicitly'
+                    foreach ($path in $paths) { Assert-True ((Get-FileHash $path).Hash -ceq $before[$path]) 'Dry run preserves all profile and client bytes' }
+                    if ($legacy) { Assert-True (-not (Test-Path -LiteralPath $readable)) 'Dry run does not migrate a corrupt old profile' }
+                    $result = Invoke-UserMcpSetup $f @{ Uninstall = $true } -Inline:(-not $legacy)
+                    Assert-Success $result
+                    Assert-True ($result.Output -match 'Invalid workspace profile JSON') 'Uninstall reports malformed profile JSON explicitly'
+                    Assert-True (-not (Test-Path -LiteralPath $profile) -and -not (Test-Path -LiteralPath "$profile.bak")) 'Uninstall removes corrupt profile and backup'
+                    foreach ($path in @($otherProfile, $cli, $vscode)) { Assert-True ((Get-FileHash $path).Hash -ceq $before[$path]) 'Other workspace and shared registrations remain unchanged' }
+                    Write-FixtureFile $profile '{'
+                    Write-FixtureFile "$profile.bak" '{'
+                    Assert-Success (Invoke-UserMcpSetup $other @{ Uninstall = $true })
+                    Assert-Success (Invoke-UserMcpSetup $f @{ Uninstall = $true; KeepBackups = $true })
+                    Assert-True (-not (Test-Path -LiteralPath $profile) -and [IO.File]::ReadAllText("$profile.bak") -ceq '{') 'KeepBackups retains the corrupt backup without blocking profile removal'
+                    Assert-True (-not (Get-FixtureJson $cli).mcpServers.PSObject.Properties['xray']) 'Last corrupt profile removal cleans shared registration'
+                }
+            }
+        }
+
+        Test-Case 'personal profile recovery setup tolerates corrupt backups but restore refuses them without writes' {
+            foreach ($legacy in @($false, $true)) {
+                $f = New-UserMcpFixture
+                Assert-Success (Invoke-UserMcpSetup $f)
+                $readable = Get-WorkspaceProfilePath (Join-Path $f.Install 'workspaces') $f.Repo
+                $original = [IO.File]::ReadAllText($readable)
+                $badBackup = if ($legacy) { '[]' } else { '{' }
+                Write-FixtureFile "$readable.bak" $badBackup
+                $profile = if ($legacy) { Move-FixtureProfileToLegacy $f } else { $readable }
+                $cli = Join-Path $f.Home 'mcp-config.json'
+                $paths = @($profile, "$profile.bak", $cli)
+                $before = @{}
+                foreach ($path in $paths) { $before[$path] = (Get-FileHash $path).Hash }
+                $result = Invoke-UserMcpSetup $f @{ Restore = $true } -Inline:$legacy
+                Assert-True ($result.ExitCode -ne 0) 'Restore refuses a corrupt backup explicitly'
+                foreach ($path in $paths) { Assert-True ((Get-FileHash $path).Hash -ceq $before[$path]) 'Failed restore preserves existing profile, backup and client bytes' }
+                if ($legacy) { Assert-True (-not (Test-Path -LiteralPath $readable)) 'Failed restore does not rename the old directory' }
+                $result = Invoke-UserMcpSetup $f -Inline:$legacy
+                Assert-Success $result
+                Assert-True ([regex]::Matches($result.Output, 'Invalid workspace profile JSON').Count -eq 1) 'Setup warns once about the unchanged unused corrupt backup'
+                Assert-True ([IO.File]::ReadAllText($readable) -ceq $original) 'Unchanged setup preserves current profile bytes'
+                Assert-True ([IO.File]::ReadAllText("$readable.bak") -ceq $badBackup) 'Unchanged setup does not overwrite the unused corrupt backup'
+                Assert-Success (Invoke-UserMcpSetup $f @{ Extensions = 'ts' } -Inline:$legacy)
+                Assert-True ([IO.File]::ReadAllText("$readable.bak") -ceq $original) 'Changed setup replaces the stale backup with the approved current profile'
+                Assert-True ((Get-FixtureJson $readable).args[1] -eq 'ts') 'Setup applies requested settings despite a stale corrupt backup'
+            }
+        }
+
+        Test-Case 'personal profile recovery setup preserves a good backup when the current profile is corrupt' {
+            foreach ($legacy in @($false, $true)) {
+                foreach ($inline in @($false, $true)) {
+                    $f = New-UserMcpFixture
+                    Assert-Success (Invoke-UserMcpSetup $f)
+                    $readable = Get-WorkspaceProfilePath (Join-Path $f.Install 'workspaces') $f.Repo
+                    $original = [IO.File]::ReadAllText($readable)
+                    Write-FixtureFile "$readable.bak" $original
+                    $profile = if ($legacy) { Move-FixtureProfileToLegacy $f } else { $readable }
+                    Write-FixtureFile $profile '{'
+                    $paths = @($profile, "$profile.bak", (Join-Path $f.Home 'mcp-config.json'), (Join-Path $f.Home 'vscode\mcp.json'))
+                    $before = @{}
+                    foreach ($path in $paths) { $before[$path] = (Get-FileHash $path).Hash }
+                    $result = Invoke-UserMcpSetup $f @{ Extensions = 'ts' } -Inline:$inline
+                    Assert-True ($result.ExitCode -ne 0) 'Setup refuses a corrupt current profile rather than replacing the good backup'
+                    foreach ($path in $paths) { Assert-True ((Get-FileHash $path).Hash -ceq $before[$path]) 'Refused setup preserves profile, backup and shared registrations' }
+                    if ($legacy) { Assert-True (-not (Test-Path -LiteralPath (Split-Path -Parent $readable))) 'Refused setup does not rename the old profile directory' }
+                }
+            }
+        }
+
+        Test-Case 'personal profile recovery warning deduplication does not skip revalidation' {
+            $f = New-Fixture
+            $profiles = Join-Path $f.Install 'workspaces'
+            $profile = Get-WorkspaceProfilePath $profiles $f.Repo
+            $text = @{ version = 1; workspaceRoot = $f.Repo; args = @() } | ConvertTo-Json -Depth 8
+            Write-FixtureFile $profile $text
+            Write-FixtureFile "$profile.bak" '{'
+            $reported = @{}
+            $first = @(Resolve-WorkspaceProfile $profiles $f.Repo -ReportedWarnings $reported 3>&1)
+            $second = @(Resolve-WorkspaceProfile $profiles $f.Repo -ReportedWarnings $reported 3>&1)
+            Assert-True (@($first | Where-Object { $_ -is [Management.Automation.WarningRecord] }).Count -eq 1) 'First validation reports malformed JSON'
+            Assert-True (@($second | Where-Object { $_ -is [Management.Automation.WarningRecord] }).Count -eq 0) 'Unchanged malformed JSON is not reported twice'
+            Write-FixtureFile "$profile.bak" '['
+            $changed = @(Resolve-WorkspaceProfile $profiles $f.Repo -ReportedWarnings $reported 3>&1)
+            Assert-True (@($changed | Where-Object { $_ -is [Management.Automation.WarningRecord] }).Count -eq 1) 'New malformed contents are still reported'
+            $foreign = @{ version = 1; workspaceRoot = (Join-Path $f.Repo 'other'); args = @() } | ConvertTo-Json -Depth 8
+            Write-FixtureFile "$profile.bak" $foreign
+            $rejected = $false
+            try { $null = Resolve-WorkspaceProfile $profiles $f.Repo -ReportedWarnings $reported }
+            catch { $rejected = $_.Exception.Message -like '*Invalid workspace profile root*' }
+            Assert-True $rejected 'Repeated validation still refuses a replacement backup belonging to another workspace'
+            Assert-True ([IO.File]::ReadAllText($profile) -ceq $text -and [IO.File]::ReadAllText("$profile.bak") -ceq $foreign) 'Repeated validation leaves both files untouched'
+        }
+
+        Test-Case 'personal profile migration refuses an occupied destination' {
+            $f = New-UserMcpFixture
+            Assert-Success (Invoke-UserMcpSetup $f)
+            $profile = Get-WorkspaceProfilePath (Join-Path $f.Install 'workspaces') $f.Repo
+            $legacy = Move-FixtureProfileToLegacy $f
+            $before = [IO.File]::ReadAllText($legacy)
+            $foreign = Join-Path (Split-Path -Parent $profile) 'keep.txt'
+            Write-FixtureFile $foreign 'unrelated directory'
+            $result = Invoke-UserMcpSetup $f
+            Assert-True ($result.ExitCode -ne 0) 'Occupied destination refuses migration'
+            Assert-True ([IO.File]::ReadAllText($legacy) -ceq $before) 'Failed rename preserves the old profile'
+            Assert-True ([IO.File]::ReadAllText($foreign) -ceq 'unrelated directory') 'Occupied destination is not replaced or merged'
+        }
+
+        Test-Case 'personal profile migration waits for client and executable preflight' {
+            foreach ($failure in @('client', 'executable')) {
+                $f = New-UserMcpFixture
+                Assert-Success (Invoke-UserMcpSetup $f)
+                $profile = Get-WorkspaceProfilePath (Join-Path $f.Install 'workspaces') $f.Repo
+                $legacy = Move-FixtureProfileToLegacy $f
+                $before = [IO.File]::ReadAllText($legacy)
+                if ($failure -eq 'client') { Write-FixtureFile (Join-Path $f.Home 'mcp-config.json') '{' }
+                else { Write-FixtureFile (Join-Path $f.Install 'xray.exe') 'unsupported executable' }
+                $result = Invoke-UserMcpSetup $f
+                Assert-True ($result.ExitCode -ne 0) "Preflight fails: $failure"
+                Assert-True ([IO.File]::ReadAllText($legacy) -ceq $before) "Legacy profile untouched before successful preflight: $failure"
+                Assert-True (-not (Test-Path -LiteralPath $profile)) "No new profile on failed preflight: $failure"
+            }
+        }
+
         Test-Case 'personal lifecycle rejects restore and uninstall together before writes' {
             $f = New-UserMcpFixture
             Assert-Success (Invoke-UserMcpSetup $f)
