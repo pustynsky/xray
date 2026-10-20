@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Made workspace profile directories readable.** Personal MCP setup uses names such as `c_repos_myproject-22bf3ee8f773` instead of a full path hash. Repeat setup renames only the selected workspace's old directory, preserving its contents and backups without changing shared registrations or other workspace profiles. Restore migrates the directory too and can recover malformed or missing current JSON from a valid matching backup. Uninstall and dry-run handle old or malformed profiles without creating replacements, and an unused malformed backup does not block setup. Repeated checks warn once per unchanged malformed file; ordinary setup refuses a malformed current profile without overwriting its good backup. Conflicting profiles and mismatched roots are refused rather than overwritten.
+
 ## 0.9.2 (2026-10-20)
 
 - **Clarified installation, updates, and migration.** Quick-start examples select personal MCP explicitly and explain that personal mode always includes CLI/SDK for Agent Host, even with `-EnableVSCode`. The update guide distinguishes repeat setup, one-time workspace migration, and binary-only replacement, uses the actual default installation path, and explains shared-process shutdown, extension selection, and post-update verification.
