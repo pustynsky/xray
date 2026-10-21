@@ -83,11 +83,13 @@ function Set-TestLegacy {
 }
 
 function Invoke-BulkFixture {
-    param($Fixture, [hashtable]$Parameters = @{}, [string]$Script = $bulkScript)
+    param($Fixture, [hashtable]$Parameters = @{}, [string]$Script = $bulkScript,
+        [switch]$CaptureProgress, [string[]]$ForbiddenDiscoveryPaths = @())
     # An invalid owner/repo keeps a regressed download guard offline.
     $arguments = @{ Root = $Fixture.Root; InstallDir = $Fixture.Install; VSCodeMcpPath = $Fixture.VSCode; SkipDownload = $true; Force = $true; GithubRepo = 'offline-tests-disabled' }
     foreach ($key in $Parameters.Keys) { $arguments[$key] = $Parameters[$key] }
-    $payload = @{ Script = $Script; Arguments = $arguments; Fixture = $Fixture } | ConvertTo-Json -Depth 12 -Compress
+    $payload = @{ Script = $Script; Arguments = $arguments; Fixture = $Fixture
+        CaptureProgress = [bool]$CaptureProgress; ForbiddenDiscoveryPaths = $ForbiddenDiscoveryPaths } | ConvertTo-Json -Depth 12 -Compress
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
     $code = @'
 $ErrorActionPreference = 'Stop'
@@ -100,10 +102,43 @@ $env:COPILOT_HOME = $payload.Fixture.Home
 $env:APPDATA = $payload.Fixture.AppData
 $env:LOCALAPPDATA = $payload.Fixture.LocalAppData
 $env:VSCODE_PORTABLE = ''
+if ($payload.CaptureProgress) {
+    $global:bulkProgressRecords = [Collections.Generic.List[object]]::new()
+    function Write-Progress {
+        param([int]$Id, [string]$Activity, [string]$Status, [string]$CurrentOperation,
+            [int]$PercentComplete = -1, [switch]$Completed)
+        $global:bulkProgressRecords.Add([PSCustomObject]@{
+            Id = $Id; Activity = $Activity; Status = $Status; CurrentOperation = $CurrentOperation
+            PercentComplete = $PercentComplete; Completed = [bool]$Completed
+        })
+    }
+}
+if (@($payload.ForbiddenDiscoveryPaths).Count -gt 0) {
+    $bulkGetChildItem = Get-Command Get-ChildItem -CommandType Cmdlet
+    function Get-ChildItem {
+        [CmdletBinding()]
+        param([string]$LiteralPath, [switch]$Directory, [switch]$Force)
+        foreach ($forbidden in $payload.ForbiddenDiscoveryPaths) {
+            if ($LiteralPath -and ($LiteralPath -ieq $forbidden -or
+                $LiteralPath.StartsWith($forbidden + '\', [StringComparison]::OrdinalIgnoreCase))) {
+                throw "Test attempted to enumerate an excluded tree: $LiteralPath"
+            }
+        }
+        & $bulkGetChildItem @PSBoundParameters
+    }
+}
 $parameters = @{}
 foreach ($property in $payload.Arguments.PSObject.Properties) { $parameters[$property.Name] = $property.Value }
-& $payload.Script @parameters
-exit $LASTEXITCODE
+try {
+    & $payload.Script @parameters
+    $bulkExitCode = $LASTEXITCODE
+}
+finally {
+    if ($payload.CaptureProgress) {
+        Write-Output ('[BULK_PROGRESS]' + (ConvertTo-Json -InputObject ($global:bulkProgressRecords.ToArray()) -Depth 6 -Compress))
+    }
+}
+exit $bulkExitCode
 '@
     $code = $code.Replace('__PAYLOAD__', $encoded)
     $start = [Diagnostics.ProcessStartInfo]::new()
@@ -123,7 +158,10 @@ exit $LASTEXITCODE
             $process.WaitForExit()
             throw 'Isolated bulk setup invocation timed out.'
         }
-        return [PSCustomObject]@{ ExitCode = $process.ExitCode; Text = $stdout.Result + $stderr.Result }
+        $text = $stdout.Result + $stderr.Result
+        $progressMatch = [regex]::Match($text, '(?m)^\[BULK_PROGRESS\](.+)\r?$')
+        $progress = if ($progressMatch.Success) { @($progressMatch.Groups[1].Value | ConvertFrom-Json) } else { @() }
+        return [PSCustomObject]@{ ExitCode = $process.ExitCode; Text = $text; Progress = @($progress) }
     }
     finally { $process.Dispose() }
 }
@@ -166,6 +204,93 @@ try {
         Assert-True ($result.Text -match 'Migrate') 'Legacy migration missing from plan.'
         Assert-True ($result.Text -match 'ALL workspaces') 'Global binary effect not disclosed.'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.Home 'mcp-config.json'))) 'DryRun registered CLI.'
+    }
+
+    Test-Case 'dry-run reports discovery and preflight progress without filesystem changes' {
+        $f = New-BulkFixture
+        $first = New-TestRepo $f 'a'
+        $second = New-TestRepo $f 'group\b'
+        [void](Set-TestProfile $f $first)
+        $before = Get-FixtureSnapshot $f
+        $result = Invoke-BulkFixture $f @{ DryRun = $true } -CaptureProgress
+        Assert-True ($result.ExitCode -eq 0) $result.Text
+        Assert-True ($before -ceq (Get-FixtureSnapshot $f)) 'Progress reporting changed dry-run filesystem state.'
+        $discovery = @($result.Progress | Where-Object { $_.Activity -eq 'Discovering Git repositories' -and -not $_.Completed })
+        Assert-True ($discovery.Count -ge 2 -and $discovery[0].CurrentOperation -eq $f.Root -and $discovery[0].PercentComplete -eq -1) 'Discovery did not report the current path before traversal.'
+        Assert-True ($discovery[-1].Status -eq 'Discovery complete: 4 directories visited; 2 repository candidates found') 'Discovery counters do not match the fixture.'
+        $checks = @($result.Progress | Where-Object { $_.Activity -eq 'Checking Xray configuration' -and -not $_.Completed })
+        Assert-True ($checks.Count -eq 2 -and $checks[0].CurrentOperation -eq $first -and $checks[1].CurrentOperation -eq $second) 'Preflight progress did not identify each repository.'
+        Assert-True ($checks[0].Status -eq 'Checking repository 1/2' -and $checks[0].PercentComplete -eq 0 -and $checks[1].Status -eq 'Checking repository 2/2' -and $checks[1].PercentComplete -eq 50) 'Preflight progress counts or percentages are wrong.'
+        Assert-True (@($result.Progress | Where-Object Activity -eq 'Applying Xray setup').Count -eq 0) 'DryRun reported an application phase.'
+        Assert-True ($result.Progress[-1].Completed) 'Progress was not cleared on dry-run exit.'
+        Assert-True ($result.Text -match 'Discovering Git repositories under' -and $result.Text -match 'Checking repository \[1/2\]') 'Plain-text progress is missing without progress-bar rendering.'
+    }
+
+    Test-Case 'application progress identifies each selected repository' {
+        $f = New-BulkFixture
+        foreach ($name in @('a', 'b')) { [void](Set-TestProfile $f (New-TestRepo $f $name)) }
+        $result = Invoke-BulkFixture $f -CaptureProgress
+        Assert-True ($result.ExitCode -eq 0) $result.Text
+        $apply = @($result.Progress | Where-Object { $_.Activity -eq 'Applying Xray setup' -and -not $_.Completed })
+        Assert-True ($apply.Count -eq 2 -and $apply[0].CurrentOperation -eq (Join-Path $f.Root 'a') -and $apply[1].CurrentOperation -eq (Join-Path $f.Root 'b')) 'Application progress is missing or points to another repository.'
+        Assert-True ($apply[0].Status -eq 'Applying repository 1/2' -and $apply[0].PercentComplete -eq 0 -and $apply[1].Status -eq 'Applying repository 2/2' -and $apply[1].PercentComplete -eq 50) 'Application counts or percentages are wrong.'
+        $applyRecords = @($result.Progress | Where-Object Activity -eq 'Applying Xray setup')
+        Assert-True (@($applyRecords | Where-Object Completed).Count -eq 1 -and $applyRecords[-1].Completed) 'Application progress was cleared between repositories instead of after the phase.'
+        Assert-True ($result.Progress[-1].Completed -and $result.Text -match 'Applying repository \[1/2\]') 'Application progress cleanup or plain-text output is missing.'
+    }
+
+    Test-Case 'progress is cleared for empty discovery and setup errors' {
+        $f = New-BulkFixture
+        $empty = Invoke-BulkFixture $f @{ DryRun = $true } -CaptureProgress
+        Assert-True ($empty.ExitCode -eq 0 -and $empty.Progress[-1].Completed) 'Empty discovery left progress active or failed.'
+        $missing = Invoke-BulkFixture $f @{ Root = (Join-Path $f.Directory 'missing') } -CaptureProgress
+        Assert-True ($missing.ExitCode -ne 0 -and $missing.Progress[-1].Completed) 'An error left progress active or reported success.'
+    }
+
+    Test-Case 'directory masks prune matching trees before enumeration at every depth' {
+        $f = New-BulkFixture
+        [void](Set-TestProfile $f (New-TestRepo $f 'keep'))
+        $build = Split-Path -Parent (New-TestRepo $f 'BUILD.OBJ.TEMP\hidden')
+        $scratch = Split-Path -Parent (New-TestRepo $f 'group\scratch\hidden')
+        $literal = Split-Path -Parent (New-TestRepo $f 'cache[1]\hidden')
+        $dependency = Split-Path -Parent (New-TestRepo $f 'node_modules\hidden')
+        $before = Get-FixtureSnapshot $f
+        $result = Invoke-BulkFixture $f @{ DryRun = $true; IncludeNewRepos = $true
+            ExcludeDirectory = @('*.obj.temp', 'SCRATCH', [Management.Automation.WildcardPattern]::Escape('cache[1]')) } -ForbiddenDiscoveryPaths @($build, $scratch, $literal, $dependency)
+        Assert-True ($result.ExitCode -eq 0) $result.Text
+        Assert-True ($before -ceq (Get-FixtureSnapshot $f)) 'Exclusion discovery wrote fixture files.'
+        Assert-True ($result.Text.Contains("Skipping excluded directory: $build") -and $result.Text.Contains("Skipping excluded directory: $scratch") -and $result.Text.Contains("Skipping excluded directory: $literal")) 'Case-insensitive wildcard/name exclusion or escaped brackets are missing.'
+        Assert-True ($result.Text -notmatch '\\hidden') 'An excluded checkout was inspected.'
+        Assert-True ($result.Text -match 'Plan only: 1 selected; 0 conflicts') 'Excluded repositories affected selection.'
+    }
+
+    Test-Case 'directory masks do not exclude the explicitly selected Root' {
+        $f = New-BulkFixture
+        $repo = New-TestRepo $f 'build.obj.temp'
+        [void](Set-TestProfile $f $repo)
+        $result = Invoke-BulkFixture $f @{ Root = $repo; DryRun = $true; ExcludeDirectory = @('*.obj.temp') }
+        Assert-True ($result.ExitCode -eq 0 -and $result.Text -match 'Plan only: 1 selected; 0 conflicts') $result.Text
+    }
+
+    Test-Case 'directory exclusions reject paths instead of silently matching nothing' {
+        $f = New-BulkFixture
+        $before = Get-FixtureSnapshot $f
+        $result = Invoke-BulkFixture $f @{ ExcludeDirectory = @('group\scratch') }
+        Assert-True ($result.ExitCode -ne 0 -and $result.Text -match 'directory names or wildcard masks, not paths') 'An unsupported exclusion path was silently accepted.'
+        Assert-True ($before -ceq (Get-FixtureSnapshot $f)) 'Invalid exclusions changed fixture files.'
+    }
+
+    Test-Case 'malformed directory masks are rejected before discovery even for Root as checkout' {
+        $f = New-BulkFixture
+        $repo = New-TestRepo $f 'repo'
+        [void](Set-TestProfile $f $repo)
+        $before = Get-FixtureSnapshot $f
+        foreach ($root in @($f.Root, $repo)) {
+            $result = Invoke-BulkFixture $f @{ Root = $root; DryRun = $true; ExcludeDirectory = @('[abc') }
+            Assert-True ($result.ExitCode -ne 0 -and $result.Text -match 'ExcludeDirectory' -and $result.Text -match 'wildcard') 'A malformed directory mask was accepted.'
+            Assert-True ($result.Text -notmatch 'Discovering Git repositories under') 'Malformed masks reached directory discovery.'
+        }
+        Assert-True ($before -ceq (Get-FixtureSnapshot $f)) 'Malformed masks changed fixture files.'
     }
 
     Test-Case 'include-new creates profiles and ignores dependency and redirected trees' {

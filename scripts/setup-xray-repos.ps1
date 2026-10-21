@@ -28,6 +28,9 @@
     Optional explicit personal VS Code MCP configuration path.
 .PARAMETER GithubRepo
     GitHub repository from which the existing installer downloads Xray.
+.PARAMETER ExcludeDirectory
+    Directory names or wildcard masks to skip below Root, at any depth.
+    Matching trees are not entered. The explicitly selected Root is still checked.
 .EXAMPLE
     .\setup-xray-repos.ps1 -Root C:\Repos -DryRun
 .EXAMPLE
@@ -44,7 +47,15 @@ param(
     [string]$Extensions,
     [string]$InstallDir = "$env:LOCALAPPDATA\xray",
     [string]$VSCodeMcpPath,
-    [string]$GithubRepo = 'pustynsky/xray'
+    [string]$GithubRepo = 'pustynsky/xray',
+    [ValidateNotNullOrEmpty()]
+    [ValidateScript({
+        if ($_ -match '[/\\]') { throw '-ExcludeDirectory accepts directory names or wildcard masks, not paths.' }
+        $mask = [Management.Automation.WildcardPattern]::new($_, [Management.Automation.WildcardOptions]::IgnoreCase)
+        $null = $mask.IsMatch('')
+        $true
+    })]
+    [string[]]$ExcludeDirectory = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -54,23 +65,47 @@ function Get-BulkRepositories {
     param([string]$Directory)
 
     $skip = @('.git', '.vs', '.venv', 'venv', 'node_modules', 'target', 'bin', 'obj', 'dist', 'out', 'vendor', '.next')
+    $excludePatterns = @($ExcludeDirectory | ForEach-Object {
+        [Management.Automation.WildcardPattern]::new($_, [Management.Automation.WildcardOptions]::IgnoreCase)
+    })
     $pending = [Collections.Generic.Stack[string]]::new()
     $pending.Push($Directory)
+    $visited = 0
+    $found = 0
+    $progressTimer = [Diagnostics.Stopwatch]::StartNew()
     while ($pending.Count -gt 0) {
         $path = $pending.Pop()
+        $visited++
+        if ($visited -eq 1 -or $progressTimer.ElapsedMilliseconds -ge 250) {
+            Write-Progress -Id 1 -Activity 'Discovering Git repositories' `
+                -Status "$visited directories visited; $found repository candidates found; current: $path" -CurrentOperation $path
+            $progressTimer.Restart()
+        }
         $item = Get-Item -LiteralPath $path -Force
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             Write-Warning "Skipping reparse point: $path"
             continue
         }
         if (Test-Path -LiteralPath (Join-Path $path '.git')) {
+            $found++
             $path
             continue
         }
         foreach ($child in @(Get-ChildItem -LiteralPath $path -Directory -Force)) {
-            if ($skip -notcontains $child.Name) { $pending.Push($child.FullName) }
+            if ($skip -contains $child.Name) { continue }
+            $excluded = $false
+            foreach ($pattern in $excludePatterns) {
+                if ($pattern.IsMatch($child.Name)) { $excluded = $true; break }
+            }
+            if ($excluded) {
+                Write-Host "Skipping excluded directory: $($child.FullName)"
+                continue
+            }
+            $pending.Push($child.FullName)
         }
     }
+    Write-Progress -Id 1 -Activity 'Discovering Git repositories' `
+        -Status "Discovery complete: $visited directories visited; $found repository candidates found" -PercentComplete 100
 }
 
 function Assert-BulkMetadataPaths {
@@ -118,8 +153,17 @@ try {
     if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Adjacent installer not found: $installer." }
     if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) { throw 'Git is required for repository discovery and migration.' }
 
+    Write-Host "Discovering Git repositories under $Root..."
+    $repositories = @(Get-BulkRepositories $Root | Sort-Object -Unique)
+    Write-Host "Found $($repositories.Count) repository candidates. Checking Xray configuration..."
+    $checked = 0
     $plan = @(
-        foreach ($repo in @(Get-BulkRepositories $Root | Sort-Object -Unique)) {
+        foreach ($repo in $repositories) {
+            $checked++
+            Write-Host "Checking repository [$checked/$($repositories.Count)]: $repo"
+            Write-Progress -Id 1 -Activity 'Checking Xray configuration' `
+                -Status "Checking repository $checked/$($repositories.Count)" -CurrentOperation $repo `
+                -PercentComplete ([int][Math]::Floor(100 * ($checked - 1) / $repositories.Count))
             try {
                 $preflight = Invoke-BulkPreflight $repo
                 $action = if (-not $preflight.Existing -and -not $IncludeNewRepos) { 'Skip' }
@@ -142,6 +186,7 @@ try {
             }
         }
     )
+    Write-Progress -Id 1 -Activity 'Checking Xray configuration' -Completed
     $plan | Format-Table Action, Source, @{ Label = 'Repository'; Expression = { $_.Repository }; Width = 60 },
         @{ Label = 'Extensions'; Expression = { $_.Extensions }; Width = 24 },
         @{ Label = 'Detail'; Expression = { $_.Detail }; Width = 80 } -Wrap |
@@ -167,7 +212,13 @@ try {
         }
     }
     $binaryReady = [bool]$SkipDownload
+    $applied = 0
     foreach ($row in $selected) {
+        $applied++
+        Write-Host "Applying repository [$applied/$($selected.Count)]: $($row.Repository)"
+        Write-Progress -Id 1 -Activity 'Applying Xray setup' `
+            -Status "Applying repository $applied/$($selected.Count)" -CurrentOperation $row.Repository `
+            -PercentComplete ([int][Math]::Floor(100 * ($applied - 1) / $selected.Count))
         $preparingBinary = $false
         try {
             $current = Invoke-BulkPreflight $row.Repository
@@ -210,6 +261,7 @@ try {
             }
         }
     }
+    Write-Progress -Id 1 -Activity 'Applying Xray setup' -Completed
     $plan | Format-Table Action, Result, @{ Label = 'Repository'; Expression = { $_.Repository }; Width = 60 },
         @{ Label = 'Detail'; Expression = { $_.Detail }; Width = 100 } -Wrap |
         Out-String -Width 220 | Write-Host
@@ -219,4 +271,7 @@ try {
 catch {
     Write-Error $_.Exception.Message
     exit 1
+}
+finally {
+    Write-Progress -Id 1 -Activity 'Xray repository setup' -Completed
 }

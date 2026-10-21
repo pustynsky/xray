@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Made bulk setup progress visible.** Repository-directory setup reports the discovery phase, current path and counters, then the current repository during configuration checks and application. Plain-text messages remain available without progress-bar rendering. Optional `-ExcludeDirectory` name/wildcard masks prune matching child trees before inspecting their contents, without changing default selection.
+
 ## 0.9.3 (2026-10-21)
 
 - **Added repository-directory setup and migration.** `scripts/setup-xray-repos.ps1 -Root C:\Repos` plans personal MCP setup only for previously configured checkouts; `-IncludeNewRepos` also enrolls new ones. The script reuses the existing installer, preserves supported per-repository serve arguments and managed client fields, skips conflicting configurations with a nonzero exit code, and downloads the shared executable only once. `-DryRun` does not write, download, rename profiles, or stop processes. `-Force` approves the plan, while stopping processes for binary replacement requires separate `-KillRunning` consent.

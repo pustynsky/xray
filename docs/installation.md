@@ -461,11 +461,19 @@ setup.
 .\scripts\setup-xray-repos.ps1 -Root C:\Repos -IncludeNewRepos -DryRun
 .\scripts\setup-xray-repos.ps1 -Root C:\Repos -IncludeNewRepos
 
+# Skip temporary build trees without entering their contents.
+.\scripts\setup-xray-repos.ps1 -Root C:\Repos -ExcludeDirectory '*.obj.temp' -DryRun
+
 # Keep the installed executable, approve eligible migration without prompting.
 .\scripts\setup-xray-repos.ps1 -Root C:\Repos -SkipDownload -Force
 ```
 
 The plan shows each checkout's source, action, extensions, and conflicts.
+Before the plan, setup reports directory-discovery progress with the current
+path and directory/repository counters. Configuration checks and application
+show the current repository and its position in that phase. Plain-text phase
+and repository messages remain visible when the host does not render progress
+bars. Progress is cleared when a phase finishes or setup exits.
 Existing profiles and eligible legacy workspace MCP entries count as configured.
 New repositories are skipped unless `-IncludeNewRepos` is set. For new repositories,
 the installer detects extensions, or `-Extensions rs,md` supplies an explicit list.
@@ -477,6 +485,15 @@ Discovery descends through grouping directories and recognizes both normal
 checkouts and Git worktree files. It stops at each checkout, so nested repositories
 inside a checkout are not discovered. Dependency/build directories and reparse
 points are skipped; paths outside `-Root` are not enrolled.
+`-ExcludeDirectory` adds case-insensitive directory-name wildcard masks, for
+example `-ExcludeDirectory '*.obj.temp','scratch'`. Matching child trees are
+skipped before listing their contents or checking repositories inside them.
+The masks apply at every depth below `-Root`, not to the explicitly selected
+root itself, and accept names/masks rather than paths. Without this option,
+discovery and the built-in dependency/build-directory exclusions are unchanged.
+Malformed masks fail parameter validation before discovery. For a literal name
+containing wildcard characters, use
+`[System.Management.Automation.WildcardPattern]::Escape('cache[1]')`.
 
 Supported existing serve arguments are preserved, including watcher/definitions,
 metrics, logging, response limits and rescan settings. Extension case/order and
