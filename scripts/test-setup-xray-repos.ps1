@@ -226,6 +226,41 @@ try {
         Assert-True ($result.Text -match 'Discovering Git repositories under' -and $result.Text -match 'Checking repository \[1/2\]') 'Plain-text progress is missing without progress-bar rendering.'
     }
 
+    Test-Case 'discovery checks depth five without enumerating deeper trees' {
+        $f = New-BulkFixture
+        $boundary = New-TestRepo $f 'a\b\c\d\repo'
+        $deeper = New-TestRepo $f 'e\f\g\h\i\repo'
+        $before = Get-FixtureSnapshot $f
+        $result = Invoke-BulkFixture $f @{ DryRun = $true; IncludeNewRepos = $true; Extensions = 'rs' } `
+            -CaptureProgress -ForbiddenDiscoveryPaths @($boundary, (Split-Path -Parent $deeper))
+        Assert-True ($result.ExitCode -eq 0) $result.Text
+        Assert-True ($before -ceq (Get-FixtureSnapshot $f)) 'Depth-limited dry-run changed fixture files.'
+        $discovery = @($result.Progress | Where-Object { $_.Activity -eq 'Discovering Git repositories' -and -not $_.Completed })
+        Assert-True ($discovery[-1].Status -eq 'Discovery complete: 11 directories visited; 1 repository candidates found') 'Discovery crossed the five-level boundary or skipped the boundary checkout.'
+        $checks = @($result.Progress | Where-Object { $_.Activity -eq 'Checking Xray configuration' -and -not $_.Completed })
+        Assert-True ($checks.Count -eq 1 -and $checks[0].CurrentOperation -eq $boundary) 'Only the checkout at depth five should be preflighted.'
+        Assert-True ($result.Text -match 'maximum depth: 5; Root depth: 0' -and $result.Text -match 'Plan only: 1 selected; 0 conflicts') 'The depth limit or eligible plan is missing.'
+        Assert-True ($result.Progress[-1].Completed) 'Depth-limited discovery left progress active.'
+
+        $explicit = Invoke-BulkFixture $f @{ Root = $deeper; DryRun = $true; IncludeNewRepos = $true; Extensions = 'rs' } `
+            -CaptureProgress -ForbiddenDiscoveryPaths @($deeper)
+        Assert-True ($explicit.ExitCode -eq 0) $explicit.Text
+        $checks = @($explicit.Progress | Where-Object { $_.Activity -eq 'Checking Xray configuration' -and -not $_.Completed })
+        Assert-True ($checks.Count -eq 1 -and $checks[0].CurrentOperation -eq $deeper) 'An explicitly selected deep checkout was not treated as depth zero.'
+        Assert-True ($before -ceq (Get-FixtureSnapshot $f)) 'Explicit-root dry-run changed fixture files.'
+    }
+
+    Test-Case 'application configures depth five but not depth six' {
+        $f = New-BulkFixture
+        $boundary = New-TestRepo $f 'a\b\c\d\repo'
+        $deeper = New-TestRepo $f 'e\f\g\h\i\repo'
+        $result = Invoke-BulkFixture $f @{ IncludeNewRepos = $true; Extensions = 'rs' } `
+            -ForbiddenDiscoveryPaths @($boundary, (Split-Path -Parent $deeper))
+        Assert-True ($result.ExitCode -eq 0) $result.Text
+        Assert-True (Test-Path -LiteralPath (Get-TestProfilePath $f $boundary)) 'The checkout at depth five was not configured.'
+        Assert-True (-not (Test-Path -LiteralPath (Get-TestProfilePath $f $deeper))) 'A checkout below depth five was configured.'
+    }
+
     Test-Case 'application progress identifies each selected repository' {
         $f = New-BulkFixture
         foreach ($name in @('a', 'b')) { [void](Set-TestProfile $f (New-TestRepo $f $name)) }
@@ -464,7 +499,7 @@ exit 0
         & git -C $repo -c user.name=Test -c user.email=test@example.invalid -c core.autocrlf=false add sample.rs
         & git -C $repo -c user.name=Test -c user.email=test@example.invalid -c commit.gpgSign=false -c "core.hooksPath=$hooks" commit --quiet -m fixture
         if ($LASTEXITCODE -ne 0) { throw 'Fixture commit failed.' }
-        $worktree = Join-Path $f.Root 'worktree'
+        $worktree = Join-Path $f.Root 'group\one\two\three\worktree'
         & git -C $repo worktree add --quiet --detach $worktree
         if ($LASTEXITCODE -ne 0) { throw 'Fixture worktree creation failed.' }
         $result = Invoke-BulkFixture $f @{ IncludeNewRepos = $true; Extensions = 'rs' }
