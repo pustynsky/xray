@@ -180,6 +180,42 @@ function Get-FixtureJson {
     return (Read-SetupJson -Path $Path).Value
 }
 
+function Assert-XrayGitEnvironment {
+    param($Environment, [int]$Count = 3)
+    Assert-True ($Environment.GIT_CONFIG_COUNT -ceq [string]$Count) 'Exact Git override count'
+    $expected = @('safe.bareRepository', 'explicit', 'credential.interactive', 'never', 'core.fsmonitor', 'false')
+    for ($i = 0; $i -lt 3; $i++) {
+        Assert-True ($Environment."GIT_CONFIG_KEY_$i" -ceq $expected[2 * $i]) "Git key $i"
+        Assert-True ($Environment."GIT_CONFIG_VALUE_$i" -ceq $expected[2 * $i + 1]) "Git value $i"
+    }
+}
+
+function Get-EnvironmentTarget {
+    param($Environment, [string]$Path = 'fixture.json')
+    $entry = [PSCustomObject]@{}
+    if ($PSBoundParameters.ContainsKey('Environment')) {
+        $entry | Add-Member -NotePropertyName env -NotePropertyValue $Environment
+    }
+    return [PSCustomObject]@{
+        Path = $Path; Container = 'servers'
+        Document = [PSCustomObject]@{ Value = [PSCustomObject]@{ servers = [PSCustomObject]@{ xray = $entry } } }
+    }
+}
+
+function Receive-FixtureMcpResponse {
+    param([Diagnostics.Process]$Process, [int]$Id)
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    while ($timer.ElapsedMilliseconds -lt 20000) {
+        $read = $Process.StandardOutput.ReadLineAsync()
+        if (-not $read.Wait([int](20000 - $timer.ElapsedMilliseconds))) { throw 'MCP response timed out.' }
+        $line = $read.GetAwaiter().GetResult()
+        if ($null -eq $line) { throw 'MCP exited before responding.' }
+        $message = $line | ConvertFrom-Json
+        if ($message.id -eq $Id) { return $message }
+    }
+    throw 'MCP response timed out.'
+}
+
 function Add-LegacyFixture {
     param($Fixture)
     $path = Join-Path $Fixture.Repo '.mcp.json'
@@ -212,8 +248,218 @@ try {
         . ([scriptblock]::Create($assignment.Extent.Text))
     }
 
+    Test-Case 'Git environment defaults preserve custom pairs and normalize compatible aliases' {
+        $first = Get-EnvironmentTarget ([PSCustomObject][ordered]@{
+            CUSTOM = 'keep'
+            GIT_CONFIG_COUNT = '5'
+            GIT_CONFIG_KEY_0 = 'credential.interactive'; GIT_CONFIG_VALUE_0 = 'false'
+            GIT_CONFIG_KEY_1 = 'core.fsmonitor'; GIT_CONFIG_VALUE_1 = 'OFF'
+            GIT_CONFIG_KEY_2 = 'safe.directory'; GIT_CONFIG_VALUE_2 = 'first'
+            GIT_CONFIG_KEY_3 = 'safe.directory'; GIT_CONFIG_VALUE_3 = ''
+            GIT_CONFIG_KEY_4 = 'safe.directory'; GIT_CONFIG_VALUE_4 = 'last'
+        })
+        $second = Get-EnvironmentTarget -Path 'other.json'
+        Resolve-XrayMcpEnvironment @($first, $second)
+        foreach ($target in @($first, $second)) {
+            Assert-XrayGitEnvironment $target.Environment 6
+            Assert-True ($target.Environment.GIT_CONFIG_KEY_3 -ceq 'safe.directory' -and
+                $target.Environment.GIT_CONFIG_KEY_4 -ceq 'safe.directory' -and
+                $target.Environment.GIT_CONFIG_KEY_5 -ceq 'safe.directory') 'Repeated keys retained'
+            Assert-True ($target.Environment.GIT_CONFIG_VALUE_3 -ceq 'first' -and
+                $target.Environment.GIT_CONFIG_VALUE_4 -ceq '' -and
+                $target.Environment.GIT_CONFIG_VALUE_5 -ceq 'last') 'Custom order and empty reset retained'
+        }
+        Assert-True ($first.Environment.CUSTOM -ceq 'keep') 'Unrelated environment retained'
+        Assert-True (-not $second.Environment.PSObject.Properties['CUSTOM']) 'Unrelated environment not copied to another host'
+    }
+
+    Test-Case 'Git environment rejects invalid shapes and conflicting overrides without disclosing values' {
+        $invalid = @(
+            'not an object',
+            [PSCustomObject]@{ GIT_CONFIG_KEY_0 = 'core.quotePath'; GIT_CONFIG_VALUE_0 = 'false' },
+            [PSCustomObject]@{ GIT_CONFIG_COUNT = '1' },
+            [PSCustomObject]@{ GIT_CONFIG_COUNT = 0 },
+            [PSCustomObject]@{ GIT_CONFIG_COUNT = '-1' },
+            [PSCustomObject]@{ GIT_CONFIG_COUNT = '2147483648' },
+            [PSCustomObject]@{ GIT_CONFIG_COUNT = '0'; GIT_CONFIG_KEY_0 = 'unused' },
+            [PSCustomObject]@{ GIT_CONFIG_COUNT = '1'; GIT_CONFIG_KEY_1 = 'gap'; GIT_CONFIG_VALUE_1 = 'false' },
+            [PSCustomObject]@{ GIT_CONFIG_COUNT = '1'; GIT_CONFIG_KEY_0 = 'invalid-key'; GIT_CONFIG_VALUE_0 = 'private-setting-value' },
+            [PSCustomObject]@{ GIT_CONFIG_COUNT = '1'; GIT_CONFIG_KEY_0 = 'section.1name'; GIT_CONFIG_VALUE_0 = 'false' },
+            [PSCustomObject]@{ GIT_CONFIG_COUNT = '1'; GIT_CONFIG_KEY_0 = "section.sub`nsection.name"; GIT_CONFIG_VALUE_0 = 'false' },
+            [PSCustomObject]@{ GIT_CONFIG_COUNT = '1'; GIT_CONFIG_KEY_0 = 'http.extraHeader'; GIT_CONFIG_VALUE_0 = ("private" + [char]0 + 'value') },
+            [PSCustomObject]@{ GIT_CONFIG_COUNT = '1'; GIT_CONFIG_KEY_0 = 'core.fsmonitor'; GIT_CONFIG_VALUE_0 = 'private-setting-value' },
+            [PSCustomObject]@{ GIT_CONFIG_COUNT = '1'; GIT_CONFIG_KEY_0 = 'safe.bareRepository'; GIT_CONFIG_VALUE_0 = 'all' },
+            [PSCustomObject]@{ GIT_CONFIG_COUNT = '1'; GIT_CONFIG_KEY_0 = 'credential.interactive'; GIT_CONFIG_VALUE_0 = 'true' }
+        )
+        foreach ($environment in $invalid) {
+            $target = Get-EnvironmentTarget $environment
+            $failure = $null
+            try { Resolve-XrayMcpEnvironment @($target) }
+            catch { $failure = $_.Exception.Message }
+            Assert-True ($null -ne $failure) 'Invalid Git environment rejected'
+            Assert-True ($failure -notlike '*private-setting-value*') 'Private Git value not disclosed'
+            Assert-True (-not $target.PSObject.Properties['Environment']) 'Rejected environment was not applied'
+        }
+        $first = Get-EnvironmentTarget ([PSCustomObject]@{
+            GIT_CONFIG_COUNT = '1'; GIT_CONFIG_KEY_0 = 'http.extraHeader'; GIT_CONFIG_VALUE_0 = 'private-setting-value'
+        })
+        $second = Get-EnvironmentTarget ([PSCustomObject]@{
+            GIT_CONFIG_COUNT = '1'; GIT_CONFIG_KEY_0 = 'http.extraHeader'; GIT_CONFIG_VALUE_0 = 'other-private-value'
+        }) -Path 'other.json'
+        $failure = $null
+        try { Resolve-XrayMcpEnvironment @($first, $second) }
+        catch { $failure = $_.Exception.Message }
+        Assert-True ($failure -like '*Conflicting numbered Git overrides*') 'Different ordered overrides refused'
+        Assert-True ($failure -notmatch 'private-setting-value|other-private-value') 'Conflicting values not disclosed'
+    }
+
+    Test-Case 'Git environment accepts Git key grammar for subsection names and empty subsections' {
+        foreach ($key in @('1section.name', 'section..name', 'http.https://example.invalid/.extraHeader')) {
+            $target = Get-EnvironmentTarget ([PSCustomObject]@{
+                GIT_CONFIG_COUNT = '1'; GIT_CONFIG_KEY_0 = $key; GIT_CONFIG_VALUE_0 = 'value'
+            })
+            Resolve-XrayMcpEnvironment @($target)
+            Assert-True ($target.Environment.GIT_CONFIG_KEY_3 -ceq $key) 'Valid Git key retained exactly'
+        }
+    }
+
     if ($UserMcpOnly -and -not $XrayBinary) { throw '-UserMcpOnly requires -XrayBinary.' }
     if ($XrayBinary) {
+        Test-Case 'personal Git environment upgrades both hosts and survives ordinary and preserving updates' {
+            foreach ($preserve in @($false, $true)) {
+                $f = New-UserMcpFixture
+                Assert-Success (Invoke-UserMcpSetup $f)
+                $cli = Join-Path $f.Home 'mcp-config.json'
+                $vscode = Join-Path $f.Home 'vscode\mcp.json'
+                foreach ($path in @($cli, $vscode)) {
+                    $doc = Get-FixtureJson $path
+                    $entry = if ($path -eq $cli) { $doc.mcpServers.xray } else { $doc.servers.xray }
+                    Assert-XrayGitEnvironment $entry.env
+                    $environment = [ordered]@{ CUSTOM = $path }
+                    if ($path -eq $cli) {
+                        $environment.GIT_CONFIG_COUNT = '1'
+                        $environment.GIT_CONFIG_KEY_0 = 'core.quotePath'
+                        $environment.GIT_CONFIG_VALUE_0 = 'false'
+                    }
+                    $entry.env = [PSCustomObject]$environment
+                    Write-FixtureFile $path ($doc | ConvertTo-Json -Depth 20)
+                }
+                Assert-Success (Invoke-UserMcpSetup $f @{ PreserveSettings = $preserve })
+                foreach ($path in @($cli, $vscode)) {
+                    $doc = Get-FixtureJson $path
+                    $entry = if ($path -eq $cli) { $doc.mcpServers.xray } else { $doc.servers.xray }
+                    Assert-XrayGitEnvironment $entry.env 4
+                    Assert-True ($entry.env.CUSTOM -ceq $path) 'Host-specific environment retained'
+                    Assert-True ($entry.env.GIT_CONFIG_KEY_3 -ceq 'core.quotePath' -and
+                        $entry.env.GIT_CONFIG_VALUE_3 -ceq 'false') 'Additional Git override shared'
+                }
+                $before = @{}
+                foreach ($path in @($cli, $vscode, "$cli.bak", "$vscode.bak")) {
+                    $before[$path] = (Get-FileHash -LiteralPath $path).Hash
+                }
+                Assert-Success (Invoke-UserMcpSetup $f @{ PreserveSettings = $preserve })
+                foreach ($path in $before.Keys) {
+                    Assert-True ((Get-FileHash -LiteralPath $path).Hash -ceq $before[$path]) 'Repeat setup preserves config and backup bytes'
+                }
+            }
+        }
+
+        Test-Case 'personal Git environment conflict and plan-only stop before profile or config writes' {
+            $f = New-UserMcpFixture
+            Assert-Success (Invoke-UserMcpSetup $f)
+            $cli = Join-Path $f.Home 'mcp-config.json'
+            $vscode = Join-Path $f.Home 'vscode\mcp.json'
+            $profilePath = Get-WorkspaceProfilePath (Join-Path $f.Install 'workspaces') $f.Repo
+            foreach ($malformedKey in @($false, $true)) {
+                $doc = Get-FixtureJson $cli
+                if ($malformedKey) {
+                    $doc.mcpServers.xray.env.GIT_CONFIG_VALUE_0 = 'explicit'
+                    $doc.mcpServers.xray.env.GIT_CONFIG_COUNT = '4'
+                    $doc.mcpServers.xray.env | Add-Member GIT_CONFIG_KEY_3 'invalid-key'
+                    $doc.mcpServers.xray.env | Add-Member GIT_CONFIG_VALUE_3 'private-setting-value'
+                }
+                else { $doc.mcpServers.xray.env.GIT_CONFIG_VALUE_0 = 'all' }
+                Write-FixtureFile $cli ($doc | ConvertTo-Json -Depth 20)
+                $before = @{}
+                foreach ($path in @($cli, $vscode, $profilePath)) { $before[$path] = (Get-FileHash -LiteralPath $path).Hash }
+                foreach ($plan in @($false, $true)) {
+                    $result = Invoke-UserMcpSetup $f @{ PreserveSettings = $true; PlanOnly = $plan }
+                    $message = if ($malformedKey) { '*Invalid Git configuration key or value*' } else { '*Conflicting Xray Git setting*' }
+                    Assert-True ($result.ExitCode -ne 0 -and $result.Output -like $message) 'Conflict or malformed key explicitly refused'
+                    Assert-True ($result.Output -notlike '*private-setting-value*') 'Malformed value not disclosed'
+                    foreach ($path in $before.Keys) {
+                        Assert-True ((Get-FileHash -LiteralPath $path).Hash -ceq $before[$path]) 'Conflict preserves profile and client bytes'
+                        Assert-True (-not (Test-Path -LiteralPath "$path.bak")) 'Conflict does not create a backup'
+                    }
+                }
+            }
+        }
+
+        Test-Case 'personal Git environment admits simultaneous hosts with different inherited Git overrides' {
+            $f = New-UserMcpFixture
+            Assert-Success (Invoke-UserMcpSetup $f)
+            $entries = @(
+                (Get-FixtureJson (Join-Path $f.Home 'mcp-config.json')).mcpServers.xray,
+                (Get-FixtureJson (Join-Path $f.Home 'vscode\mcp.json')).servers.xray
+            )
+            $clients = @()
+            try {
+                for ($i = 0; $i -lt $entries.Count; $i++) {
+                    $entry = $entries[$i]
+                    $info = New-Object Diagnostics.ProcessStartInfo
+                    $info.FileName = $entry.command
+                    $info.Arguments = ($entry.args | ForEach-Object { '"' + $_ + '"' }) -join ' '
+                    $info.WorkingDirectory = $f.Repo
+                    $info.UseShellExecute = $false
+                    $info.RedirectStandardInput = $true
+                    $info.RedirectStandardOutput = $true
+                    $info.RedirectStandardError = $true
+                    foreach ($key in @($info.EnvironmentVariables.Keys)) {
+                        if ($key -match '^GIT_CONFIG_(COUNT$|KEY_|VALUE_)') { $info.EnvironmentVariables.Remove($key) }
+                    }
+                    if ($i -eq 1) {
+                        $info.EnvironmentVariables['GIT_CONFIG_COUNT'] = '1'
+                        $info.EnvironmentVariables['GIT_CONFIG_KEY_0'] = 'safe.bareRepository'
+                        $info.EnvironmentVariables['GIT_CONFIG_VALUE_0'] = 'explicit'
+                    }
+                    foreach ($property in $entry.env.PSObject.Properties) {
+                        $info.EnvironmentVariables[$property.Name] = $property.Value
+                    }
+                    $info.EnvironmentVariables['XRAY_BACKEND_IDLE_SECONDS'] = '1'
+                    $info.EnvironmentVariables['XRAY_GUIDANCE_PREFIX'] = '0'
+                    $client = New-Object Diagnostics.Process
+                    $client.StartInfo = $info
+                    [void]$client.Start()
+                    $clients += $client
+                    $null = $client.StandardError.ReadToEndAsync()
+                    $client.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"installer-test","version":"1"}}}')
+                    $response = Receive-FixtureMcpResponse $client 1
+                    Assert-True ($null -eq $response.error -and $null -ne $response.result.serverInfo) 'Host initialized'
+                    $client.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
+                }
+                foreach ($client in $clients) {
+                    $client.StandardInput.WriteLine('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_info","arguments":{}}}')
+                    $response = Receive-FixtureMcpResponse $client 2
+                    Assert-True ($null -eq $response.error -and -not $response.result.isError -and
+                        @($response.result.content).Count -gt 0) 'Both hosts can call xray_info while connected'
+                }
+            }
+            finally {
+                foreach ($client in $clients) {
+                    $client.StandardInput.Close()
+                    if (-not $client.WaitForExit(10000)) { $client.Kill(); $client.WaitForExit() }
+                    $client.Dispose()
+                }
+                $timer = [Diagnostics.Stopwatch]::StartNew()
+                do {
+                    $running = @(Get-Process -Name xray -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $f.Install 'xray.exe') })
+                    if ($running.Count -eq 0) { break }
+                    Start-Sleep -Milliseconds 100
+                } while ($timer.ElapsedMilliseconds -lt 10000)
+                Assert-True ($running.Count -eq 0) 'Disposable backend stopped after its idle timeout'
+            }
+        }
+
         Test-Case 'personal profile names are readable stable bounded and distinct' {
             $profiles = 'C:\Profiles'
             $path = Get-WorkspaceProfilePath $profiles 'C:\Repos\MyProject'
@@ -1184,6 +1430,8 @@ try {
         $expected = @('serve', '--dir', $f.Repo, '--ext', 'cs,md', '--watch', '--definitions', '--debug-log')
         Assert-True (($cli.mcpServers.xray.args -join '|') -ceq ($expected -join '|')) 'Exact CLI args'
         Assert-True (($vscode.servers.xray.args -join '|') -ceq ($expected -join '|')) 'Shared VS Code args'
+        Assert-XrayGitEnvironment $cli.mcpServers.xray.env
+        Assert-XrayGitEnvironment $vscode.servers.xray.env
         foreach ($relative in @('.github/mcp.json', '.vscode/mcp.json', '.github/mcp.json.bak', '.vscode/mcp.json.bak')) {
             Assert-True (Test-GitIgnoresPath $f.Repo $relative) "Ignored: $relative"
         }
@@ -1219,6 +1467,22 @@ try {
         $time = (Get-Item "$cliPath.bak").LastWriteTimeUtc
         Assert-Success (Invoke-FixtureSetup $f)
         Assert-True ((Get-Item "$cliPath.bak").LastWriteTimeUtc -eq $time) 'Idempotent backup'
+    }
+
+    Test-Case 'workspace Git environment conflict stops before client or exclusion writes' {
+        $f = New-Fixture
+        $cli = Join-Path $f.Repo '.github\mcp.json'
+        $text = '{"mcpServers":{"xray":{"command":"stale","env":{"GIT_CONFIG_COUNT":"1","GIT_CONFIG_KEY_0":"core.fsmonitor","GIT_CONFIG_VALUE_0":"private-setting-value"}}}}'
+        Write-FixtureFile $cli $text
+        $exclude = Get-ResolvedGitPath $f.Repo 'info/exclude'
+        $before = [IO.File]::ReadAllText($exclude)
+        $result = Invoke-FixtureSetup $f
+        Assert-True ($result.ExitCode -ne 0 -and $result.Output -like '*Conflicting Xray Git setting*') 'Workspace conflict explicitly refused'
+        Assert-True ($result.Output -notlike '*private-setting-value*') 'Private Git value not printed'
+        Assert-True ([IO.File]::ReadAllText($cli) -ceq $text) 'CLI config unchanged'
+        Assert-True ([IO.File]::ReadAllText($exclude) -ceq $before) 'Git excludes unchanged'
+        Assert-True (-not (Test-Path -LiteralPath "$cli.bak")) 'No backup created'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.Repo '.vscode\mcp.json'))) 'No partial VS Code registration'
     }
 
     Test-Case 'tracked corporate root remains byte-identical' {

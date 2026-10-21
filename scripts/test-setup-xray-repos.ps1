@@ -86,7 +86,11 @@ function Invoke-BulkFixture {
     param($Fixture, [hashtable]$Parameters = @{}, [string]$Script = $bulkScript,
         [switch]$CaptureProgress, [string[]]$ForbiddenDiscoveryPaths = @())
     # An invalid owner/repo keeps a regressed download guard offline.
-    $arguments = @{ Root = $Fixture.Root; InstallDir = $Fixture.Install; VSCodeMcpPath = $Fixture.VSCode; SkipDownload = $true; Force = $true; GithubRepo = 'offline-tests-disabled' }
+    $arguments = @{ InstallDir = $Fixture.Install; SkipDownload = $true; Force = $true; GithubRepo = 'offline-tests-disabled' }
+    if ($Script -ne $setupScript) {
+        $arguments.Root = $Fixture.Root
+        $arguments.VSCodeMcpPath = $Fixture.VSCode
+    }
     foreach ($key in $Parameters.Keys) { $arguments[$key] = $Parameters[$key] }
     $payload = @{ Script = $Script; Arguments = $arguments; Fixture = $Fixture
         CaptureProgress = [bool]$CaptureProgress; ForbiddenDiscoveryPaths = $ForbiddenDiscoveryPaths } | ConvertTo-Json -Depth 12 -Compress
@@ -191,6 +195,34 @@ try {
         Assert-True ($result.Text -match 'Skip') 'Skipped repository absent from plan.'
         $cli = Get-Content -LiteralPath (Join-Path $f.Home 'mcp-config.json') -Raw | ConvertFrom-Json
         Assert-True ($cli.mcpServers.xray.command -eq (Join-Path $f.Install 'xray.exe')) 'Wrong shared binary registration.'
+    }
+
+    Test-Case 'generated workspace Git environment migrates through actual bulk setup' {
+        $f = New-BulkFixture
+        $repo = New-TestRepo $f 'workspace'
+        $local = Invoke-BulkFixture $f @{ RepoPath = $repo; Extensions = 'rs,md' } -Script $setupScript
+        Assert-True ($local.ExitCode -eq 0) $local.Text
+        foreach ($relative in @('.github\mcp.json', '.vscode\mcp.json')) {
+            $doc = Get-Content -LiteralPath (Join-Path $repo $relative) -Raw | ConvertFrom-Json
+            $entry = if ($relative -like '.github*') { $doc.mcpServers.xray } else { $doc.servers.xray }
+            Assert-True ($entry.env.GIT_CONFIG_COUNT -ceq '3') 'Workspace fixture did not use the actual generated environment.'
+        }
+        $result = Invoke-BulkFixture $f
+        Assert-True ($result.ExitCode -eq 0) $result.Text
+        $migratedProfile = Get-Content -LiteralPath (Get-TestProfilePath $f $repo) -Raw | ConvertFrom-Json
+        Assert-True ($migratedProfile.args -ccontains 'md,rs') 'Migration lost the selected extensions.'
+        foreach ($relative in @('.github\mcp.json', '.vscode\mcp.json')) {
+            $path = Join-Path $repo $relative
+            if (Test-Path -LiteralPath $path) {
+                $doc = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+                $entry = if ($relative -like '.github*') { $doc.mcpServers.xray } else { $doc.servers.xray }
+                Assert-True ($null -eq $entry) 'Migrated workspace registration remains.'
+            }
+        }
+        $cli = Get-Content -LiteralPath (Join-Path $f.Home 'mcp-config.json') -Raw | ConvertFrom-Json
+        $vs = Get-Content -LiteralPath $f.VSCode -Raw | ConvertFrom-Json
+        Assert-True ($cli.mcpServers.xray.env.GIT_CONFIG_COUNT -ceq '3' -and
+            $vs.servers.xray.env.GIT_CONFIG_COUNT -ceq '3') 'Migration omitted the common Git environment.'
     }
 
     Test-Case 'dry-run has zero filesystem side effects even with download and stop flags' {
@@ -440,7 +472,10 @@ try {
         $path = Join-Path $f.Home 'mcp-config.json'
         $doc = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
         $doc.mcpServers.xray | Add-Member -NotePropertyName disabled -NotePropertyValue $true
-        $doc.mcpServers.xray | Add-Member -NotePropertyName env -NotePropertyValue @{ CUSTOM = 'keep me' }
+        $doc.mcpServers.xray | Add-Member -NotePropertyName env -NotePropertyValue @{
+            CUSTOM = 'keep me'; GIT_CONFIG_COUNT = '1'
+            GIT_CONFIG_KEY_0 = 'core.quotePath'; GIT_CONFIG_VALUE_0 = 'false'
+        } -Force
         $doc.mcpServers.xray.tools = @('xray_info')
         Write-TestFile $path ($doc | ConvertTo-Json -Depth 10)
         $second = Invoke-BulkFixture $f
@@ -449,6 +484,40 @@ try {
         Assert-True ($doc.mcpServers.xray.disabled -eq $true) 'Enablement field overwritten.'
         Assert-True ($doc.mcpServers.xray.env.CUSTOM -ceq 'keep me') 'Managed entry environment overwritten.'
         Assert-True ($doc.mcpServers.xray.tools[0] -eq 'xray_info') 'Managed tool restrictions overwritten.'
+        $vs = Get-Content -LiteralPath $f.VSCode -Raw | ConvertFrom-Json
+        foreach ($entry in @($doc.mcpServers.xray, $vs.servers.xray)) {
+            Assert-True ($entry.env.GIT_CONFIG_COUNT -ceq '4') 'Bulk update did not migrate the Git environment.'
+            Assert-True ($entry.env.GIT_CONFIG_KEY_0 -ceq 'safe.bareRepository' -and
+                $entry.env.GIT_CONFIG_VALUE_0 -ceq 'explicit') 'Missing bare repository restriction.'
+            Assert-True ($entry.env.GIT_CONFIG_KEY_1 -ceq 'credential.interactive' -and
+                $entry.env.GIT_CONFIG_VALUE_1 -ceq 'never') 'Missing noninteractive credential setting.'
+            Assert-True ($entry.env.GIT_CONFIG_KEY_2 -ceq 'core.fsmonitor' -and
+                $entry.env.GIT_CONFIG_VALUE_2 -ceq 'false') 'Missing fsmonitor setting.'
+            Assert-True ($entry.env.GIT_CONFIG_KEY_3 -ceq 'core.quotePath' -and
+                $entry.env.GIT_CONFIG_VALUE_3 -ceq 'false') 'Custom Git override was lost or not shared.'
+        }
+        $before = Get-FixtureSnapshot $f
+        $third = Invoke-BulkFixture $f
+        Assert-True ($third.ExitCode -eq 0) $third.Text
+        Assert-True ($before -ceq (Get-FixtureSnapshot $f)) 'Repeat bulk migration changed files.'
+    }
+
+    Test-Case 'conflicting Git environments are reported without writing profiles or registrations' {
+        $f = New-BulkFixture
+        $repo = New-TestRepo $f 'profile'
+        [void](Set-TestProfile $f $repo)
+        $first = Invoke-BulkFixture $f
+        Assert-True ($first.ExitCode -eq 0) $first.Text
+        $path = Join-Path $f.Home 'mcp-config.json'
+        $doc = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $doc.mcpServers.xray.env.GIT_CONFIG_VALUE_0 = 'all'
+        Write-TestFile $path ($doc | ConvertTo-Json -Depth 10)
+        $before = Get-FixtureSnapshot $f
+        foreach ($dryRun in @($true, $false)) {
+            $result = Invoke-BulkFixture $f @{ DryRun = $dryRun }
+            Assert-True ($result.ExitCode -ne 0 -and $result.Text -like '*Conflicting Xray Git setting*') 'Git conflict was not reported.'
+            Assert-True ($before -ceq (Get-FixtureSnapshot $f)) 'Git conflict changed fixture files.'
+        }
     }
 
     Test-Case 'foreign personal registration is never replaced' {

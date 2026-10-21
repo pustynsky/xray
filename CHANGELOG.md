@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Aligned Git settings across MCP hosts during setup.** Personal and workspace-local installations now pin `safe.bareRepository=explicit`, `credential.interactive=never`, and `core.fsmonitor=false` in both selected Xray registrations. Repeat and bulk setup migrate existing entries, preserve other environment variables and ordered additional Git overrides, and refuse conflicting or malformed overrides without disclosing values. Restart all Xray MCP connections after updating; the backend's compatibility guard remains unchanged.
+
 - **Limited bulk repository discovery to five levels.** Setup treats `-Root` as depth zero, includes checkouts at depth five, and does not list their children. The startup message shows the limit. Pass a deeper `-Root` to reach checkouts outside that range.
 
 - **Made bulk setup progress visible.** Repository-directory setup reports the discovery phase, current path and counters, then the current repository during configuration checks and application. Plain-text messages remain available without progress-bar rendering. Optional `-ExcludeDirectory` name/wildcard masks prune matching child trees before inspecting their contents, without changing default selection.

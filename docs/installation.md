@@ -373,6 +373,41 @@ Three active workspaces with five sessions each use 15 proxies and 3 backends.
 Different workspace profiles may use different extensions and settings.
 Configuration conflicts within one active workspace still fail explicitly.
 
+### Consistent Git environment across MCP hosts
+
+Both personal and workspace-local setup write the same numbered Git overrides
+into each selected Xray registration's `env`:
+
+| Git setting | Value | Effect |
+|---|---|---|
+| `safe.bareRepository` | `explicit` | Bare repositories require an explicit `--git-dir` or `GIT_DIR`; ordinary working checkouts are unaffected. |
+| `credential.interactive` | `never` | Git Credential Manager can use cached credentials but cannot prompt for authentication. This is a helper-specific setting, not a universal prompt switch. |
+| `core.fsmonitor` | `false` | Git does not use its filesystem monitor or configured fsmonitor hook. Xray's own watcher is unaffected. |
+
+`GIT_CONFIG_COUNT=3` counts these key/value pairs, numbered from zero. The
+settings apply to Xray and its child Git processes; setup does not change the
+global Git config or other tools' environments. Explicit values prevent
+different host-injected overrides from causing `Workspace backend configuration
+differs` when VS Code and Copilot CLI/SDK connect to the same backend.
+
+Repeat setup upgrades existing entries, including with `-PreserveSettings` and
+bulk setup. Other `env` variables stay with their original client. Additional
+numbered Git overrides keep their order, repeated keys and empty values, and
+are copied to selected clients that have none. Setup updates the count rather
+than truncating them. If selected clients have different additional override
+lists, or an explicit setting conflicts with a default above, setup stops
+before writing profiles or MCP configs and reports the conflicting location
+without printing values. Align those overrides and retry; `-Force` does not
+override this check. Malformed counts, incomplete pairs and invalid Git keys are
+also refused. Bulk migration accepts the generated workspace defaults; custom
+workspace environments still require separate review before promotion to shared
+personal registrations.
+Other Git environment variables are preserved, not normalized.
+
+After an update, stop and restart **all Xray MCP connections** for the workspace,
+not just the failed chat. Verify a real Xray tool call from each host while both
+are connected. An active backend keeps its original environment until replaced.
+
 ### Migrating and removing personal setup
 
 Workspace setup and workspace `-Restore` check the personal Copilot CLI/SDK
