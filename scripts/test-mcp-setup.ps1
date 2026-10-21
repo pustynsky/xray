@@ -403,7 +403,10 @@ try {
                 (Get-FixtureJson (Join-Path $f.Home 'vscode\mcp.json')).servers.xray
             )
             $clients = @()
+            $inputEncoding = [Console]::InputEncoding
             try {
+                # .NET Framework uses the console encoding, including its BOM, for redirected stdin.
+                [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
                 for ($i = 0; $i -lt $entries.Count; $i++) {
                     $entry = $entries[$i]
                     $info = New-Object Diagnostics.ProcessStartInfo
@@ -445,6 +448,7 @@ try {
                 }
             }
             finally {
+                [Console]::InputEncoding = $inputEncoding
                 foreach ($client in $clients) {
                     $client.StandardInput.Close()
                     if (-not $client.WaitForExit(10000)) { $client.Kill(); $client.WaitForExit() }
