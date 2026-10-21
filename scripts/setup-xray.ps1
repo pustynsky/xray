@@ -13,6 +13,8 @@
     5. Offers persistent Copilot CLI folder trust in interactive mode.
     6. Creates a local copilot-xray.cmd launcher when a root .mcp.json would
        take precedence over .github/mcp.json, without changing the root config.
+    7. Pins the same noninteractive Git environment in selected MCP registrations,
+       preserving additional overrides and refusing conflicting Git settings.
     Legacy root configs and Git protection are cleaned up only with explicit
     migration consent. Roo Code setup remains disabled.
 
@@ -1174,6 +1176,99 @@ function Test-ManagedUserMcpEntry {
         $Entry.args[1] -ceq '--profiles' -and $Entry.args[2] -ieq $Profiles
 }
 
+function Resolve-XrayMcpEnvironment {
+    param([object[]]$Targets)
+
+    $defaults = [ordered]@{
+        'safe.bareRepository' = 'explicit'
+        'credential.interactive' = 'never'
+        'core.fsmonitor' = 'false'
+    }
+    $custom = @()
+    $customSource = $null
+    foreach ($target in $Targets) {
+        $entry = $target.Document.Value.($target.Container).PSObject.Properties['xray']
+        $environment = if ($entry) { $entry.Value.PSObject.Properties['env'] } else { $null }
+        if (-not $environment) { continue }
+        if ($environment.Value -isnot [PSCustomObject]) {
+            throw "Expected an env object for Xray in $($target.Path). No MCP configurations were written."
+        }
+        $environment = $environment.Value
+        $pairs = @($environment.PSObject.Properties | Where-Object { $_.Name -match '^GIT_CONFIG_(KEY|VALUE)_' })
+        $countProperty = $environment.PSObject.Properties['GIT_CONFIG_COUNT']
+        if (-not $countProperty -and $pairs.Count -eq 0) { continue }
+        $count = 0
+        if (-not $countProperty -or $countProperty.Value -isnot [string] -or
+            $countProperty.Value -cnotmatch '^\d+$' -or -not [int]::TryParse($countProperty.Value, [ref]$count) -or
+            $pairs.Count -ne (2L * $count)) {
+            throw "Invalid GIT_CONFIG_COUNT or numbered Git pairs in $($target.Path). No MCP configurations were written."
+        }
+        $extras = @(
+            for ($i = 0; $i -lt $count; $i++) {
+                $key = $environment.PSObject.Properties["GIT_CONFIG_KEY_$i"]
+                $value = $environment.PSObject.Properties["GIT_CONFIG_VALUE_$i"]
+                if (-not $key -or $key.Value -isnot [string] -or -not $key.Value -or
+                    -not $value -or $value.Value -isnot [string]) {
+                    throw "Invalid Git configuration pair $i in $($target.Path). No MCP configurations were written."
+                }
+                if ($key.Value -cnotmatch '\A[A-Za-z0-9-]+\.(?:[^\x00\n]*\.)?[A-Za-z][A-Za-z0-9-]*\z' -or
+                    $value.Value.IndexOf([char]0) -ge 0) {
+                    throw "Invalid Git configuration key or value at pair $i in $($target.Path). No MCP configurations were written."
+                }
+                if ($defaults.Contains($key.Value)) {
+                    $compatible = $value.Value -ceq $defaults[$key.Value]
+                    if ($key.Value -ieq 'credential.interactive') {
+                        $compatible = @('never', 'false', '0') -ccontains $value.Value
+                    }
+                    elseif ($key.Value -ieq 'core.fsmonitor') {
+                        $compatible = @('false', 'no', 'off', '0', '') -icontains $value.Value
+                    }
+                    if (-not $compatible) {
+                        throw "Conflicting Xray Git setting $($key.Value) in $($target.Path). Align the selected registrations before setup; values were not printed."
+                    }
+                }
+                else {
+                    [PSCustomObject][ordered]@{ Key = $key.Value; Value = $value.Value }
+                }
+            }
+        )
+        if ($extras.Count -gt 0) {
+            # Ordering and repeated keys matter for multi-valued Git configuration.
+            if ($customSource -and (ConvertTo-Json -InputObject $custom -Compress) -cne
+                (ConvertTo-Json -InputObject $extras -Compress)) {
+                throw "Conflicting numbered Git overrides in $customSource and $($target.Path). Align the selected registrations before setup; values were not printed."
+            }
+            $custom = $extras
+            $customSource = $target.Path
+        }
+    }
+    $gitEnvironment = [ordered]@{ GIT_CONFIG_COUNT = [string]($defaults.Count + $custom.Count) }
+    $index = 0
+    foreach ($key in $defaults.Keys) {
+        $gitEnvironment["GIT_CONFIG_KEY_$index"] = $key
+        $gitEnvironment["GIT_CONFIG_VALUE_$index"] = $defaults[$key]
+        $index++
+    }
+    foreach ($pair in $custom) {
+        $gitEnvironment["GIT_CONFIG_KEY_$index"] = $pair.Key
+        $gitEnvironment["GIT_CONFIG_VALUE_$index"] = $pair.Value
+        $index++
+    }
+    foreach ($target in $Targets) {
+        $environment = [ordered]@{}
+        $entry = $target.Document.Value.($target.Container).PSObject.Properties['xray']
+        if ($entry -and $entry.Value.env) {
+            foreach ($property in $entry.Value.env.PSObject.Properties) {
+                if ($property.Name -notmatch '^GIT_CONFIG_(COUNT$|KEY_|VALUE_)') {
+                    $environment[$property.Name] = $property.Value
+                }
+            }
+        }
+        foreach ($key in $gitEnvironment.Keys) { $environment[$key] = $gitEnvironment[$key] }
+        $target | Add-Member -NotePropertyName Environment -NotePropertyValue ([PSCustomObject]$environment) -Force
+    }
+}
+
 function Get-WorkspaceProfileFiles {
     param([string]$Profiles)
     if (-not (Test-Path -LiteralPath $Profiles)) { return }
@@ -1325,9 +1420,19 @@ function Get-PreservedWorkspaceSettings {
         $container = $document.PSObject.Properties[$migration.Container]
         $servers = if ($container) { $container.Value } else { $document }
         $entry = $servers.xray
+        $customEnvironment = $false
+        if ($entry.PSObject.Properties['env']) {
+            $target = [PSCustomObject]@{
+                Path = $migration.Path; Container = 'servers'
+                Document = [PSCustomObject]@{ Value = [PSCustomObject]@{ servers = [PSCustomObject]@{ xray = $entry } } }
+            }
+            Resolve-XrayMcpEnvironment @($target)
+            $customEnvironment = $target.Environment.GIT_CONFIG_COUNT -cne '3' -or
+                @($target.Environment.PSObject.Properties).Count -ne 7
+        }
         if ($entry.command -isnot [string] -or [IO.Path]::GetFileName($entry.command) -ine 'xray.exe' -or
             ($entry.type -and $entry.type -ne 'stdio') -or $entry.args -isnot [array] -or
-            ($entry.env -and @($entry.env.PSObject.Properties).Count -gt 0) -or $entry.cwd) {
+            $customEnvironment -or $entry.cwd) {
             throw "Cannot preserve command, cwd, or environment in $($migration.Path). Review this repository separately."
         }
         $settings += ConvertTo-PreservedWorkspaceArguments -Arguments $entry.args -RepoRoot $RepoRoot -Legacy
@@ -1794,10 +1899,6 @@ foreach ($target in ($targets | Where-Object { $_.Selected })) {
                 }
             }
         }
-        if ($isGitRepo -and -not $UserMcp) {
-            Protect-McpPath -RepoRoot $RepoPath -RelativePath $target.Relative -ExcludePath $excludePath
-            Protect-McpPath -RepoRoot $RepoPath -RelativePath "$($target.Relative).bak" -ExcludePath $excludePath
-        }
         $target.Status = 'Ready'
     }
     catch { Write-Warning $_.Exception.Message; $target.Status = 'Skipped (error)' }
@@ -1808,6 +1909,13 @@ if ($UserMcp -and @($targets | Where-Object { $_.Selected -and $_.Status -ne 'Re
 if (@($targets | Where-Object { $_.Status -eq 'Ready' }).Count -eq 0) {
     Write-Error 'No eligible MCP configuration could be prepared. No MCP config was written.'
     exit 1
+}
+Resolve-XrayMcpEnvironment -Targets @($targets | Where-Object { $_.Status -eq 'Ready' })
+if ($isGitRepo -and -not $UserMcp) {
+    foreach ($target in @($targets | Where-Object { $_.Status -eq 'Ready' })) {
+        Protect-McpPath -RepoRoot $RepoPath -RelativePath $target.Relative -ExcludePath $excludePath
+        Protect-McpPath -RepoRoot $RepoPath -RelativePath "$($target.Relative).bak" -ExcludePath $excludePath
+    }
 }
 if ($PlanOnly) {
     [PSCustomObject]@{
@@ -2025,6 +2133,7 @@ foreach ($target in ($targets | Where-Object { $_.Status -eq 'Ready' })) {
                 }
             }
         }
+        $entry | Add-Member -NotePropertyName env -NotePropertyValue $target.Environment -Force
         $target.Document.Value.($target.Container) | Add-Member -NotePropertyName 'xray' -NotePropertyValue $entry -Force
         $changed = Write-SetupJson -Document $target.Document -Backup
         $target.Status = if ($changed) { 'Configured' } else { 'Up to date' }
