@@ -481,16 +481,21 @@ That option does not override existing repository settings.
 If a new repository has too few files to meet the installer's existing detection
 threshold, setup reports the missing selection and requests `-Extensions`.
 
-Discovery descends through grouping directories and recognizes both normal
-checkouts and Git worktree files. It stops at each checkout, so nested repositories
-inside a checkout are not discovered. Dependency/build directories and reparse
-points are skipped; paths outside `-Root` are not enrolled.
+Discovery checks at most five directory levels below `-Root`, counting the root
+as depth zero, and recognizes both normal checkouts and Git worktree files.
+For `-Root C:\Repos`, a checkout at `C:\Repos\a\b\c\d\repo` is included; one at
+`C:\Repos\a\b\c\d\e\repo` is not. Directories at depth five are checked for Git
+metadata, but their children are not listed. To set up a deeper checkout, pass
+it or a closer parent as `-Root`. Discovery stops at each checkout, so nested
+repositories inside a checkout are not discovered. Dependency/build directories
+and reparse points are skipped; paths outside `-Root` are not enrolled.
 `-ExcludeDirectory` adds case-insensitive directory-name wildcard masks, for
 example `-ExcludeDirectory '*.obj.temp','scratch'`. Matching child trees are
 skipped before listing their contents or checking repositories inside them.
 The masks apply at every depth below `-Root`, not to the explicitly selected
 root itself, and accept names/masks rather than paths. Without this option,
-discovery and the built-in dependency/build-directory exclusions are unchanged.
+the five-level discovery limit and built-in dependency/build-directory exclusions
+still apply.
 Malformed masks fail parameter validation before discovery. For a literal name
 containing wildcard characters, use
 `[System.Management.Automation.WildcardPattern]::Escape('cache[1]')`.

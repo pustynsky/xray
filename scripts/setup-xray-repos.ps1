@@ -8,7 +8,8 @@
     Conflicts are skipped and reported with a nonzero exit code.
 .PARAMETER Root
     Directory containing repositories or grouping directories. A checkout at Root
-    is included. Nested repositories inside a checkout are not searched.
+    is included. Discovery checks at most five levels below Root (depth zero).
+    Nested repositories inside a checkout are not searched.
 .PARAMETER IncludeNewRepos
     Also configure checkouts without Xray. Extensions are detected by the installer
     unless -Extensions supplies a list for new repositories only.
@@ -68,13 +69,14 @@ function Get-BulkRepositories {
     $excludePatterns = @($ExcludeDirectory | ForEach-Object {
         [Management.Automation.WildcardPattern]::new($_, [Management.Automation.WildcardOptions]::IgnoreCase)
     })
-    $pending = [Collections.Generic.Stack[string]]::new()
-    $pending.Push($Directory)
+    $pending = [Collections.Generic.Stack[hashtable]]::new()
+    $pending.Push(@{ Path = $Directory; Depth = 0 })
     $visited = 0
     $found = 0
     $progressTimer = [Diagnostics.Stopwatch]::StartNew()
     while ($pending.Count -gt 0) {
-        $path = $pending.Pop()
+        $entry = $pending.Pop()
+        $path = $entry.Path
         $visited++
         if ($visited -eq 1 -or $progressTimer.ElapsedMilliseconds -ge 250) {
             Write-Progress -Id 1 -Activity 'Discovering Git repositories' `
@@ -91,6 +93,7 @@ function Get-BulkRepositories {
             $path
             continue
         }
+        if ($entry.Depth -ge 5) { continue }
         foreach ($child in @(Get-ChildItem -LiteralPath $path -Directory -Force)) {
             if ($skip -contains $child.Name) { continue }
             $excluded = $false
@@ -101,7 +104,7 @@ function Get-BulkRepositories {
                 Write-Host "Skipping excluded directory: $($child.FullName)"
                 continue
             }
-            $pending.Push($child.FullName)
+            $pending.Push(@{ Path = $child.FullName; Depth = $entry.Depth + 1 })
         }
     }
     Write-Progress -Id 1 -Activity 'Discovering Git repositories' `
@@ -153,7 +156,7 @@ try {
     if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Adjacent installer not found: $installer." }
     if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) { throw 'Git is required for repository discovery and migration.' }
 
-    Write-Host "Discovering Git repositories under $Root..."
+    Write-Host "Discovering Git repositories under $Root (maximum depth: 5; Root depth: 0)..."
     $repositories = @(Get-BulkRepositories $Root | Sort-Object -Unique)
     Write-Host "Found $($repositories.Count) repository candidates. Checking Xray configuration..."
     $checked = 0

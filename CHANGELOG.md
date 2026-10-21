@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Limited bulk repository discovery to five levels.** Setup treats `-Root` as depth zero, includes checkouts at depth five, and does not list their children. The startup message shows the limit. Pass a deeper `-Root` to reach checkouts outside that range.
+
 - **Made bulk setup progress visible.** Repository-directory setup reports the discovery phase, current path and counters, then the current repository during configuration checks and application. Plain-text messages remain available without progress-bar rendering. Optional `-ExcludeDirectory` name/wildcard masks prune matching child trees before inspecting their contents, without changing default selection.
 
 ## 0.9.3 (2026-10-21)
