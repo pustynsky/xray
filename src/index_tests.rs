@@ -540,6 +540,34 @@ fn test_find_content_index_empty_expected_accepts_any() {
 }
 
 #[test]
+fn test_find_content_index_rejects_invalid_extensions_with_or_without_meta() {
+    let root = tempfile::tempdir().unwrap();
+    let canonical_root = crate::canonicalize_test_root(root.path());
+    let root_str = crate::clean_path(&canonical_root.to_string_lossy());
+    for extensions in [vec![], vec![String::new()], vec![" ".into()], vec!["rs".into(), String::new()]] {
+        for with_meta in [true, false] {
+            let cache = tempfile::tempdir().unwrap();
+            let index = code_xray::ContentIndex {
+                root: root_str.clone(),
+                format_version: code_xray::CONTENT_INDEX_VERSION,
+                extensions: extensions.clone(),
+                ..Default::default()
+            };
+            crate::save_content_index(&index, cache.path()).unwrap();
+            if !with_meta {
+                let path = crate::content_index_path_for(&root_str, &extensions.join(","), cache.path());
+                std::fs::remove_file(path.with_extension("word-search.meta")).unwrap();
+            }
+
+            assert!(
+                crate::index::find_content_index_for_dir(&root_str, cache.path(), &[]).is_none(),
+                "The only cached index has invalid extensions {extensions:?}, with_meta={with_meta}"
+            );
+        }
+    }
+}
+
+#[test]
 fn test_save_compressed_atomic_no_tmp_left_behind() {
     // Atomic save should not leave a .tmp file after successful save
     let tmp = tempfile::tempdir().unwrap();
@@ -630,6 +658,36 @@ fn test_build_content_index_valid_dir_returns_ok() {
     assert!(result.is_ok(), "build_content_index should succeed for valid directory");
     let index = result.unwrap();
     assert!(!index.files.is_empty(), "Valid directory should produce non-empty content index");
+}
+
+#[test]
+fn test_build_content_index_rejects_empty_extension_entries() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("file.rs"), "scope_not_found\n").unwrap();
+    for ext in ["", " ", ",", "rs,", ",rs", "rs,,cs", "rs, \t,cs"] {
+        let err = crate::index::build_content_index(&crate::ContentIndexArgs {
+            dir: tmp.path().to_string_lossy().to_string(),
+            ext: ext.to_string(),
+            threads: 1,
+            ..Default::default()
+        }).unwrap_err();
+        assert!(matches!(err, crate::SearchError::InvalidArgs(_)), "{ext:?}: {err}");
+        assert!(err.to_string().contains("extensions must be non-empty"));
+    }
+}
+
+#[test]
+fn test_build_content_index_normalizes_valid_extensions() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("file.rs"), "scope_not_found\n").unwrap();
+    let index = crate::index::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp.path().to_string_lossy().to_string(),
+        ext: " RS , Cs ".to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    assert_eq!(index.extensions, ["rs", "cs"]);
+    assert_eq!(index.files.len(), 1);
 }
 
 #[test]
@@ -1915,5 +1973,3 @@ fn test_sharded_temp_file_cleaned_on_serialize_failure() {
         .collect();
     assert!(leftovers.is_empty(), "TempFileGuard must clean up on failure: {:?}", leftovers);
 }
-
-

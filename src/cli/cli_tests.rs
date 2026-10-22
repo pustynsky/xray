@@ -2,6 +2,181 @@ use super::*;
 use std::collections::HashMap;
 use crate::{ContentIndex, Posting, TrigramIndex};
 
+fn save_grep_test_index(root: &Path, cache: &Path, ext: &str) -> ContentIndex {
+    let index = build_content_index(&ContentIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: ext.to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    save_content_index(&index, cache).unwrap();
+    index
+}
+
+#[test]
+fn test_load_grep_index_without_ext_reuses_cache_repeatedly() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("probe.rs"), "scope_not_found\nscope_not_found\n").unwrap();
+    let original = save_grep_test_index(root.path(), cache.path(), "rs");
+    let path = content_index_path_for(&original.root, "rs", cache.path());
+    let meta_path = path.with_extension("word-search.meta");
+    let original_bytes = fs::read(&path).unwrap();
+    let original_meta = fs::read(&meta_path).unwrap();
+    let terms = vec!["scope_not_found".to_string()];
+
+    for auto_reindex in [true, false] {
+        for _ in 0..2 {
+            let (index, _) = load_grep_index(&original.root, &None, auto_reindex, false, cache.path()).unwrap();
+            assert_eq!(index.extensions, ["rs"]);
+            assert_eq!(index.files.len(), 1);
+            let results = score_grep_results(&index, &terms, &None, &[], &[], grep_score_options(false, 1, false));
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].occurrences, 2);
+            assert_eq!(results[0].lines, [1, 2]);
+        }
+    }
+
+    assert_eq!(fs::read(&path).unwrap(), original_bytes);
+    assert_eq!(fs::read(&meta_path).unwrap(), original_meta);
+    assert!(!content_index_path_for(&original.root, "", cache.path()).exists());
+    let (explicit, _) = load_grep_index(&original.root, &Some("rs".into()), true, false, cache.path()).unwrap();
+    assert_eq!(explicit.files, original.files);
+    let absent = vec!["missing_term".to_string()];
+    assert!(score_grep_results(&explicit, &absent, &None, &[], &[], grep_score_options(false, 1, false)).is_empty());
+}
+
+#[test]
+fn test_load_grep_index_without_ext_ignores_legacy_empty_cache() {
+    for with_meta in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("probe.rs"), "scope_not_found\n").unwrap();
+        let original = save_grep_test_index(root.path(), cache.path(), "rs");
+        let empty = ContentIndex {
+            root: original.root.clone(),
+            format_version: code_xray::CONTENT_INDEX_VERSION,
+            extensions: vec![String::new()],
+            ..Default::default()
+        };
+        save_content_index(&empty, cache.path()).unwrap();
+        if !with_meta {
+            let path = content_index_path_for(&original.root, "", cache.path());
+            fs::remove_file(path.with_extension("word-search.meta")).unwrap();
+        }
+
+        for _ in 0..2 {
+            let (index, _) = load_grep_index(&original.root, &None, true, false, cache.path()).unwrap();
+            assert_eq!(index.extensions, ["rs"]);
+            assert_eq!(index.files, original.files);
+        }
+    }
+}
+
+#[test]
+fn test_load_grep_index_without_ext_requires_usable_cache() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let dir = root.path().to_string_lossy().to_string();
+    for auto_reindex in [true, false] {
+        let err = load_grep_index(&dir, &None, auto_reindex, false, cache.path()).unwrap_err();
+        assert!(matches!(err, SearchError::IndexNotFound { .. }));
+        assert_eq!(fs::read_dir(cache.path()).unwrap().count(), 0);
+    }
+
+    for extensions in [vec![], vec![String::new()], vec![" ".into()], vec!["rs".into(), String::new()]] {
+        let empty = ContentIndex {
+            root: crate::clean_path(&fs::canonicalize(root.path()).unwrap().to_string_lossy()),
+            format_version: code_xray::CONTENT_INDEX_VERSION,
+            extensions,
+            ..Default::default()
+        };
+        save_content_index(&empty, cache.path()).unwrap();
+        let err = load_grep_index(&dir, &None, true, false, cache.path()).unwrap_err();
+        assert!(matches!(err, SearchError::IndexNotFound { .. }));
+    }
+}
+
+#[test]
+fn test_load_grep_index_superset_keeps_query_filter_separate() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("probe.rs"), "scope_not_found\n").unwrap();
+    fs::write(root.path().join("probe.cs"), "scope_not_found\n").unwrap();
+    let original = save_grep_test_index(root.path(), cache.path(), "rs,cs");
+    let query_ext = Some("rs".to_string());
+    for auto_reindex in [true, false] {
+        let (index, _) = load_grep_index(&original.root, &query_ext, auto_reindex, false, cache.path()).unwrap();
+        assert_eq!(index.extensions, ["rs", "cs"]);
+        assert_eq!(index.files.len(), 2);
+        let terms = vec!["scope_not_found".to_string()];
+        let results = score_grep_results(&index, &terms, &query_ext, &[], &[], grep_score_options(false, 1, false));
+        assert_eq!(results.len(), 1);
+        assert!(results[0].file_path.ends_with("probe.rs"));
+        assert!(!content_index_path_for(&original.root, "rs", cache.path()).exists());
+    }
+}
+
+#[test]
+fn test_load_grep_index_rebuilds_selected_stale_cache_with_original_extensions() {
+    for ext in [None, Some("rs".to_string())] {
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("probe.rs"), "scope_not_found\n").unwrap();
+        let mut original = save_grep_test_index(root.path(), cache.path(), "rs,cs");
+        original.created_at = 1;
+        original.max_age_secs = 3600;
+        original.respect_git_exclude = true;
+        save_content_index(&original, cache.path()).unwrap();
+        fs::write(root.path().join("added.cs"), "scope_not_found\n").unwrap();
+
+        let (stale, _) = load_grep_index(&original.root, &ext, false, false, cache.path()).unwrap();
+        assert!(stale.is_stale());
+        assert_eq!(stale.files.len(), 1);
+        let (rebuilt, _) = load_grep_index(&original.root, &ext, true, false, cache.path()).unwrap();
+        assert_eq!(rebuilt.extensions, ["rs", "cs"]);
+        assert_eq!(rebuilt.files.len(), 2);
+        assert_eq!(rebuilt.max_age_secs, 3600);
+        assert!(rebuilt.respect_git_exclude);
+        assert!(!rebuilt.is_stale());
+        let persisted = load_content_index(&original.root, "rs,cs", cache.path()).unwrap();
+        assert_eq!(persisted.files, rebuilt.files);
+        assert!(!content_index_path_for(&original.root, "", cache.path()).exists());
+        assert!(!content_index_path_for(&original.root, "rs", cache.path()).exists());
+    }
+}
+
+#[test]
+fn test_load_grep_index_builds_only_with_explicit_valid_extensions() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let dir = root.path().to_string_lossy().to_string();
+    fs::write(root.path().join("probe.rs"), "scope_not_found\n").unwrap();
+    for ext in ["", " ", ",", "rs,", ",rs", "rs, ,cs"] {
+        let err = load_grep_index(&dir, &Some(ext.into()), true, false, cache.path()).unwrap_err();
+        assert!(matches!(err, SearchError::InvalidArgs(_)), "{ext:?}: {err}");
+    }
+    assert_eq!(fs::read_dir(cache.path()).unwrap().count(), 0);
+    let (index, _) = load_grep_index(&dir, &Some("rs".into()), true, false, cache.path()).unwrap();
+    assert_eq!(index.files.len(), 1);
+    assert_eq!(load_content_index(&dir, "rs", cache.path()).unwrap().files, index.files);
+}
+
+#[test]
+fn test_load_grep_index_does_not_use_unrelated_extensions() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("probe.cs"), "scope_not_found\n").unwrap();
+    let original = save_grep_test_index(root.path(), cache.path(), "cs");
+    let ext = Some("rs".into());
+    assert!(load_grep_index(&original.root, &ext, false, false, cache.path()).is_err());
+    let (empty, _) = load_grep_index(&original.root, &ext, true, false, cache.path()).unwrap();
+    assert_eq!(empty.extensions, ["rs"]);
+    assert!(empty.files.is_empty());
+    let (persisted, _) = load_grep_index(&original.root, &ext, true, false, cache.path()).unwrap();
+    assert!(persisted.files.is_empty());
+}
+
 // ─── Helper: build a minimal ContentIndex from known data ────────
 
 /// Build a test ContentIndex with given files, tokens→postings, and token counts.

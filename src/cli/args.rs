@@ -374,6 +374,8 @@ impl Default for ServeArgs {
 NOTES:
   - Requires a content index. Build one first:
       xray content-index -d C:\Projects -e cs,rs,py
+  - Without --ext, reuse an existing index and search all its indexed extensions
+  - With --ext, reuse a covering index before rebuilding; empty extensions are invalid
   - Results use TF-IDF relevance; one exact token can also receive a normalized file-stem signal
   - Multi-term: comma-separated, OR by default, AND with --all
   - Regex: pattern matched against all indexed tokens (e.g. 754K unique tokens)

@@ -459,70 +459,65 @@ fn load_grep_index(
     ext: &Option<String>,
     auto_reindex: bool,
     respect_git_exclude: bool,
+    idx_base: &Path,
 ) -> Result<(ContentIndex, Duration), SearchError> {
     let start = Instant::now();
-    let idx_base = index_dir();
-    let exts_for_load = ext.clone().unwrap_or_default();
+    let expected_exts: Vec<String> = ext.as_ref().map(|exts|
+        exts.split(',').map(|s| s.trim().to_lowercase()).collect()
+    ).unwrap_or_default();
+    if ext.is_some() {
+        crate::index::validate_content_extensions(&expected_exts)?;
+    }
 
-    let index = match load_content_index(dir, &exts_for_load, &idx_base) {
-        Ok(idx) => {
-            if idx.is_stale() && auto_reindex {
-                eprintln!("Content index is stale, rebuilding...");
-                let ext_str = idx.extensions.join(",");
-                let effective_respect = resolve_respect_git_exclude(
-                    "content",
-                    Some(idx.respect_git_exclude),
-                    respect_git_exclude,
-                );
-                let new_idx = build_content_index(&ContentIndexArgs {
-                    dir: dir.to_string(), ext: ext_str, max_age_hours: idx.max_age_secs / 3600,
-                    hidden: false, no_ignore: false, respect_git_exclude: effective_respect, threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
-                })?;
-                let _ = save_content_index(&new_idx, &idx_base);
-                new_idx
-            } else {
-                if idx.is_stale() { eprintln!("Warning: content index is stale"); }
-                idx
-            }
-        }
-        Err(e) => {
-            if auto_reindex {
-                // Index exists but has incompatible format version — rebuild automatically
-                // (consistent with MCP server behavior in cmd_serve)
-                let rebuild_ext = {
-                    let idx_path = content_index_path_for(dir, &exts_for_load, &idx_base);
-                    crate::index::load_index_meta(&idx_path)
-                        .map(|m| m.extensions.join(","))
-                        .unwrap_or_else(|| exts_for_load.clone())
-                };
-                eprintln!("Auto-rebuilding content index for '{}' (ext={})...", dir, rebuild_ext);
-                match build_content_index(&ContentIndexArgs {
-                    dir: dir.to_string(), ext: rebuild_ext,
-                    max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude,
-                    threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
-                }) {
-                    Ok(new_idx) => {
-                        let _ = save_content_index(&new_idx, &idx_base);
-                        new_idx
-                    }
-                    Err(build_err) => {
-                        eprintln!("Auto-rebuild failed: {}", build_err);
-                        // Fall through to find_content_index_for_dir as last resort
-                        match find_content_index_for_dir(dir, &idx_base, &[]) {
-                            Some(idx) => idx,
-                            None => return Err(SearchError::IndexNotFound { dir: dir.to_string() }),
-                        }
-                    }
-                }
-            } else {
-                eprintln!("Content index load failed: {}", e);
-                match find_content_index_for_dir(dir, &idx_base, &[]) {
-                    Some(idx) => idx,
-                    None => return Err(SearchError::IndexNotFound { dir: dir.to_string() }),
-                }
-            }
+    let loaded = match ext {
+        Some(exts) => load_content_index(dir, exts, idx_base).or_else(|err| {
+            find_content_index_for_dir(dir, idx_base, &expected_exts).ok_or(err)
+        }),
+        // Never select the empty-extension cache produced by older versions.
+        None => find_content_index_for_dir(dir, idx_base, &[])
+            .ok_or_else(|| SearchError::IndexNotFound { dir: dir.to_string() }),
+    };
+    let mut index = match loaded {
+        Ok(idx) => idx,
+        Err(err) => {
+            let Some(exts) = ext.as_ref().filter(|_| auto_reindex) else {
+                return Err(err);
+            };
+            let idx_path = content_index_path_for(dir, exts, idx_base);
+            let rebuild_ext = crate::index::load_index_meta(&idx_path)
+                .map(|m| m.extensions.join(","))
+                .unwrap_or_else(|| exts.clone());
+            eprintln!("Auto-rebuilding content index for '{}' (ext={})...", dir, rebuild_ext);
+            let new_idx = build_content_index(&ContentIndexArgs {
+                dir: dir.to_string(), ext: rebuild_ext,
+                max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude,
+                threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+            })?;
+            save_content_index(&new_idx, idx_base)?;
+            new_idx
         }
     };
+
+    crate::index::validate_content_extensions(&index.extensions)?;
+    if index.is_stale() {
+        if auto_reindex {
+            eprintln!("Content index is stale, rebuilding...");
+            let effective_respect = resolve_respect_git_exclude(
+                "content",
+                Some(index.respect_git_exclude),
+                respect_git_exclude,
+            );
+            index = build_content_index(&ContentIndexArgs {
+                dir: dir.to_string(), ext: index.extensions.join(","),
+                max_age_hours: index.max_age_secs / 3600,
+                hidden: false, no_ignore: false, respect_git_exclude: effective_respect,
+                threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+            })?;
+            save_content_index(&index, idx_base)?;
+        } else {
+            eprintln!("Warning: content index is stale");
+        }
+    }
 
     let load_elapsed = start.elapsed();
     Ok((index, load_elapsed))
@@ -804,7 +799,7 @@ fn score_grep_results(
 
 fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     let start = Instant::now();
-    let (index, load_elapsed) = load_grep_index(&args.dir, &args.ext, args.auto_reindex, args.respect_git_exclude)?;
+    let (index, load_elapsed) = load_grep_index(&args.dir, &args.ext, args.auto_reindex, args.respect_git_exclude, &index_dir())?;
     let search_start = Instant::now();
 
     // Default: substring search (like MCP). Disabled by --exact, --regex, or --phrase.

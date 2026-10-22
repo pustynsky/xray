@@ -1577,6 +1577,15 @@ pub fn load_content_index_at_path(path: &std::path::Path) -> Result<ContentIndex
     Ok(index)
 }
 
+pub(crate) fn validate_content_extensions(extensions: &[String]) -> Result<(), SearchError> {
+    if extensions.is_empty() || extensions.iter().any(|ext| ext.trim().is_empty()) {
+        return Err(SearchError::InvalidArgs(
+            "Content index extensions must be non-empty (for example, --ext rs,cs). Empty comma-separated entries are not allowed.".to_string()
+        ));
+    }
+    Ok(())
+}
+
 /// Try to find any content index (.word-search) file matching the given directory.
 ///
 /// When `expected_exts` is non-empty, the cached index must contain ALL
@@ -1609,6 +1618,10 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
             if !path_eq(&meta.root, &clean) {
                 continue; // root doesn't match — skip without loading
             }
+            if let Err(err) = validate_content_extensions(&meta.extensions) {
+                warn!(target: "xray::index", path = %path.display(), error = %err, "find_content_index: skipping invalid extensions");
+                continue;
+            }
             // Check extension superset from metadata
             if !expected_exts.is_empty() {
                 let has_all = expected_exts.iter().all(|ext|
@@ -1632,7 +1645,13 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
                 Some(_) => {}
             }
             match load_content_index_at_path(&path) {
-                Ok(index) => return Some(index),
+                Ok(index) => {
+                    if let Err(err) = validate_content_extensions(&index.extensions) {
+                        warn!(target: "xray::index", path = %path.display(), error = %err, "find_content_index: skipping invalid extensions");
+                        continue;
+                    }
+                    return Some(index);
+                }
                 Err(e) => {
                     warn!(target: "xray::index", path = %path.display(), error = %e, "find_content_index: metadata matched but load failed");
                     continue;
@@ -1661,6 +1680,10 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
         match load_content_index_at_path(&path) {
             Ok(index) => {
                 if path_eq(&index.root, &clean) {
+                    if let Err(err) = validate_content_extensions(&index.extensions) {
+                        warn!(target: "xray::index", path = %path.display(), error = %err, "find_content_index: skipping invalid extensions");
+                        continue;
+                    }
                     // Validate that cached index has ALL expected extensions
                     if !expected_exts.is_empty() {
                         let has_all = expected_exts.iter().all(|ext|
@@ -2033,6 +2056,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
         .map_err(|_| SearchError::DirNotFound(args.dir.clone()))?;
     let root_str = clean_path(&root.to_string_lossy());
     let extensions: Vec<String> = args.ext.split(',').map(|s| s.trim().to_lowercase()).collect();
+    validate_content_extensions(&extensions)?;
 
     eprintln!(
         "Building content index for {} (extensions: {})...",
