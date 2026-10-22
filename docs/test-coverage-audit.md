@@ -191,6 +191,12 @@ pwsh -NoProfile -File .\scripts\test-ci-policy.ps1
 These tests use isolated Git repositories and synthetic job results. They do
 not replace verification of job scheduling and `if`/`needs` behavior in Actions.
 
+To verify documentation-only routing after a workflow change, open a PR that
+changes only an already allowlisted document. Expect `CI policy` and `CI gate`
+to succeed and every heavy job to be skipped. Check that the gate summary says
+heavy checks were not required, rather than claiming they passed. A manual run
+always selects Full and cannot verify this documentation-only path.
+
 The Windows Rust job uploads its debug executable as a one-day artifact.
 Both `setup-integration` jobs download that binary from the same workflow run
 and run the full user and bulk setup suites in parallel. They depend only on
