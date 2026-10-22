@@ -342,6 +342,7 @@ fn build_context_with_index_dir(args: ServeArgs, idx_base: PathBuf) -> mcp::hand
         &dir_str,
         &idx_base,
         is_unresolved,
+        &workspace,
         GitCacheReadiness {
             content_terminal: Arc::clone(&content_build_terminal),
             def_terminal: Arc::clone(&def_build_terminal),
@@ -1737,6 +1738,7 @@ fn build_git_cache_background(
     dir_str: &str,
     idx_base: &Path,
     is_unresolved: bool,
+    workspace: &Arc<RwLock<mcp::handlers::WorkspaceBinding>>,
     readiness: GitCacheReadiness,
 ) -> (Arc<RwLock<Option<GitHistoryCache>>>, Arc<AtomicBool>) {
     let git_cache: Arc<RwLock<Option<GitHistoryCache>>> = Arc::new(RwLock::new(None));
@@ -1747,8 +1749,18 @@ fn build_git_cache_background(
         let bg_git_ready = Arc::clone(&git_cache_ready);
         let bg_dir = dir_str.to_string();
         let bg_idx_base = idx_base.to_path_buf();
+        let bg_workspace = Arc::clone(workspace);
+        let (workspace_dir, generation) = {
+            let ws = workspace.read().unwrap_or_else(|e| e.into_inner());
+            (ws.dir.clone(), ws.generation)
+        };
 
         std::thread::spawn(move || {
+            let finish = |cache| {
+                mcp::handlers::publish_workspace_git_cache(
+                    &bg_git_cache, &bg_git_ready, &bg_workspace, &workspace_dir, generation, cache,
+                );
+            };
             let start = Instant::now();
             crate::index::log_memory("git-cache: starting");
             crate::index::log_phase("gitCacheStarted", &[
@@ -1758,7 +1770,7 @@ fn build_git_cache_background(
             let repo_path = PathBuf::from(&bg_dir);
             let git_dir = repo_path.join(".git");
             if !git_dir.exists() {
-                bg_git_ready.store(true, Ordering::Release);
+                finish(None);
                 crate::index::log_phase("gitCacheReady", &[
                     ("cacheHitGit", "false".to_string()),
                     ("gitCacheSkipped", "true".to_string()),
@@ -1774,7 +1786,7 @@ fn build_git_cache_background(
                 Ok(b) => b,
                 Err(e) => {
                     warn!(error = %e, "Failed to detect default branch, skipping git cache");
-                    bg_git_ready.store(true, Ordering::Release);
+                    finish(None);
                     crate::index::log_phase("gitCacheReady", &[
                         ("cacheHitGit", "false".to_string()),
                         ("gitCacheSkipped", "true".to_string()),
@@ -1862,7 +1874,7 @@ fn build_git_cache_background(
                         &readiness.def_ready,
                         readiness.wait_for_def_terminal,
                     ) {
-                        bg_git_ready.store(true, Ordering::Release);
+                        finish(None);
                         crate::index::log_phase("gitCacheReady", &[
                             ("cacheHitGit", "false".to_string()),
                             ("gitCacheSkipped", "true".to_string()),
@@ -1891,7 +1903,7 @@ fn build_git_cache_background(
                         }
                         Err(e) => {
                             warn!(error = %e, "Failed to build git cache");
-                            bg_git_ready.store(true, Ordering::Release);
+                            finish(None);
                             crate::index::log_phase("gitCacheReady", &[
                                 ("cacheHitGit", "false".to_string()),
                                 ("gitCacheSkipped", "true".to_string()),
@@ -1909,11 +1921,7 @@ fn build_git_cache_background(
             let commit_count = cache.commits.len();
             let file_count = cache.file_commits.len();
 
-            // Publish: write to Arc<RwLock<Option<GitHistoryCache>>>
-            if let Ok(mut guard) = bg_git_cache.write() {
-                *guard = Some(cache);
-            }
-            bg_git_ready.store(true, Ordering::Release);
+            finish(Some(cache));
 
             let elapsed = start.elapsed();
             crate::index::log_phase("gitCacheReady", &[

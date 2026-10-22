@@ -1,5 +1,137 @@
 use super::*;
 
+#[cfg(feature = "lang-rust")]
+fn workspace_completion_case(tool: &str, roots_response: bool, explicit_dir: bool, root_alias: bool) {
+    use std::sync::{Arc, RwLock};
+    use std::sync::atomic::Ordering;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ctx = make_ctx();
+    ctx.server_ext = "rs".into();
+    ctx.def_extensions = vec!["rs".into()];
+    ctx.index_base = tmp.path().join("indexes");
+    ctx.watch_enabled = true;
+    ctx.periodic_rescan_enabled = false;
+    let mut roots = Vec::new();
+    for name in ["a", "b"] {
+        let path = tmp.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("probe.rs"), format!("fn marker_{name}() {{}}\n")).unwrap();
+        let dir = crate::clean_path(&std::fs::canonicalize(&path).unwrap().to_string_lossy());
+        let content = crate::index::build_content_index(&crate::ContentIndexArgs {
+            dir: dir.clone(), ext: "rs".into(), threads: 1, ..Default::default()
+        }).unwrap();
+        crate::index::save_content_index(&content, &ctx.index_base).unwrap();
+        let definitions = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+            dir: dir.clone(), ext: "rs".into(), threads: 1, respect_git_exclude: false,
+        });
+        crate::definitions::save_definition_index(&definitions, &ctx.index_base).unwrap();
+        if name == "a" {
+            *ctx.index.write().unwrap() = crate::mcp::watcher::build_watch_index_from(content);
+            ctx.def_index = Some(Arc::new(RwLock::new(definitions)));
+        }
+        roots.push(dir);
+    }
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(roots[0].clone());
+        ws.mode = handlers::WorkspaceBindingMode::ClientRoots;
+        ws.status = handlers::WorkspaceStatus::Resolved;
+    }
+    ctx.content_ready.store(true, Ordering::Release);
+    ctx.def_ready.store(true, Ordering::Release);
+    if roots_response {
+        let mut state = ServerState {
+            pending_roots_request_id: Some(17), client_supports_roots: true,
+            client_supports_roots_list_changed: true, next_id: 18,
+        };
+        let root_path = if root_alias {
+            let alias = tmp.path().join("root alias");
+            #[cfg(windows)]
+            {
+                let output = crate::background_command("cmd")
+                    .args(["/C", "mklink", "/J"])
+                    .arg(&alias)
+                    .arg(roots[1].replace('/', "\\"))
+                    .output().unwrap();
+                assert!(output.status.success(), "junction creation failed: {:?}",
+                    String::from_utf8_lossy(&output.stderr));
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&roots[1], &alias).unwrap();
+            alias
+        } else {
+            std::path::PathBuf::from(&roots[1])
+        };
+        let uri = url::Url::from_file_path(root_path).unwrap();
+        handle_pending_response(&json!({
+            "id": 17, "result": {"roots": [{"uri": uri.as_str()}]}
+        }), &mut state, &ctx);
+    }
+    let binding_generation = ctx.workspace.read().unwrap().generation;
+    let mut args = json!({"ext": ["rs"]});
+    if explicit_dir { args["dir"] = json!(roots[1]); }
+    let result = handlers::dispatch_tool(&ctx, tool, &args);
+    // Stop any successfully started workers even if a later assertion fails.
+    let worker_generation = ctx.watcher_generation.fetch_add(1, Ordering::AcqRel);
+    assert!(!result.is_error, "{}", result.content[0].text);
+    assert!(worker_generation > 0, "workspace completion did not retarget workers");
+    assert!(ctx.content_ready.load(Ordering::Acquire));
+    assert!(ctx.def_ready.load(Ordering::Acquire));
+    assert!(code_xray::path_eq(&ctx.index.read().unwrap().root, &roots[1]));
+    assert!(code_xray::path_eq(&ctx.def_index.as_ref().unwrap().read().unwrap().root, &roots[1]));
+    let ws = ctx.workspace.read().unwrap();
+    assert_eq!(ws.status, handlers::WorkspaceStatus::Resolved);
+    if roots_response {
+        assert_eq!(ws.mode, handlers::WorkspaceBindingMode::ClientRoots);
+        assert_eq!(ws.generation, binding_generation);
+        assert!(code_xray::path_eq(&ws.dir, &roots[1]));
+    }
+    if root_alias {
+        drop(ws);
+        let mut state = ServerState {
+            pending_roots_request_id: Some(19), client_supports_roots: true,
+            client_supports_roots_list_changed: true, next_id: 20,
+        };
+        let uri = url::Url::from_file_path(tmp.path().join("root alias")).unwrap();
+        handle_pending_response(&json!({
+            "id": 19, "result": {"roots": [{"uri": uri.as_str()}]}
+        }), &mut state, &ctx);
+        let ws = ctx.workspace.read().unwrap();
+        assert_eq!(ws.mode, handlers::WorkspaceBindingMode::ClientRoots);
+        assert_eq!(ws.generation, binding_generation);
+        assert_eq!(ws.status, handlers::WorkspaceStatus::Resolved);
+        assert!(code_xray::path_eq(&ws.dir, &roots[1]));
+        assert!(ctx.content_ready.load(Ordering::Acquire));
+        assert!(ctx.def_ready.load(Ordering::Acquire));
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
+fn test_workspace_completion_roots_both_reindex_handlers() {
+    for tool in ["xray_reindex", "xray_reindex_definitions"] {
+        for explicit_dir in [false, true] {
+            workspace_completion_case(tool, true, explicit_dir, false);
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
+fn test_workspace_completion_roots_alias_both_reindex_handlers() {
+    for tool in ["xray_reindex_definitions", "xray_reindex"] {
+        for explicit_dir in [false, true] {
+            workspace_completion_case(tool, true, explicit_dir, true);
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
+fn test_workspace_completion_direct_definition_switch() {
+    workspace_completion_case("xray_reindex_definitions", false, true, false);
+}
+
 
 
 fn make_ctx() -> HandlerContext {

@@ -2278,6 +2278,7 @@ pub(crate) fn effective_definition_build_extensions(ctx: &HandlerContext) -> Vec
 /// Returns "loaded_cache", "background_build", "build_in_progress", or None.
 fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'static str> {
     let def_arc = ctx.def_index.as_ref()?;
+    let expected_generation = ctx.workspace.read().unwrap_or_else(|e| e.into_inner()).generation;
     let def_ext_vec = effective_definition_build_extensions(ctx);
     let def_ext_str = def_ext_vec.join(",");
 
@@ -2288,7 +2289,10 @@ fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'stat
     if let Some(mut idx) = def_loaded {
         idx.shrink_maps();
         let mut current = def_arc.write().unwrap_or_else(|e| e.into_inner());
-        let _ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+        let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+        if ws.generation != expected_generation || !code_xray::path_eq(&ws.dir, dir) {
+            return Some("superseded");
+        }
         crate::definitions::replace_live_definition_index(&mut current, idx);
         ctx.def_ready.store(true, Ordering::Release);
         info!(dir = %dir, "Definition index cross-loaded from cache on workspace switch");
@@ -2296,6 +2300,9 @@ fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'stat
     }
 
     let ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+    if ws.generation != expected_generation || !code_xray::path_eq(&ws.dir, dir) {
+        return Some("superseded");
+    }
     ctx.def_ready.store(false, Ordering::Release);
     if ctx.def_building.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
         info!(dir = %dir, "Definition index background build will follow the current workspace");
@@ -2380,7 +2387,36 @@ fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'stat
 /// Tries cache first, then schedules a background build if no cache exists.
 /// Returns `Some("loaded_cache")`, `Some("background_build")`, or
 /// `Some("build_in_progress")` describing the action taken.
+fn publish_companion_content_index(
+    ctx: &HandlerContext,
+    dir: &str,
+    generation: u64,
+    index: ContentIndex,
+    save: bool,
+) -> bool {
+    let mut current = ctx.index.write().unwrap_or_else(|e| e.into_inner());
+    let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+    if ws.generation != generation || !code_xray::path_eq(&ws.dir, dir)
+        || !code_xray::path_eq(&index.root, dir) {
+        return false;
+    }
+    if save && let Err(error) = save_content_index(&index, &ctx.index_base) {
+        warn!(%error, "Failed to save content index");
+    }
+    *current = index;
+    utils::record_content_index_publish(&ctx.index_epoch);
+    ctx.content_ready.store(true, Ordering::Release);
+    ctx.file_index_dirty.store(true, Ordering::Release);
+    true
+}
+
+#[cfg(test)]
+static CONTENT_CROSS_BUILD_COMPLETED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<()>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static str> {
+    let expected_generation = ctx.workspace.read().unwrap_or_else(|e| e.into_inner()).generation;
     let content_ext = ctx.server_ext.clone();
     let content_loaded = load_content_index(dir, &content_ext, &ctx.index_base).ok()
         .or_else(|| {
@@ -2397,18 +2433,10 @@ fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static 
         } else {
             idx
         };
-        match ctx.index.write() {
-            Ok(mut current) => {
-                *current = idx;
-                drop(current);
-                utils::record_content_index_publish(&ctx.index_epoch);
-                ctx.content_ready.store(true, Ordering::Release);
-                info!(dir = %dir, "Content index cross-loaded from cache on workspace switch");
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to update content index on workspace switch");
-            }
+        if !publish_companion_content_index(ctx, dir, expected_generation, idx, false) {
+            return Some("superseded");
         }
+        info!(dir = %dir, "Content index cross-loaded from cache on workspace switch");
         // Warm `file_tokens` in background so the first user edit avoids the
         // ~2.6 s rebuild under the watcher write lock. Lazy guard remains as
         // safety net. No-op when watch mode was not active.
@@ -2422,23 +2450,20 @@ fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static 
     }
 
     // No cache — start background build
-    ctx.content_ready.store(false, Ordering::Release);
+    {
+        let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+        if ws.generation != expected_generation || !code_xray::path_eq(&ws.dir, dir) {
+            return Some("superseded");
+        }
+        ctx.content_ready.store(false, Ordering::Release);
+    }
     let had_watch = ctx.index.read()
         .map(|i| i.file_tokens_authoritative)
         .unwrap_or(false);
-    let (build_generation, build_workspace_dir) = {
-        let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
-        (ws.generation, ws.dir.clone())
-    };
-    let bg_index = Arc::clone(&ctx.index);
-    let bg_index_epoch = Arc::clone(&ctx.index_epoch);
+    let bg_ctx = ctx.clone();
     let bg_dir = dir.to_string();
     let bg_ext = content_ext;
-    let bg_idx_base = ctx.index_base.clone();
-    let bg_ready = Arc::clone(&ctx.content_ready);
     let bg_building = Arc::clone(&ctx.content_building);
-    let bg_workspace = Arc::clone(&ctx.workspace);
-    let bg_file_dirty = Arc::clone(&ctx.file_index_dirty);
     let bg_respect_git_exclude = ctx.respect_git_exclude;
     if ctx.content_building.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
         info!(dir = %dir, "Content index background build already running (workspace switch)");
@@ -2453,33 +2478,21 @@ fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static 
             threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
         }) {
             Ok(idx) => {
-                let workspace_still_current = {
-                    let ws = bg_workspace.read().unwrap_or_else(|e| e.into_inner());
-                    ws.generation == build_generation
-                        && code_xray::path_eq(&ws.dir, &build_workspace_dir)
-                        && code_xray::path_eq(&ws.dir, &bg_dir)
+                let idx = if had_watch {
+                    crate::mcp::watcher::build_watch_index_from(idx)
+                } else {
+                    idx
                 };
-                if !workspace_still_current {
+                if !publish_companion_content_index(&bg_ctx, &bg_dir, expected_generation, idx, true) {
                     warn!(
                         dir = %bg_dir,
-                        generation = build_generation,
+                        generation = expected_generation,
                         "Discarding stale content index background build after workspace switch"
                     );
                 } else {
-                    if let Err(e) = save_content_index(&idx, &bg_idx_base) {
-                        warn!(error = %e, "Failed to save content index");
-                    }
-                    let idx = if had_watch {
-                        crate::mcp::watcher::build_watch_index_from(idx)
-                    } else {
-                        idx
-                    };
-                    *bg_index.write().unwrap_or_else(|e| e.into_inner()) = idx;
-                    utils::record_content_index_publish(&bg_index_epoch);
                     if had_watch {
-                        crate::mcp::watcher::schedule_rebuild_file_tokens(Arc::clone(&bg_index));
+                        crate::mcp::watcher::schedule_rebuild_file_tokens(Arc::clone(&bg_ctx.index));
                     }
-                    bg_file_dirty.store(true, Ordering::Relaxed);
                     build_succeeded = true;
                 }
             }
@@ -2489,14 +2502,45 @@ fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static 
         }
         bg_building.store(false, Ordering::Release);
         if build_succeeded {
-            bg_ready.store(true, Ordering::Release);
             crate::index::log_memory("reindex_def: content cross-build complete");
+        }
+        #[cfg(test)]
+        if let Some(done) = CONTENT_CROSS_BUILD_COMPLETED.lock().unwrap().remove(&bg_dir) {
+            let _ = done.send(());
         }
     });
     info!(dir = %dir, "Content index background build started (no cache)");
     Some("background_build")
 }
 
+
+fn complete_workspace_reindex(
+    ctx: &HandlerContext,
+    dir: &str,
+    completion_needed: bool,
+    content_primary: bool,
+    filters_changed: bool,
+) -> Option<&'static str> {
+    let companion_action = if completion_needed {
+        if content_primary {
+            cross_load_definition_index(ctx, dir)
+        } else {
+            cross_load_content_index(ctx, dir)
+        }
+    } else {
+        None
+    };
+    if completion_needed {
+        if let Ok(mut cache) = ctx.current_branch_cache.write() { cache.clear(); }
+        if let Ok(mut files) = ctx.file_index.write() { *files = None; }
+        ctx.file_index_dirty.store(true, Ordering::Release);
+        rebuild_git_cache_for_workspace(ctx, dir);
+    }
+    if ctx.watch_enabled && (completion_needed || filters_changed) {
+        restart_watcher_for_workspace(ctx, dir);
+    }
+    companion_action
+}
 
 /// Restart file watcher for a new workspace directory.
 fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
@@ -2563,30 +2607,39 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
 
 /// Rebuild git history cache for a new workspace directory (background thread).
 fn rebuild_git_cache_for_workspace(ctx: &HandlerContext, dir: &str) {
-    // Clear stale cache for old workspace
-    if let Ok(mut cache) = ctx.git_cache.write() {
+    let generation = {
+        let mut cache = ctx.git_cache.write().unwrap_or_else(|e| e.into_inner());
+        let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+        if !code_xray::path_eq(&ws.dir, dir) { return; }
         *cache = None;
-    }
-    ctx.git_cache_ready.store(false, Ordering::Release);
+        ctx.git_cache_ready.store(false, Ordering::Release);
+        ws.generation
+    };
 
     // Start background rebuild
     let bg_git_cache = Arc::clone(&ctx.git_cache);
     let bg_git_ready = Arc::clone(&ctx.git_cache_ready);
     let bg_dir = dir.to_string();
     let bg_idx_base = ctx.index_base.clone();
+    let bg_workspace = Arc::clone(&ctx.workspace);
     std::thread::spawn(move || {
+        let finish = |cache| {
+            publish_workspace_git_cache(
+                &bg_git_cache, &bg_git_ready, &bg_workspace, &bg_dir, generation, cache,
+            );
+        };
         let repo_path = std::path::PathBuf::from(&bg_dir);
         let git_dir = repo_path.join(".git");
         if !git_dir.exists() {
             info!(dir = %bg_dir, "No .git directory in new workspace, skipping git cache");
-            bg_git_ready.store(true, Ordering::Release);
+            finish(None);
             return;
         }
         let branch = match GitHistoryCache::detect_default_branch(&repo_path) {
             Ok(b) => b,
             Err(e) => {
                 warn!(error = %e, "Failed to detect default branch for new workspace");
-                bg_git_ready.store(true, Ordering::Release);
+                finish(None);
                 return;
             }
         };
@@ -2637,16 +2690,31 @@ fn rebuild_git_cache_for_workspace(ctx: &HandlerContext, dir: &str) {
                     }
                     Err(e) => {
                         warn!(error = %e, "Failed to build git cache for new workspace");
-                        bg_git_ready.store(true, Ordering::Release);
+                        finish(None);
                         return;
                     }
                 }
             }
         };
         info!(dir = %bg_dir, commits = cache.commits.len(), "Git cache rebuilt for new workspace");
-        *bg_git_cache.write().unwrap_or_else(|e| e.into_inner()) = Some(cache);
-        bg_git_ready.store(true, Ordering::Release);
+        finish(Some(cache));
     });
+}
+
+pub(crate) fn publish_workspace_git_cache(
+    cache: &RwLock<Option<GitHistoryCache>>,
+    ready: &AtomicBool,
+    workspace: &RwLock<WorkspaceBinding>,
+    dir: &str,
+    generation: u64,
+    value: Option<GitHistoryCache>,
+) {
+    let mut cache = cache.write().unwrap_or_else(|e| e.into_inner());
+    let ws = workspace.read().unwrap_or_else(|e| e.into_inner());
+    if ws.generation == generation && code_xray::path_eq(&ws.dir, dir) {
+        *cache = value;
+        ready.store(true, Ordering::Release);
+    }
 }
 
 fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
@@ -2688,6 +2756,7 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
         let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
         (ws.mode, ws.status, ws.generation)
     };
+    let completion_needed = workspace_changed || old_status == WorkspaceStatus::Reindexing;
 
     // Update workspace binding if dir changed
     if workspace_changed {
@@ -2698,13 +2767,6 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
         ws.status = WorkspaceStatus::Reindexing;
         info!(dir = %dir, previous = %previous_dir, generation = ws.generation, "Workspace switched via xray_reindex");
 
-        // Drop the cached live-branch probe for the outgoing workspace so a
-        // stale value cannot survive a workspace switch (bug-report 2026-04-28).
-        // Per-workspace TTL (5s) would also catch it, but explicit removal is
-        // cheap and removes the window entirely.
-        if let Ok(mut cache) = ctx.current_branch_cache.write() {
-            cache.remove(&previous_dir);
-        }
     }
 
     // Panic-rollback safety: covers the window from here through the
@@ -2762,6 +2824,16 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
     match ctx.index.write() {
         Ok(mut idx) => {
             *idx = new_index;
+            let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+            if ctx.watch_enabled && (completion_needed || content_extensions_changed) {
+                ctx.watcher_generation.fetch_add(1, Ordering::AcqRel);
+            }
+            if completion_needed && ctx.def_index.is_some() {
+                ctx.def_ready.store(false, Ordering::Release);
+            }
+            ws.status = WorkspaceStatus::Resolved;
+            ctx.content_ready.store(true, Ordering::Release);
+            switch_panic_guard.dismiss();
         }
         Err(e) => {
             // Rollback workspace state to avoid getting stuck in Reindexing
@@ -2783,39 +2855,14 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
         crate::mcp::watcher::schedule_rebuild_file_tokens(Arc::clone(&ctx.index));
     }
 
-    // Mark workspace as resolved and content index as ready.
-    // CRITICAL: content_ready must be set to true here because Fix B
-    // (handle_pending_response) may have reset it to false during workspace switch.
-    {
-        let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-        ws.status = WorkspaceStatus::Resolved;
-    }
-    ctx.content_ready.store(true, Ordering::Release);
-    // Workspace + content index are now coherent; best-effort post-commit
-    // work below (cross-load defs, watcher restart, git cache) MUST NOT
-    // trigger a rollback if it panics.
-    switch_panic_guard.dismiss();
-
     // Force mimalloc to return freed pages (old index) to OS
     crate::index::force_mimalloc_collect();
     crate::index::log_memory("reindex: after replace+mi_collect (content)");
 
     // Phase 2: Cross-load definition index on workspace switch
-    let def_index_action = if workspace_changed {
-        cross_load_definition_index(ctx, &dir)
-    } else {
-        None
-    };
-
-    // Phase 3: Restart watcher when its directory or content filter changes.
-    if (workspace_changed || content_extensions_changed) && ctx.watch_enabled {
-        restart_watcher_for_workspace(ctx, &dir);
-    }
-
-    // Phase 4: Rebuild git cache for new workspace
-    if workspace_changed {
-        rebuild_git_cache_for_workspace(ctx, &dir);
-    }
+    let def_index_action = complete_workspace_reindex(
+        ctx, &dir, completion_needed, true, content_extensions_changed,
+    );
 
     let elapsed = start.elapsed();
 
@@ -2904,6 +2951,7 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
         let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
         (ws.mode, ws.status, ws.generation)
     };
+    let completion_needed = workspace_changed || old_status == WorkspaceStatus::Reindexing;
 
     // Update workspace binding if dir changed
     if workspace_changed {
@@ -2978,10 +3026,20 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
             }
         }
     };
+    let definition_extensions_changed = def_index_arc.read()
+        .map(|idx| idx.extensions != new_index.extensions).unwrap_or(false);
     // Update in-memory cache
     match def_index_arc.write() {
         Ok(mut idx) => {
             crate::definitions::replace_live_definition_index(&mut idx, new_index);
+            let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+            if ctx.watch_enabled && (completion_needed || definition_extensions_changed) {
+                ctx.watcher_generation.fetch_add(1, Ordering::AcqRel);
+            }
+            if completion_needed { ctx.content_ready.store(false, Ordering::Release); }
+            ws.status = WorkspaceStatus::Resolved;
+            ctx.def_ready.store(true, Ordering::Release);
+            switch_panic_guard.dismiss();
         }
         Err(e) => {
             // Rollback workspace state to avoid getting stuck in Reindexing
@@ -2996,29 +3054,14 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
     }
     ctx.index_epoch.fetch_add(1, Ordering::AcqRel);
 
-    // Mark workspace as resolved and def index as ready.
-    // CRITICAL: def_ready must be set to true here because Fix B
-    // (handle_pending_response) may have reset it to false during workspace switch.
-    {
-        let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-        ws.status = WorkspaceStatus::Resolved;
-    }
-    ctx.def_ready.store(true, Ordering::Release);
-    // Workspace + def index are now coherent; disarm the panic guard so
-    // any panic in best-effort post-commit work below cannot roll the
-    // workspace back into a state incoherent with the published index.
-    switch_panic_guard.dismiss();
-
     // Force mimalloc to return freed pages (old index) to OS
     crate::index::force_mimalloc_collect();
     crate::index::log_memory("reindex: after replace+mi_collect (def)");
 
     // ─── Cross-load content index on workspace switch ───
-    let content_index_action = if workspace_changed {
-        cross_load_content_index(ctx, &dir)
-    } else {
-        None
-    };
+    let content_index_action = complete_workspace_reindex(
+        ctx, &dir, completion_needed, false, definition_extensions_changed,
+    );
 
     let elapsed = start.elapsed();
 

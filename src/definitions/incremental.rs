@@ -840,6 +840,7 @@ fn parse_definition_files(paths: &[PathBuf]) -> ParsedDefinitionFiles {
     })
 }
 
+#[allow(dead_code)] // The binary uses the worker-scoped entry point.
 pub fn reconcile_definition_index_nonblocking(
     def_index: &Arc<RwLock<DefinitionIndex>>,
     dir: &str,
@@ -855,12 +856,27 @@ pub fn reconcile_definition_index_nonblocking(
     )
 }
 
+#[allow(dead_code)]
 pub(crate) fn reconcile_definition_index_nonblocking_with_angular_paths(
     def_index: &Arc<RwLock<DefinitionIndex>>,
     dir: &str,
     extensions: &[String],
     respect_git_exclude: bool,
     precomputed_angular_paths: Option<&[PathBuf]>,
+) -> (usize, usize, usize) {
+    reconcile_definition_index_with_scope(
+        def_index, dir, extensions, respect_git_exclude, precomputed_angular_paths,
+        Some(&crate::IndexMutationScope::for_root(dir)),
+    )
+}
+
+pub(crate) fn reconcile_definition_index_with_scope(
+    def_index: &Arc<RwLock<DefinitionIndex>>,
+    dir: &str,
+    extensions: &[String],
+    respect_git_exclude: bool,
+    precomputed_angular_paths: Option<&[PathBuf]>,
+    scope: Option<&crate::IndexMutationScope>,
 ) -> (usize, usize, usize) {
     let start = std::time::Instant::now();
     // Capture walk start time for created_at update (not now() at end — avoids race condition
@@ -1189,6 +1205,9 @@ pub(crate) fn reconcile_definition_index_nonblocking_with_angular_paths(
             }
         };
 
+        if scope.is_some_and(|scope| !scope.matches(&idx.root)) || idx.extensions != extensions {
+            return (0, 0, 0);
+        }
         let conflicts = super::definition_fingerprint_conflicts(&idx, &expected_fingerprints);
         if !conflicts.is_empty() {
             let rejected_keys = super::retain_stable_prepared_definition_inputs(

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Completed workspace switches consistently (#505).** Roots-driven reindexing (including symlink/junction roots) and definition reindexing now retarget watchers and periodic rescans, refresh companion indexes and Git state, and reject stale worker mutations and saves. Pinned-workspace rules remain unchanged. After updating an affected server, restart it and run both `xray_reindex` and `xray_reindex_definitions` to rebuild contaminated caches.
+
 - **Fixed CLI grep without an extension filter (#499).** `xray grep` now reuses an existing content index before trying to build one, keeps its original extensions when rebuilding, and ignores legacy caches with empty extension configurations. Without a usable index or `--ext`, it reports an indexing hint instead of creating an empty cache. Blank extensions and empty comma-separated entries are rejected; valid zero-match and zero-file scopes remain supported.
 
 - **Normalized Windows path separators in grep and caller filters (#498).** MCP grep `file`/`exclude`, MCP callers `excludeFile`, and CLI grep `--exclude`/`--exclude-dir` now treat `\` and `/` alike, including mixed-separator relative and absolute paths. Existing substring matching and scope-status behavior are unchanged. Caller regression expectations follow host-native filename display on Windows and Unix.
