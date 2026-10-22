@@ -15,6 +15,8 @@
 # Get-DetectedExtensions regression suite (mutation guard for setup-xray.ps1
 # scan rewrite — case-insensitive prune, hidden files, reparse-point skip).
 !scripts/test-detect-extensions.ps1
+!scripts/ci-policy.ps1
+!scripts/test-ci-policy.ps1
 todo*.md
 proptest-regressions/
 
