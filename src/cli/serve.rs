@@ -10,14 +10,16 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::{
-    build_content_index, save_content_index, load_content_index, find_content_index_for_dir,
-    index_dir, ContentIndex, TrigramIndex, DEFAULT_MIN_TOKEN_LEN,
+    load_content_index, find_content_index_for_dir,
+    index_dir, ContentIndex, TrigramIndex,
 };
 use crate::definitions;
 use crate::git::cache::GitHistoryCache;
 use crate::mcp;
 
-use super::args::{ServeArgs, ContentIndexArgs};
+use super::args::ServeArgs;
+#[cfg(test)]
+use super::args::ContentIndexArgs;
 
 /// Compute thread budgets for content and definition cold builds during `serve`.
 ///
@@ -213,8 +215,7 @@ fn build_context_with_index_dir(args: ServeArgs, idx_base: PathBuf) -> mcp::hand
     let (index, effective_respect_content) = load_or_build_content_index(
         &dir_str, &exts_for_load, &extensions, &idx_base,
         is_unresolved, args.watch, args.respect_git_exclude,
-        &content_ready, &content_build_terminal, &content_building, &index_epoch,
-        content_thread_budget,
+        &content_ready, &content_build_terminal, &index_epoch,
         &trigram_build_gate,
     );
 
@@ -385,6 +386,7 @@ fn build_context_with_index_dir(args: ServeArgs, idx_base: PathBuf) -> mcp::hand
         file_index,
         file_index_dirty: Arc::clone(&file_index_dirty),
         content_building,
+        content_build_failure: Arc::new(RwLock::new(None)),
         def_building,
         index_epoch,
         watcher_generation,
@@ -405,6 +407,10 @@ fn build_context_with_index_dir(args: ServeArgs, idx_base: PathBuf) -> mcp::hand
             crate::mcp::handlers::utils::PolicyReminderState::new(),
         ),
     };
+
+    if !is_unresolved && !ctx.content_ready.load(Ordering::Acquire) {
+        mcp::handlers::start_content_index_build(&ctx, content_thread_budget, content_build_terminal);
+    }
 
     // Periodic memory + cache-size snapshot for leak diagnosis.
     // Interval via XRAY_MEM_SNAPSHOT_SEC (default 60, 0 = disabled).
@@ -1082,9 +1088,7 @@ fn load_or_build_content_index(
     respect_git_exclude: bool,
     content_ready: &Arc<AtomicBool>,
     content_build_terminal: &Arc<AtomicBool>,
-    content_building: &Arc<AtomicBool>,
     index_epoch: &Arc<AtomicU64>,
-    build_threads: usize,
     trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
 ) -> (Arc<RwLock<ContentIndex>>, bool) {
     // ─── Async startup: create empty indexes, start event loop immediately ───
@@ -1222,156 +1226,7 @@ fn load_or_build_content_index(
         content_build_terminal.store(true, Ordering::Release);
         crate::index::log_memory("serve: content ready");
 
-    } else if !is_unresolved {
-        crate::index::log_phase("contentBuildQueued", &[
-            ("cacheHitContent", "false".to_string()),
-        ]);
-        // Build in background — don't block the event loop
-        let bg_index = Arc::clone(&index);
-        let bg_index_epoch = Arc::clone(index_epoch);
-        let bg_ready = Arc::clone(content_ready);
-        let bg_terminal = Arc::clone(content_build_terminal);
-        let bg_building = Arc::clone(content_building);
-        let bg_dir = dir_str.to_string();
-        let bg_ext = exts_for_load.to_string();
-        let bg_idx_base = idx_base.to_path_buf();
-        let bg_gate = Arc::clone(trigram_build_gate);
-
-        spawn_background_build("contentBuildPanicked", bg_building, bg_ready, bg_terminal, move |build_state| {
-            info!("Building content index in background...");
-            crate::index::log_memory("content-build: starting");
-            let build_start = Instant::now();
-            let index_build_start = Instant::now();
-            let new_idx = match build_content_index(&ContentIndexArgs {
-                dir: bg_dir.clone(),
-                ext: bg_ext.clone(),
-                max_age_hours: 24,
-                hidden: false,
-                no_ignore: false, respect_git_exclude,
-                threads: build_threads,
-                min_token_len: DEFAULT_MIN_TOKEN_LEN,
-            }) {
-                Ok(idx) => idx,
-                Err(e) => {
-                    warn!(error = %e, "Failed to build content index");
-                    crate::index::log_phase("contentBuildFailed", &[
-                        ("contentTotalBuildMs", crate::index::format_duration_ms(build_start.elapsed())),
-                        ("error", e.to_string()),
-                    ]);
-                    build_state.complete_failed();
-                    return;
-                }
-            };
-            let index_build_elapsed = index_build_start.elapsed();
-            crate::index::log_memory("content-build: finished");
-            let save_start = Instant::now();
-            let save_result = save_content_index(&new_idx, &bg_idx_base);
-            let save_elapsed = save_start.elapsed();
-            let save_failed = if let Err(e) = save_result {
-                warn!(error = %e, "Failed to save content index to disk; keeping in-memory index");
-                true
-            } else {
-                // Clean up old content indexes for the same root with different extensions
-                let exts_str = new_idx.extensions.join(",");
-                let saved_path = crate::content_index_path_for(&new_idx.root, &exts_str, &bg_idx_base);
-                crate::index::cleanup_stale_same_root_indexes(&bg_idx_base, &saved_path, &new_idx.root, "word-search");
-                false
-            };
-
-            // Drop build-time index and reload from disk to eliminate allocator
-            // fragmentation (~1.5 GB savings). Build creates many temporary allocs
-            // that fragment the heap; reloading gives compact contiguous memory.
-            //
-            // SKIPPED on save failure (commit e64ed47 follow-up): if save failed,
-            // the surviving on-disk shard may be stale (rename is not-atomic against
-            // a pre-existing target on some filesystems) — reloading would silently
-            // re-publish the stale cache while we report fresh build counts via
-            // contentReady. Keep the freshly-built `new_idx` in memory at the cost
-            // of allocator fragmentation; correctness wins over layout.
-            let file_count = new_idx.files.len();
-            let token_count = new_idx.index.len();
-            let drop_reload_start = Instant::now();
-            let new_idx = if save_failed {
-                new_idx
-            } else {
-                drop(new_idx);
-                crate::index::log_memory("serve: after drop(content build)");
-                crate::index::force_mimalloc_collect();
-                crate::index::log_memory("serve: after mi_collect (content)");
-                match load_content_index(&bg_dir, &bg_ext, &bg_idx_base) {
-                    Ok(idx) => idx,
-                    Err(e) => {
-                        warn!(error = %e, "Failed to reload content index from disk, rebuilding");
-                        match build_content_index(&ContentIndexArgs {
-                            dir: bg_dir, ext: bg_ext,
-                            max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude,
-                            threads: build_threads, min_token_len: DEFAULT_MIN_TOKEN_LEN,
-                        }) {
-                            Ok(idx) => idx,
-                            Err(e2) => {
-                                warn!(error = %e2, "Failed to rebuild content index from scratch");
-                                build_state.complete_failed();
-                                return;
-                            }
-                        }
-                    }
-                }
-            };
-            let drop_reload_elapsed = drop_reload_start.elapsed();
-            if !save_failed {
-                crate::index::log_memory("serve: after reload content from disk");
-            }
-
-            let mut new_idx = if watch {
-                mcp::watcher::build_watch_index_from(new_idx)
-            } else {
-                new_idx
-            };
-            new_idx.shrink_maps();
-            let elapsed = build_start.elapsed();
-            info!(
-                elapsed_ms = format_args!("{:.1}", elapsed.as_secs_f64() * 1000.0),
-                files = file_count,
-                tokens = token_count,
-                "Content index ready (background build complete)"
-            );
-            *bg_index.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
-            crate::mcp::handlers::utils::record_content_index_publish(&bg_index_epoch);
-            // See cache-load path above for rationale.
-            if watch {
-                mcp::watcher::schedule_rebuild_file_tokens(Arc::clone(&bg_index));
-            }
-            build_state.mark_not_building();
-            crate::index::log_phase("contentReady", &[
-                ("cacheHitContent", "false".to_string()),
-                ("contentBuildMs", crate::index::format_duration_ms(index_build_elapsed)),
-                ("contentSaveMs", crate::index::format_duration_ms(save_elapsed)),
-                ("contentDropReloadMs", crate::index::format_duration_ms(drop_reload_elapsed)),
-                ("contentTotalBuildMs", crate::index::format_duration_ms(elapsed)),
-                ("contentReadyAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
-                ("contentFilesRead", file_count.to_string()),
-                ("contentUniqueTokens", token_count.to_string()),
-            ]);
-            build_state.complete_ready();
-            crate::index::log_memory("serve: content ready");
-
-            // Pre-warm trigram index after background build. Fresh builds set
-            // `trigram_dirty=false`, so this normally degenerates to the
-            // cheap page-in pass; the gate is threaded through anyway to keep
-            // the warm-up safe against an `xray_edit` racing the build's
-            // tail (the dirty flag could flip back true between build and
-            // warm-up entry).
-            crate::index::log_phase("trigramWarmupStarted", &[]);
-            let warmup_start = Instant::now();
-            let (trigrams, tokens) =
-                crate::mcp::handlers::warm_trigram_index(&bg_index, &bg_gate);
-            crate::index::log_phase("trigramWarmupReady", &[
-                ("trigramWarmupMs", crate::index::format_duration_ms(warmup_start.elapsed())),
-                ("trigrams", trigrams.to_string()),
-                ("tokens", tokens.to_string()),
-            ]);
-        });
-    } else {
+    } else if is_unresolved {
         content_build_terminal.store(true, Ordering::Release);
     }
 
@@ -2595,8 +2450,6 @@ mod serve_respect_git_exclude_tests {
         let extensions = vec!["cs".to_string()];
         let content_ready = Arc::new(AtomicBool::new(false));
         let content_build_terminal = Arc::new(AtomicBool::new(false));
-        let content_building = Arc::new(AtomicBool::new(false));
-
         let trigram_build_gate = Arc::new(crate::mcp::handlers::utils::TrigramRebuildGate::new());
         let (_index, effective) = load_or_build_content_index(
             &dir.to_string_lossy(),
@@ -2608,9 +2461,7 @@ mod serve_respect_git_exclude_tests {
             false, // CLI flag — was true at build time, now false
             &content_ready,
             &content_build_terminal,
-            &content_building,
             &Arc::new(AtomicU64::new(1)),
-            1,     // build_threads (unused — cache hit path)
             &trigram_build_gate,
         );
 
@@ -2711,8 +2562,6 @@ mod serve_respect_git_exclude_tests {
         let extensions = vec!["cs".to_string()];
         let content_ready = Arc::new(AtomicBool::new(false));
         let content_build_terminal = Arc::new(AtomicBool::new(false));
-        let content_building = Arc::new(AtomicBool::new(false));
-
         let trigram_build_gate = Arc::new(crate::mcp::handlers::utils::TrigramRebuildGate::new());
         let (_index, effective) = load_or_build_content_index(
             &dir.to_string_lossy(),
@@ -2724,9 +2573,7 @@ mod serve_respect_git_exclude_tests {
             true,  // CLI flag
             &content_ready,
             &content_build_terminal,
-            &content_building,
             &Arc::new(AtomicU64::new(1)),
-            1,     // build_threads
             &trigram_build_gate,
         );
 
@@ -2776,7 +2623,6 @@ mod serve_respect_git_exclude_tests {
         let extensions = vec!["cs".to_string()];
         let content_ready = Arc::new(AtomicBool::new(false));
         let content_build_terminal = Arc::new(AtomicBool::new(false));
-        let content_building = Arc::new(AtomicBool::new(false));
         let index_epoch = Arc::new(AtomicU64::new(1));
         let trigram_build_gate = Arc::new(crate::mcp::handlers::utils::TrigramRebuildGate::new());
 
@@ -2790,11 +2636,19 @@ mod serve_respect_git_exclude_tests {
             false, // CLI flag (irrelevant for save-failure semantics)
             &content_ready,
             &content_build_terminal,
-            &content_building,
             &index_epoch,
-            1,     // build_threads
             &trigram_build_gate,
         );
+        let ctx = crate::mcp::handlers::HandlerContext {
+            index: Arc::clone(&index),
+            server_ext: "cs".into(),
+            index_base: idx_base,
+            content_ready: Arc::clone(&content_ready),
+            index_epoch: Arc::clone(&index_epoch),
+            ..Default::default()
+        };
+        ctx.workspace.write().unwrap().set_dir(dir.to_string_lossy().to_string());
+        crate::mcp::handlers::start_content_index_build(&ctx, 1, Arc::clone(&content_build_terminal));
 
         // Wait for background build to publish to the index Arc.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
