@@ -1,4 +1,5 @@
 use super::*;
+use crate::index::load_content_index;
 use std::collections::HashMap;
 use crate::{ContentIndex, Posting, TrigramIndex};
 
@@ -143,6 +144,294 @@ fn test_load_grep_index_rebuilds_selected_stale_cache_with_original_extensions()
         assert_eq!(persisted.files, rebuilt.files);
         assert!(!content_index_path_for(&original.root, "", cache.path()).exists());
         assert!(!content_index_path_for(&original.root, "rs", cache.path()).exists());
+    }
+
+}
+
+#[test]
+fn test_504_hidden_scope_survives_expiry() {
+    fs::create_dir_all("target/systemtemp").unwrap();
+    let fixture = tempfile::tempdir_in("target/systemtemp").unwrap();
+    let root = fs::canonicalize(fixture.path()).unwrap();
+    let cache = root.join("cache");
+    let sources = root.join("sources");
+    fs::create_dir_all(sources.join(".hidden")).unwrap();
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(sources.join(".hidden").join("probe.rs"), "scope_not_found\n").unwrap();
+    let dir = sources.to_string_lossy().to_string();
+    let mut original = build_content_index(&ContentIndexArgs {
+        dir: dir.clone(), ext: "rs".into(), max_age_hours: 1,
+        hidden: true, no_ignore: true, respect_git_exclude: false,
+        threads: 1, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+    }).unwrap();
+    assert_eq!(original.files.len(), 1);
+    original.created_at = 1;
+    save_content_index(&original, &cache).unwrap();
+    let (rebuilt, _) = load_grep_index(&dir, &Some("rs".into()), true, false, &cache).unwrap();
+    assert_eq!(rebuilt.files.len(), 1, "expiry must not discard hidden scope");
+}
+
+fn traversal_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    fs::create_dir_all("target/systemtemp").unwrap();
+    let fixture = tempfile::Builder::new().prefix("scope504-").tempdir_in("target/systemtemp").unwrap();
+    let base = fs::canonicalize(fixture.path()).unwrap();
+    let sources = base.join("sources");
+    let cache = base.join("cache");
+    fs::create_dir_all(&sources).unwrap();
+    fs::create_dir_all(&cache).unwrap();
+    let git = crate::background_command("git")
+        .args(["-c", "init.defaultBranch=main", "init", "--quiet"])
+        .arg(&sources).output().unwrap();
+    assert!(git.status.success(), "{}", String::from_utf8_lossy(&git.stderr));
+    fs::write(sources.join(".gitignore"), "ignored/\n").unwrap();
+    fs::write(sources.join(".git").join("info").join("exclude"), "excluded/\n").unwrap();
+    (fixture, sources, cache)
+}
+
+fn write_traversal_probes(root: &Path, prefix: &str) {
+    for scope in ["ordinary", ".hidden", "ignored", "excluded"] {
+        fs::create_dir_all(root.join(scope)).unwrap();
+        for ext in ["rs", "cs"] {
+            fs::write(root.join(scope).join(format!("{prefix}_probe.{ext}")), "scope_not_found\n").unwrap();
+        }
+    }
+}
+
+fn probe_paths<'a>(paths: impl Iterator<Item = &'a str>) -> std::collections::BTreeSet<String> {
+    paths.filter(|path| path.contains("_probe."))
+        .map(|path| path.replace('\\', "/")).collect()
+}
+
+fn expected_probe_paths(root: &Path, prefixes: &[&str], hidden: bool, no_ignore: bool, respect: bool) -> std::collections::BTreeSet<String> {
+    let mut expected = std::collections::BTreeSet::new();
+    for (scope, included) in [("ordinary", true), (".hidden", hidden), ("ignored", no_ignore), ("excluded", !respect)] {
+        if included {
+            for prefix in prefixes {
+                for ext in ["rs", "cs"] {
+                    expected.insert(crate::clean_path(&root.join(scope).join(format!("{prefix}_probe.{ext}")).to_string_lossy()));
+                }
+            }
+        }
+    }
+    expected
+}
+
+#[test]
+fn test_504_traversal_options_matrix_file_and_sharded_content() {
+    for hidden in [false, true] {
+        for no_ignore in [false, true] {
+            for respect in [false, true] {
+                let (_fixture, root, cache) = traversal_fixture();
+                let dir = root.to_string_lossy().to_string();
+                write_traversal_probes(&root, "initial");
+                let mut file = build_index(&IndexArgs {
+                    dir: dir.clone(), max_age_hours: 1, hidden, no_ignore,
+                    respect_git_exclude: respect, threads: 1,
+                }).unwrap();
+                let mut content = build_content_index(&ContentIndexArgs {
+                    dir: dir.clone(), ext: "rs,cs".into(), max_age_hours: 1,
+                    hidden, no_ignore, respect_git_exclude: respect,
+                    threads: 1, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+                }).unwrap();
+                let before = expected_probe_paths(&root, &["initial"], hidden, no_ignore, respect);
+                assert_eq!(probe_paths(file.entries.iter().map(|entry| entry.path.as_str())), before);
+                assert_eq!(probe_paths(content.files.iter().map(String::as_str)), before);
+                assert_eq!((file.hidden, file.no_ignore, file.respect_git_exclude), (hidden, no_ignore, respect));
+                assert_eq!((content.hidden, content.no_ignore, content.respect_git_exclude), (hidden, no_ignore, respect));
+                let cloned = content.clone();
+                let head = content.build_head();
+                assert_eq!((cloned.hidden, cloned.no_ignore, cloned.respect_git_exclude), (hidden, no_ignore, respect));
+                assert_eq!((head.hidden, head.no_ignore, head.respect_git_exclude), (hidden, no_ignore, respect));
+                let binary: FileIndex = bincode::deserialize(&bincode::serialize(&file).unwrap()).unwrap();
+                assert_eq!((binary.hidden, binary.no_ignore, binary.respect_git_exclude), (hidden, no_ignore, respect));
+                file.created_at = 1;
+                content.created_at = 1;
+                save_index(&file, &cache).unwrap();
+                save_content_index(&content, &cache).unwrap();
+                let content_path = content_index_path_for(&dir, "rs,cs", &cache);
+                assert_eq!(&fs::read(&content_path).unwrap()[..4], crate::index::SHARD_MAGIC);
+                assert_eq!(crate::index::read_format_version_from_index_file(&content_path), Some(5));
+                assert_eq!(crate::index::read_format_version_from_index_file(&index_path_for(&dir, &cache)), Some(3));
+                fs::remove_file(sidecar_path(&content_path)).unwrap();
+                fs::remove_file(sidecar_path(&index_path_for(&dir, &cache))).unwrap();
+                write_traversal_probes(&root, "added");
+                let stale_file = load_fast_index(&dir, false, !respect, &cache).unwrap();
+                let (stale_content, _) = load_grep_index(&dir, &Some("rs".into()), false, !respect, &cache).unwrap();
+                assert!(stale_file.is_stale() && stale_content.is_stale());
+                assert_eq!(probe_paths(stale_file.entries.iter().map(|entry| entry.path.as_str())), before);
+                assert_eq!(probe_paths(stale_content.files.iter().map(String::as_str)), before);
+                let after = expected_probe_paths(&root, &["initial", "added"], hidden, no_ignore, respect);
+                for query_ext in [Some("rs".to_string()), None] {
+                    let rebuilt_file = load_fast_index(&dir, true, !respect, &cache).unwrap();
+                    let (rebuilt_content, _) = load_grep_index(&dir, &query_ext, true, !respect, &cache).unwrap();
+                    let disk_file = load_index(&dir, &cache).unwrap();
+                    let disk_content = load_content_index(&dir, "rs,cs", &cache).unwrap();
+                    for selected in [&rebuilt_file, &disk_file] {
+                        assert_eq!((selected.hidden, selected.no_ignore, selected.respect_git_exclude), (hidden, no_ignore, respect));
+                        assert_eq!(selected.max_age_secs, 3600);
+                        assert!(!selected.is_stale());
+                        assert_eq!(probe_paths(selected.entries.iter().map(|entry| entry.path.as_str())), after);
+                    }
+                    for selected in [&rebuilt_content, &disk_content] {
+                        assert_eq!((selected.hidden, selected.no_ignore, selected.respect_git_exclude), (hidden, no_ignore, respect));
+                        assert_eq!(selected.extensions, ["rs", "cs"]);
+                        assert_eq!(selected.max_age_secs, 3600);
+                        assert!(!selected.is_stale());
+                        assert_eq!(probe_paths(selected.files.iter().map(String::as_str)), after);
+                        assert_eq!(selected.index["scope_not_found"].len(), after.len());
+                        let results = score_grep_results(
+                            selected, &["scope_not_found".into()], &query_ext, &[], &[],
+                            grep_score_options(false, 1, false),
+                        );
+                        assert_eq!(results.len(), if query_ext.is_some() { after.len() / 2 } else { after.len() });
+                        if query_ext.is_some() {
+                            assert!(results.iter().all(|result| result.file_path.ends_with(".rs")));
+                        }
+                    }
+                    assert!(!content_index_path_for(&dir, "rs", &cache).exists());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_504_true_missing_and_valid_empty_scopes() {
+    let (_fixture, root, cache) = traversal_fixture();
+    let dir = root.to_string_lossy().to_string();
+    assert!(load_fast_index(&dir, true, false, &cache).is_ok());
+    assert!(matches!(load_grep_index(&dir, &None, true, false, &cache), Err(SearchError::IndexNotFound { .. })));
+    let (content, _) = load_grep_index(&dir, &Some("rs".into()), true, false, &cache).unwrap();
+    assert!(content.files.is_empty());
+    for auto in [false, true] {
+        let (content, _) = load_grep_index(&dir, &None, auto, false, &cache).unwrap();
+        assert!(content.files.is_empty());
+    }
+    for ext in ["", ",", "rs,"] {
+        assert!(load_grep_index(&dir, &Some(ext.into()), true, false, &cache).is_err());
+    }
+}
+
+fn sidecar_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".meta");
+    name.into()
+}
+
+#[test]
+fn test_504_existing_legacy_and_corrupt_caches_are_not_overwritten() {
+    for legacy in [false, true] {
+        for sidecars in [false, true] {
+            let (_fixture, root, cache) = traversal_fixture();
+            let dir = root.to_string_lossy().to_string();
+            let file = build_index(&IndexArgs {
+                dir: dir.clone(), max_age_hours: 1, hidden: true, no_ignore: true,
+                respect_git_exclude: true, threads: 1,
+            }).unwrap();
+            let content = save_grep_test_index(&root, &cache, "rs,cs");
+            save_index(&file, &cache).unwrap();
+            let file_path = index_path_for(&dir, &cache);
+            let content_path = content_index_path_for(&dir, "rs,cs", &cache);
+            if legacy {
+                // Real v2 file layout and v4 production sharded head, without
+                // the new traversal fields (not merely new structs restamped).
+                crate::index::save_compressed(&file_path, &(
+                    &file.root, 2u32, file.created_at, file.max_age_secs,
+                    &file.entries, file.respect_git_exclude,
+                ), "legacy-file").unwrap();
+                let head = (
+                    &content.root, 4u32, content.created_at, content.max_age_secs,
+                    &content.files, content.total_tokens, &content.extensions,
+                    &content.file_token_counts, &content.trigram, content.trigram_dirty,
+                    &content.path_to_id, content.read_errors, content.lossy_file_count,
+                    content.worker_panics, content.respect_git_exclude,
+                );
+                crate::index::save_sharded(&content_path, &head, Vec::<(String, Vec<Posting>)>::new(), "legacy-content").unwrap();
+                assert_eq!(crate::index::read_format_version_from_index_file(&file_path), Some(2));
+                assert_eq!(crate::index::read_format_version_from_index_file(&content_path), Some(4));
+            } else {
+                fs::write(&file_path, b"corrupt").unwrap();
+                // Retain root/version attribution, but leave the payload corrupt.
+                fs::write(&content_path, bincode::serialize(&(&content.root, code_xray::CONTENT_INDEX_VERSION)).unwrap()).unwrap();
+            }
+            if !sidecars {
+                fs::remove_file(sidecar_path(&file_path)).unwrap();
+                fs::remove_file(sidecar_path(&content_path)).unwrap();
+            }
+            let paths = [&file_path, &content_path];
+            let evidence: Vec<_> = paths.iter().map(|path|
+                (fs::read(path).unwrap(), fs::read(sidecar_path(path)).ok())
+            ).collect();
+            for auto in [false, true] {
+                let file_err = load_fast_index(&dir, auto, false, &cache).unwrap_err().to_string();
+                assert!(file_err.contains("xray index") && file_err.contains("--hidden") && file_err.contains("--no-ignore"));
+                for ext in [None, Some("rs".into()), Some("rs,cs".into())] {
+                    let err = load_grep_index(&dir, &ext, auto, false, &cache).unwrap_err().to_string();
+                    assert!(err.contains("xray content-index") && err.contains("--hidden") && err.contains("--no-ignore"), "{err}");
+                }
+            }
+            for (path, (bytes, meta)) in paths.into_iter().zip(evidence) {
+                assert_eq!(fs::read(path).unwrap(), bytes);
+                assert_eq!(fs::read(sidecar_path(path)).ok(), meta);
+            }
+        }
+    }
+}
+
+#[test]
+fn test_504_bad_exact_good_superset_and_unattributable_alternates() {
+    for sidecars in [false, true] {
+        let (_fixture, root, cache) = traversal_fixture();
+        let dir = root.to_string_lossy().to_string();
+        write_traversal_probes(&root, "initial");
+        let exact = save_grep_test_index(&root, &cache, "rs");
+        let superset = save_grep_test_index(&root, &cache, "rs,cs");
+        let exact_path = content_index_path_for(&dir, "rs", &cache);
+        let superset_path = content_index_path_for(&dir, "rs,cs", &cache);
+        fs::write(&exact_path, b"unreadable root and payload").unwrap();
+        if !sidecars {
+            fs::remove_file(sidecar_path(&exact_path)).unwrap();
+            fs::remove_file(sidecar_path(&superset_path)).unwrap();
+        }
+        let bad = fs::read(&exact_path).unwrap();
+        let (selected, _) = load_grep_index(&dir, &Some("rs".into()), true, false, &cache).unwrap();
+        assert_eq!(selected.extensions, superset.extensions);
+        assert_eq!(fs::read(&exact_path).unwrap(), bad);
+        let (selected, _) = load_grep_index(&dir, &None, true, false, &cache).unwrap();
+        assert_eq!(selected.extensions, ["rs", "cs"]);
+        fs::remove_file(&superset_path).unwrap();
+        if sidecars {
+            fs::remove_file(sidecar_path(&superset_path)).unwrap();
+        }
+        let err = load_grep_index(&dir, &Some("rs".into()), true, false, &cache).unwrap_err().to_string();
+        assert!(err.contains(&exact_path.display().to_string()), "{err}");
+        let no_ext = load_grep_index(&dir, &None, true, false, &cache).unwrap_err();
+        if sidecars {
+            assert!(no_ext.to_string().contains("Refusing to replace"));
+        } else {
+            assert!(matches!(no_ext, SearchError::IndexNotFound { .. }));
+        }
+        assert_eq!(exact.extensions, ["rs"]);
+        fs::write(&exact_path, bincode::serialize(&("a different root", code_xray::CONTENT_INDEX_VERSION)).unwrap()).unwrap();
+        let wrong_root = fs::read(&exact_path).unwrap();
+        let err = load_grep_index(&dir, &Some("rs".into()), true, false, &cache).unwrap_err().to_string();
+        assert!(err.contains("exact cache key has a different root"), "{err}");
+        assert_eq!(fs::read(&exact_path).unwrap(), wrong_root);
+
+        // Unreadable alternates without attribution do not belong to this
+        // root. An unrelated root with a readable legacy header also cannot
+        // poison it.
+        fs::remove_file(&exact_path).unwrap();
+        if sidecars {
+            fs::remove_file(sidecar_path(&exact_path)).unwrap();
+        }
+        fs::write(cache.join("unknown.word-search"), b"rootless").unwrap();
+        let foreign = root.parent().unwrap().join("other-root");
+        let foreign_path = content_index_path_for(&foreign.to_string_lossy(), "rs", &cache);
+        fs::write(&foreign_path, bincode::serialize(&(foreign.to_string_lossy().to_string(), 4u32)).unwrap()).unwrap();
+        assert!(find_content_index_for_dir(&dir, &cache, &[]).unwrap().is_none());
+        let (fresh, _) = load_grep_index(&dir, &Some("rs".into()), true, false, &cache).unwrap();
+        assert!(!fresh.files.is_empty());
     }
 }
 

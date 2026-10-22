@@ -44,6 +44,8 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
             is_dir: false,
         }).collect(),
         respect_git_exclude: false,
+        hidden: false,
+        no_ignore: false,
     });
     ctx.file_index_dirty.store(false, std::sync::atomic::Ordering::Relaxed);
     ctx

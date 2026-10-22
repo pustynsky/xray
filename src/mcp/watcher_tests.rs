@@ -3922,6 +3922,8 @@ fn periodic_rescan_no_drift_does_not_bump_counter() {
             crate::FileEntry { path: "b.cs".to_string(), size: 0, modified: 0, is_dir: false },
         ],
         respect_git_exclude: false,
+        hidden: false,
+        no_ignore: false,
     })));
 
     let autosave_dirty = Arc::new(AtomicBool::new(false));
@@ -5071,6 +5073,8 @@ fn periodic_rescan_file_index_drift_sets_dirty_flag() {
             crate::FileEntry { path: "b.cs".to_string(), size: 0, modified: 0, is_dir: false },
         ],
         respect_git_exclude: false,
+        hidden: false,
+        no_ignore: false,
     })));
 
     std::fs::write(root.join("config.json"), "{}").unwrap();

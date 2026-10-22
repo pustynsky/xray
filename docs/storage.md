@@ -167,7 +167,7 @@ Per-shard decode is timed and reported in the debug log via
 | ----------- | --------------------------------------------------------------------------------------- |
 | Format      | Little-endian, variable-length integers                                                 |
 | Schema      | Implicit — derived from Rust struct layout                                              |
-| Versioning  | `format_version: u32` field on every index struct; bump on layout change triggers rebuild |
+| Versioning  | `format_version: u32` field on every index struct; bump on layout change invalidates older layouts |
 | Compression | LZ4 frame compression (`lz4_flex`); single-frame magic `LZ4S` or sharded magic `XRYS`   |
 | Atomicity   | Whole-file write to a unique temp sibling (`.<file>.xray_tmp.<pid>.<nanos>.<counter>`) then `rename` over the target |
 
@@ -190,9 +190,13 @@ In-memory size is larger than the uncompressed bincode column due to HashMap ove
 ```rust
 struct FileIndex {
     root: String,           // Canonical directory path
+    format_version: u32,    // Current: 3; root/version must remain the first two fields
     created_at: u64,        // Unix timestamp (seconds)
     max_age_secs: u64,      // Staleness threshold
     entries: Vec<FileEntry>, // All files and directories
+    respect_git_exclude: bool,
+    hidden: bool,
+    no_ignore: bool,
 }
 
 struct FileEntry {
@@ -208,7 +212,7 @@ struct FileEntry {
 ```rust
 struct ContentIndex {
     root: String,
-    format_version: u32,                          // Bumped on layout change → triggers rebuild
+    format_version: u32,                          // Current: 5 (also ContentIndexHead)
     created_at: u64,
     max_age_secs: u64,
     files: Vec<String>,                          // file_id → path
@@ -222,6 +226,8 @@ struct ContentIndex {
     file_tokens_authoritative: bool,             // True only when file_tokens is maintained
     path_to_id: Option<HashMap<PathBuf, u32>>,   // path → file_id (watch mode)
     respect_git_exclude: bool,                   // Persisted user choice for auto-rebuild
+    hidden: bool,
+    no_ignore: bool,
     // ...plus diagnostic counters: read_errors, lossy_file_count, worker_panics
 }
 
@@ -350,21 +356,42 @@ fn load_content_index(dir: &str, exts: &str) -> Result<ContentIndex, SearchError
 If exact match fails (e.g., user indexed with `cs` but queries without specifying extensions), scan all `.word-search` files and check the `root` field:
 
 ```rust
-fn find_content_index_for_dir(dir: &str) -> Option<ContentIndex> {
-    for entry in fs::read_dir(index_dir()) {
-        if path.extension() == "word-search" {
-            // Magic-dispatch: SHARD_MAGIC -> load_sharded, LZ4_MAGIC -> load_compressed.
-            let index = load_content_index_at_path(&path).ok()?;
-            if index.root == canonical_dir {
-                return Some(index);
-            }
-        }
-    }
-    None
-}
+fn find_content_index_for_dir(
+    dir: &str,
+    index_base: &Path,
+    expected_exts: &[String],
+) -> Result<Option<ContentIndex>, SearchError>;
 ```
 
-This scan reads and deserializes each `.word-search` file header — slow if many indexes exist. In practice, users have 1-5 indexes.
+Discovery tries the exact key first, then sorted compatible extension supersets.
+Header roots (or optional sidecars when a root is unreadable) attribute alternate
+candidates; unrelated roots are skipped. An unreadable alternate with neither root
+nor sidecar is unattributable and is skipped with a warning, not blamed on the
+queried directory. An exact-key failure remains attributable even without a readable
+header. Failures are retained until all candidates have been exhausted, so a good
+superset can still satisfy the query. Only `Ok(None)` means no usable cache exists;
+`Err` is not a missing-cache signal.
+
+### CLI upgrade and recovery
+
+File v3 and content v5 store the original `hidden` and `no_ignore` traversal flags
+in the binary payload (including the sharded content head). JSON `.meta` files are
+optional discovery hints, not an authority for those flags. Older v2/v4 layouts
+cannot recover them. CLI `fast` and `grep` refuse to overwrite an existing
+incompatible or corrupt selected cache and report an error on stderr with exit 1.
+Rebuild it explicitly, choosing the desired scope rather than guessing from its
+paths:
+
+```text
+xray index -d ROOT --hidden --no-ignore
+xray content-index -d ROOT -e rs,cs --hidden --no-ignore
+```
+
+Omit either option when its inclusion is not intended. Keep any original
+`--respect-git-exclude` choice when rebuilding explicitly. Stale compatible
+indexes preserve all three traversal settings, original extensions and age on
+automatic rebuild. True missing-cache behavior is unchanged (`fast` builds;
+`grep` needs explicit extensions); valid empty indexes remain usable.
 
 ## Incremental update mechanics
 
