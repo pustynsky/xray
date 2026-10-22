@@ -148,13 +148,26 @@ The current tracked workflow is [.github/workflows/ci.yml](../.github/workflows/
 
 | Job | OS | Command | E2E |
 |---|---|---|---|
+| `setup` | Windows, PowerShell 5.1 and 7 | Local MCP setup, legacy migration, extension detection, and setup dependencies | Setup fixtures |
 | `clippy` | Windows, Ubuntu | `cargo clippy --workspace --all-targets --locked -- -D warnings` | No |
-| `test` | Windows, Ubuntu | `cargo test --workspace --locked` | No |
+| `test-windows`, `test-ubuntu` | Windows, Ubuntu | `cargo test --workspace --locked` | No |
+| `setup-integration` | Windows, PowerShell 5.1 and 7 | `test-mcp-setup.ps1 -UserMcpOnly -XrayBinary ...` and `test-setup-xray-repos.ps1 -XrayBinary ...` | Real-process setup scenarios |
 | `feature-matrix` | Ubuntu | default, all features, no default, and isolated C#/TypeScript/Rust/XML checks | No |
 | `audit` | Ubuntu | `cargo audit --deny warnings --ignore RUSTSEC-2025-0141` | No |
 | `deny` | Ubuntu | `cargo deny check` | No |
 
-No workflow invokes [e2e-test.ps1](../e2e-test.ps1), `scripts/test-*.ps1`, or `scripts/mcp-filter/test-*.ps1`.
+The Windows Rust job uploads its debug executable as a one-day artifact.
+Both `setup-integration` jobs download that binary from the same workflow run
+and run the full user and bulk setup suites in parallel. They depend only on
+`test-windows`, not on the Ubuntu job. Rust test jobs have a 30-minute timeout;
+local and integration setup jobs have a 20-minute timeout.
+
+Re-running the Windows job replaces its artifact. Once the one-day retention
+expires, use "Re-run all jobs" rather than "Re-run failed jobs" so the Windows
+job builds and uploads the executable again.
+
+These setup scenarios do not replace the broader public-tool E2E suite.
+No workflow invokes [e2e-test.ps1](../e2e-test.ps1).
 
 ## E2E Documentation to Execution Map
 
