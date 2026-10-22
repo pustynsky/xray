@@ -1371,6 +1371,8 @@ Shows all existing indexes with their status, sizes, age, and memory usage. Pass
 
 Force rebuild the content index and reload it into the server's in-memory cache. Useful after many file changes or when `--watch` is not enabled.
 
+Effective extensions (including server defaults) are trimmed and lowercased for cache lookup, discovery, building, and post-save reload. Uppercase or padded extensions therefore avoid a redundant build after a successful save. Order and duplicates are preserved; empty comma-separated segments remain invalid. Existing-cache reuse on workspace switches and save/reload failure recovery are unchanged.
+
 > **`--respect-git-exclude` propagation:** the `--respect-git-exclude` flag passed to `xray serve` at startup is stored in `HandlerContext` and honored by every rebuild path — `xray_reindex` (including `dir=` workspace switch), the background build after a `roots/list` workspace switch, and the MCP file-list auto-rebuild. You do not need to restart the server to keep `.git/info/exclude` respected across reindexes.
 
 ### Parameters

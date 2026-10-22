@@ -2234,10 +2234,11 @@ fn build_or_load_content_index(
     respect_git_exclude: bool,
     force_rebuild: bool,
 ) -> Result<(ContentIndex, &'static str), String> {
-    let extensions: Vec<String> = ext.split(',').map(|s| s.trim().to_string()).collect();
+    let extensions: Vec<String> = ext.split(',').map(|s| s.trim().to_lowercase()).collect();
+    let ext = extensions.join(",");
 
     if !force_rebuild {
-        let loaded = load_content_index(dir, ext, index_base)
+        let loaded = load_content_index(dir, &ext, index_base)
             .ok()
             .or_else(|| find_content_index_for_dir(dir, index_base, &extensions).unwrap_or_else(|err| {
                 warn!(error = %err, "existing content cache unusable; rebuilding with explicit MCP options");
@@ -2252,7 +2253,7 @@ fn build_or_load_content_index(
     // Build from scratch
     let idx = build_content_index(&ContentIndexArgs {
         dir: dir.to_string(),
-        ext: ext.to_string(),
+        ext: ext.clone(),
         max_age_hours: 24,
         hidden: false,
         no_ignore: false, respect_git_exclude,
@@ -2277,12 +2278,12 @@ fn build_or_load_content_index(
     crate::index::force_mimalloc_collect();
     crate::index::log_memory("reindex: after drop+mi_collect (content)");
 
-    let reloaded = match load_content_index(dir, ext, index_base) {
+    let reloaded = match load_content_index(dir, &ext, index_base) {
         Ok(idx) => idx,
         Err(e) => {
             warn!(error = %e, "Failed to reload content index from disk after reindex, rebuilding");
             build_content_index(&ContentIndexArgs {
-                dir: dir.to_string(), ext: ext.to_string(),
+                dir: dir.to_string(), ext: ext.clone(),
                 max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude,
                 threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
             }).map_err(|e2| format!("Failed to rebuild content index: {}", e2))?

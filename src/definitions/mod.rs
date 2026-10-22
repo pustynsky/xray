@@ -1136,6 +1136,8 @@ fn merge_chunk_result(
 pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     let dir = std::fs::canonicalize(&args.dir)
         .unwrap_or_else(|_| PathBuf::from(&args.dir));
+    #[cfg(test)]
+    crate::index::build_counts::record(&dir, true);
     let dir_str = clean_path(&dir.to_string_lossy());
 
     let extensions: Vec<String> = args.ext.split(',')
