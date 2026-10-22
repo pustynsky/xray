@@ -16,7 +16,9 @@ Use concise technical language, with workspace-relative file links and line anch
 - SHIP: no actionable defects, requested coverage complete, required gates satisfied.
 - SHIP-WITH-NITS: only non-blocking observations remain and required gates are satisfied.
 - BLOCK: a BLOCKER/MAJOR exists, or required validation/coverage is incomplete.
-  Distinguish `code defect` from `validation/coverage incomplete` in the reason.
+  Classify each blocker as `defect` (supported blocking finding), `validation`
+  (missing required check/evidence), or `scope` (unresolved target/coverage).
+  More than one reason may apply. Use `none` for non-BLOCK verdicts.
 - Confidence reflects evidence quality, not severity. Use HIGH for complete,
   revision-matched inspection and validation; MEDIUM for bounded non-critical gaps;
   LOW for stale/partial evidence or unresolved material runtime behavior.
@@ -36,7 +38,8 @@ For optional feedback, use `nit: Suggestion:` without changing its original seve
 Findings: <severity, file link, failure mode, evidence, suggested change>
 Coverage gaps: <only material unknowns, unavailable checks, or out-of-scope surfaces>
 Verdict: SHIP | SHIP-WITH-NITS | BLOCK
-Reason: <1-2 sentences; code defect or validation/coverage incomplete if blocked>
+Block reasons: <none | comma-separated defect, validation, scope>
+Reason: <1-2 sentences explaining the verdict and any blocker>
 Confidence: HIGH | MEDIUM | LOW
 Coverage: FULL | PARTIAL | DIFF-ONLY; <revision, diff source, reviewed scope>
 Validation: <command, provenance, exit code, concise observed result>
@@ -52,3 +55,19 @@ For FOLLOW-UP, add one short prior-finding resolution table; do not repeat uncha
 findings or previously cleared files. Keep negative evidence to at most five points.
 For a clean small review, aim for a few paragraphs. Expand only for actionable
 findings or evidence the requester needs to evaluate the verdict.
+
+## Decision Examples
+
+These are hypothetical classifications, not findings or validation evidence.
+
+- Clean documentation review: changed claims and references are verified, and no
+  build/test gate applies. `Verdict: SHIP`; `Block reasons: none`. State that
+  builds/tests were not required; do not invent a passing test run.
+- Concrete regression: a changed parser drops a valid input field, and the
+  inspected test asserts only exit success. Report the location, input and lost
+  output, explain the assertion gap, and request a fix. `Verdict: BLOCK`;
+  `Block reasons: defect`.
+- Required analyzer unavailable: code inspection found no defect, but a required
+  script check cannot run because its tool is missing. `Verdict: BLOCK`;
+  `Block reasons: validation`. Name the tool and affected files; do not fabricate
+  a code finding or keep re-reviewing without new evidence.

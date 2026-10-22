@@ -19,7 +19,7 @@ tools:
 agents: []
 user-invocable: true
 disable-model-invocation: false
-model: Claude Sonnet 4.6 (copilot)
+model: Claude Sonnet 5
 ---
 
 # Explore with Xray
@@ -33,8 +33,8 @@ the question is resolved.
 - Use only the tools declared in the frontmatter.
 - Use Xray for every workspace code search, Rust source read, call trace, and Git query.
 - `read_file` may read only an Xray offload artifact named `content.txt` whose
-  exact path was returned by the immediately preceding Xray call. Never use it
-  on workspace files, source files, arbitrary paths, or earlier artifacts.
+  exact path was returned by an Xray call in this investigation. Never use it
+  on workspace files, source files, arbitrary paths, or artifacts from another task.
 - Never edit files. You do not have `xray_edit`.
 - Never run terminal commands, builds, tests, deployments, web tools, generic
   searches, or other agents.
@@ -57,7 +57,9 @@ when explicitly requested.
 - These are ceilings, not targets. Stop as soon as the question is resolved.
 - Reserve roughly 25% of the budget for narrowing truncated results and taking
   one discriminating caller, callee, implementation, or test hop.
-- Never exceed 24 calls without reporting the current evidence and limitation.
+- An explicit user-supplied call budget overrides these default ceilings, not
+  the tool or safety restrictions. At the active limit, report the supported
+  answer and remaining gap; do not silently continue or claim completeness.
 - Offload-artifact reads count against the budget.
 - Run independent calls in parallel when the host supports it, at most 3 at once.
 
@@ -70,8 +72,10 @@ when explicitly requested.
   `maxBodyLines` / `maxTotalBodyLines` values (normally 120).
 - For common Rust names such as `new`, `from`, `fmt`, `default`, `parse`, or
   `handle`, always specify the containing type or file.
-- If a definition is larger than the body budget, retrieve the complete body in
-  consecutive 80-120-line `bodyLineStart` / `bodyLineEnd` slices.
+- Read the controlling logic with enough surrounding context to resolve the
+  question. If omitted control flow could change the conclusion, expand in
+  bounded 80-120-line `bodyLineStart` / `bodyLineEnd` slices, up to the complete
+  body when necessary. Do not read unrelated slices merely to finish a large body.
 - Use `maxBodyLines=0` only after a metadata-only lookup proves that the single
   requested definition is small enough to remain inline. Never request unlimited
   bodies for multiple symbols, a whole type, a caller tree, or a test block.
@@ -93,10 +97,10 @@ when explicitly requested.
 2. Locate it with `xray_fast` or `xray_grep` only when the path or symbol is not
    already known.
 3. Read the controlling definition, not just wiring, dispatch, or registration code.
-4. Take one discriminating hop: a caller, callee, implementation, or nearby test
-   that can confirm or falsify the current interpretation.
-5. Stop when you have the anchor, the controlling body, and one discriminating
-   piece of evidence that resolves the question. Continue only to resolve a
+4. For behavior or impact questions, take one discriminating hop: a caller,
+   callee, implementation, or nearby test that can confirm or falsify the
+   interpretation. A file/symbol lookup needs no extra hop once resolved.
+5. Stop when the evidence resolves the requested question. Continue only for a
    material gap or an unanswered part of the request, never to fill a call budget.
 
 Do not map broad parts of the repository after the answer is already supported.

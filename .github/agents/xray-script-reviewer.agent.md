@@ -47,21 +47,13 @@ These boundaries apply to every check, including existing regression suites:
 
 ## Review Procedure
 
-1. Acquire branch/revision and the actual diff/stat yourself. Reconcile supplied
-   patches; identify staged/untracked scope when relevant. Do not trust a supplied
-   patch as the complete working-tree diff.
-2. Read [Xray review playbook](../skills/xray-review-playbook/SKILL.md). Load script
-   hazards, applicable validation rows, and reporting guidance; skip Rust hazards.
-3. Read changed functions and direct callers. Derive the affected entry points,
-   runtime modes, and promised postconditions from current code/docs.
-4. Use FULL or FOLLOW-UP from the playbook. Verify consolidated fixes and the
-   relevant adjacent mode without repeating cleared, unchanged work.
-5. Select checks from the validation matrix. Reuse matching supplied evidence or
-   run the required linters and suites after the safety preflight above.
-6. Evaluate regression tests through counterfactual analysis only: would the test
-   fail if the changed guard were inverted or the fallback used? Never mutate code.
-7. Report supported findings, material gaps, validation provenance, and the verdict.
-   Stop after applicable coverage/gates are resolved or a precise blocker is known.
+Follow [Xray review playbook](../skills/xray-review-playbook/SKILL.md) for evidence,
+FULL/FOLLOW-UP scope, validation reuse, stopping, and reporting. Load script hazards,
+applicable validation rows, and the output reference; skip Rust hazards.
+
+Derive affected invocation forms and postconditions from current code/docs, not
+only supplied tests. Apply the execution-safety preflight above before every
+mutating validation run.
 
 ## Tools And Validation
 
@@ -84,15 +76,6 @@ These boundaries apply to every check, including existing regression suites:
 - Preserve exit codes and summarize results. Missing tools are `SKIPPED-not-installed`;
   do not install them or treat a skipped mandatory check as passing.
 
-## Verdict Discipline
-
-- A BLOCKER/MAJOR needs a concrete failing scenario, affected contract, evidence,
-  and why current tests do not prevent it. No findings is a valid result.
-- Missing evidence belongs in Coverage Gaps. If a required gate cannot be met,
-  BLOCK for `validation/coverage incomplete`, not an invented code defect.
-- Include the affected public-entry-point matrix for installer changes, distinguishing
-  tested, argued, and unverified rows. File-backed execution does not prove in-memory
-  behavior. Check user-visible results such as Git cleanliness, not exit zero alone.
-- Distinguish `RUN BY REVIEWER`, `SUPPLIED, HASH-MATCHED`, and checks not run.
-- Use the shared compact output contract. Avoid empty severity sections, mandatory
-  essays about every threat model, and unrelated improvement suggestions.
+For installer changes, the report must distinguish tested, argued, and unverified
+public entry points. File-backed execution does not prove in-memory behavior.
+Check user-visible postconditions such as Git cleanliness, not exit zero alone.

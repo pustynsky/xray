@@ -75,9 +75,11 @@ repository HEAD/base, and fingerprint of the same diff source being reviewed.
 VALIDATION_EVIDENCE
 head: <commit SHA>
 base: <base commit SHA for branch reviews, otherwise not-applicable>
-diffSource: <working-tree | staged | branch range>
+diffSource: <working-tree | staged | branch range | branch range + working-tree fixes>
 scope: <sorted paths>
 diffSha256: <64 lowercase hex>
+fixDiffSha256: <required only for a branch review with uncommitted fixes>
+untrackedInputs: <none | sorted paths and SHA256 of each file's raw bytes>
 commands:
 - command: <exact command>
   exitCode: 0
@@ -87,10 +89,20 @@ END_VALIDATION_EVIDENCE
 
 Compute the fingerprint over LF-joined Git diff output encoded as UTF-8. Use the
 same sorted paths and diff source on both sides (`--cached` or the branch range
-when applicable). Check Git's exit code before hashing:
+when applicable). For a working-tree review including both staged and unstaged
+changes, use `git diff HEAD`, not plain `git diff`. Hash selected untracked inputs
+separately; they are absent from all these tracked diffs. Check Git's exit code
+before hashing. Set `$diffSource` and, for a branch range, `$base` and `$head` from
+the recorded review state before running:
 
 ```powershell
-$lines = @(git diff --binary --no-ext-diff -- <sorted paths>)
+$diffArgs = @(switch ($diffSource) {
+    'working-tree' { @('HEAD') }
+    'staged' { @('--cached') }
+    'branch range' { @("$base..$head") }
+    default { throw 'Choose one diff source; fingerprint a fix overlay separately' }
+})
+$lines = @(git diff @diffArgs --binary --no-ext-diff -- <sorted paths>)
 if ($LASTEXITCODE -ne 0) { throw 'Cannot fingerprint the review diff' }
 $text = $lines -join "`n"
 $sha = [Security.Cryptography.SHA256]::Create()
@@ -99,6 +111,12 @@ try {
     $hash.Replace('-', '').ToLowerInvariant()
 } finally { $sha.Dispose() }
 ```
+
+For a branch review with uncommitted fixes, `diffSha256` identifies the original
+base-to-head range, and `fixDiffSha256` identifies the task-owned tracked fix
+overlay against that HEAD. Include selected untracked fix files in `untrackedInputs`.
+Both fingerprints and the combined file contents must match the validated state;
+do not claim the original branch-only evidence validates the fix overlay.
 
 A matching hash binds a supplied report to a patch; it does not authenticate the
 report or prove that tests passed. Label it `SUPPLIED, HASH-MATCHED`, never reviewer-run.
