@@ -53,6 +53,8 @@
             max_age_secs: 3600,
             entries: vec![],
             respect_git_exclude: false,
+            hidden: false,
+            no_ignore: false,
         };
         assert!(!index.is_stale());
     }
@@ -66,6 +68,8 @@
             max_age_secs: 3600,
             entries: vec![],
             respect_git_exclude: false,
+            hidden: false,
+            no_ignore: false,
         };
         assert!(index.is_stale());
     }
@@ -229,6 +233,8 @@
                 },
             ],
             respect_git_exclude: false,
+            hidden: false,
+            no_ignore: false,
         };
         let encoded = bincode::serialize(&index).unwrap();
         let decoded: FileIndex = bincode::deserialize(&encoded).unwrap();
@@ -977,6 +983,8 @@
             max_age_secs: 0,
             entries: Vec::new(),
             respect_git_exclude: false,
+            hidden: false,
+            no_ignore: false,
         };
         drop(_guard);
     }
@@ -1003,6 +1011,8 @@
             max_age_secs: 86_400,
             entries: Vec::new(),
             respect_git_exclude: false,
+            hidden: false,
+            no_ignore: false,
         };
         crate::index::save_index(&stale, index_base).unwrap();
 
@@ -1031,6 +1041,8 @@
             max_age_secs: 86_400,
             entries: Vec::new(),
             respect_git_exclude: false,
+            hidden: false,
+            no_ignore: false,
         };
         crate::index::save_index(&idx, index_base).unwrap();
 

@@ -2239,7 +2239,10 @@ fn build_or_load_content_index(
     if !force_rebuild {
         let loaded = load_content_index(dir, ext, index_base)
             .ok()
-            .or_else(|| find_content_index_for_dir(dir, index_base, &extensions));
+            .or_else(|| find_content_index_for_dir(dir, index_base, &extensions).unwrap_or_else(|err| {
+                warn!(error = %err, "existing content cache unusable; rebuilding with explicit MCP options");
+                None
+            }));
 
         if let Some(idx) = loaded {
             return Ok((idx, "loaded_cache"));
@@ -2529,7 +2532,10 @@ pub struct ContentBuildFailure {
 fn cached_content_index(ctx: &HandlerContext, dir: &str) -> Option<ContentIndex> {
     load_content_index(dir, &ctx.server_ext, &ctx.index_base).ok().or_else(|| {
         let extensions: Vec<String> = ctx.server_ext.split(',').map(str::to_string).collect();
-        find_content_index_for_dir(dir, &ctx.index_base, &extensions)
+        find_content_index_for_dir(dir, &ctx.index_base, &extensions).unwrap_or_else(|err| {
+            warn!(error = %err, "existing content cache unusable");
+            None
+        })
     })
 }
 

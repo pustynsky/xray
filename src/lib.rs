@@ -629,9 +629,9 @@ pub struct FileEntry {
 }
 
 /// Format version for FileIndex. Bump when changing the on-disk struct layout.
-/// Loading an index with a different version triggers a full rebuild via the
-/// fast `read_format_version_from_index_file` header check.
-pub const FILE_INDEX_VERSION: u32 = 2;
+/// The fast header check rejects other versions before deserialization.
+/// CLI queries require an explicit rebuild when traversal settings are unknown.
+pub const FILE_INDEX_VERSION: u32 = 3;
 
 /// File index: a flat list of all files/directories under a root.
 ///
@@ -656,6 +656,8 @@ pub struct FileIndex {
     /// the CLI default. See `docs/bug-reports/2026-04-23_417f315_cli-auto-rebuild-loses-flag.md`.
     #[serde(default)]
     pub respect_git_exclude: bool,
+    pub hidden: bool,
+    pub no_ignore: bool,
 }
 
 impl FileIndex {
@@ -744,8 +746,9 @@ pub fn generate_trigrams(token: &str) -> Vec<String> {
 /// The core data structure for content search. Maps every token
 /// to the files and line numbers where it appears.
 /// Format version for ContentIndex. Bump when changing the struct layout.
-/// Loading an index with a different version triggers a rebuild.
-pub const CONTENT_INDEX_VERSION: u32 = 4;
+/// Other versions are rejected before deserialization; CLI queries require
+/// an explicit rebuild when traversal settings are unknown.
+pub const CONTENT_INDEX_VERSION: u32 = 5;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ContentIndex {
@@ -812,6 +815,8 @@ pub struct ContentIndex {
     /// default. See `docs/bug-reports/2026-04-23_417f315_cli-auto-rebuild-loses-flag.md`.
     #[serde(default)]
     pub respect_git_exclude: bool,
+    pub hidden: bool,
+    pub no_ignore: bool,
 }
 
 // `ContentIndex::clone()` is used by periodic autosave to take a snapshot
@@ -843,6 +848,8 @@ impl Clone for ContentIndex {
             lossy_file_count: self.lossy_file_count,
             worker_panics: self.worker_panics,
             respect_git_exclude: self.respect_git_exclude,
+            hidden: self.hidden,
+            no_ignore: self.no_ignore,
         }
     }
 }
@@ -888,6 +895,8 @@ pub struct ContentIndexHead {
     pub worker_panics: usize,
     #[serde(default)]
     pub respect_git_exclude: bool,
+    pub hidden: bool,
+    pub no_ignore: bool,
 }
 
 impl ContentIndex {
@@ -931,6 +940,8 @@ impl ContentIndex {
             lossy_file_count: self.lossy_file_count,
             worker_panics: self.worker_panics,
             respect_git_exclude: self.respect_git_exclude,
+            hidden: self.hidden,
+            no_ignore: self.no_ignore,
         }
     }
 
@@ -965,6 +976,8 @@ impl ContentIndex {
             lossy_file_count: head.lossy_file_count,
             worker_panics: head.worker_panics,
             respect_git_exclude: head.respect_git_exclude,
+            hidden: head.hidden,
+            no_ignore: head.no_ignore,
         }
     }
 }
@@ -1121,6 +1134,8 @@ impl Default for ContentIndex {
             lossy_file_count: 0,
             worker_panics: 0,
             respect_git_exclude: false,
+            hidden: false,
+            no_ignore: false,
         }
     }
 }

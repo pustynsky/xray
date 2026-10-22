@@ -482,7 +482,7 @@ fn test_find_content_index_skips_stale_extensions() {
 
     // Request "cs,sql" — should NOT find the old cs-only index
     let expected = vec!["cs".to_string(), "sql".to_string()];
-    let result = crate::index::find_content_index_for_dir(&root_str, index_base, &expected);
+    let result = crate::index::find_content_index_for_dir(&root_str, index_base, &expected).unwrap();
     assert!(result.is_none(),
         "Should not find cs-only content index when cs,sql is expected");
 }
@@ -509,7 +509,7 @@ fn test_find_content_index_accepts_superset() {
 
     // Request "cs,sql" — should find the superset index
     let expected = vec!["cs".to_string(), "sql".to_string()];
-    let result = crate::index::find_content_index_for_dir(&root_str, index_base, &expected);
+    let result = crate::index::find_content_index_for_dir(&root_str, index_base, &expected).unwrap();
     assert!(result.is_some(),
         "Should find cs,sql,md content index when cs,sql is expected (superset)");
 }
@@ -534,7 +534,7 @@ fn test_find_content_index_empty_expected_accepts_any() {
     crate::save_content_index(&idx, index_base).unwrap();
 
     // Empty expected — should accept any (backward compatible)
-    let result = crate::index::find_content_index_for_dir(&root_str, index_base, &[]);
+    let result = crate::index::find_content_index_for_dir(&root_str, index_base, &[]).unwrap();
     assert!(result.is_some(),
         "Empty expected_exts should accept any cached content index");
 }
@@ -560,7 +560,7 @@ fn test_find_content_index_rejects_invalid_extensions_with_or_without_meta() {
             }
 
             assert!(
-                crate::index::find_content_index_for_dir(&root_str, cache.path(), &[]).is_none(),
+                crate::index::find_content_index_for_dir(&root_str, cache.path(), &[]).unwrap().is_none(),
                 "The only cached index has invalid extensions {extensions:?}, with_meta={with_meta}"
             );
         }
@@ -1234,12 +1234,12 @@ fn test_find_content_index_uses_meta_to_skip_non_matching_root() {
 
     // Searching for project_b should NOT find project_a's index
     // (meta sidecar has root=project_a which doesn't match project_b)
-    let result = crate::index::find_content_index_for_dir(&root_b, index_base, &[]);
+    let result = crate::index::find_content_index_for_dir(&root_b, index_base, &[]).unwrap();
     assert!(result.is_none(),
         "Should not find project_a's index when searching for project_b");
 
     // Searching for project_a SHOULD find it
-    let result = crate::index::find_content_index_for_dir(&root_a, index_base, &[]);
+    let result = crate::index::find_content_index_for_dir(&root_a, index_base, &[]).unwrap();
     assert!(result.is_some(),
         "Should find project_a's index when searching for project_a");
 }
@@ -1275,7 +1275,7 @@ fn test_find_content_index_works_without_meta_sidecar() {
     }
 
     // Should still find the index via fallback (read_root_from_index_file)
-    let result = crate::index::find_content_index_for_dir(&root_str, index_base, &["rs".to_string(), "md".to_string()]);
+    let result = crate::index::find_content_index_for_dir(&root_str, index_base, &["rs".to_string(), "md".to_string()]).unwrap();
     assert!(result.is_some(),
         "Should find index even without .meta sidecar (fallback path)");
 }
@@ -1302,7 +1302,7 @@ fn test_find_content_index_meta_rejects_extension_mismatch() {
 
     // Request "rs,md" — meta should reject because "md" is not in cached extensions
     let expected = vec!["rs".to_string(), "md".to_string()];
-    let result = crate::index::find_content_index_for_dir(&root_str, index_base, &expected);
+    let result = crate::index::find_content_index_for_dir(&root_str, index_base, &expected).unwrap();
     assert!(result.is_none(),
         "Meta-based filtering should reject when cached extensions don't include all expected");
 }
@@ -1358,7 +1358,7 @@ fn test_cleanup_stale_same_root_removes_old_index() {
     assert_eq!(count_ws(), 1, "Should have 1 content index after cleanup");
 
     // Verify the remaining index is the new one
-    let result = crate::index::find_content_index_for_dir(&root_str, index_base, &["rs".to_string(), "md".to_string()]);
+    let result = crate::index::find_content_index_for_dir(&root_str, index_base, &["rs".to_string(), "md".to_string()]).unwrap();
     assert!(result.is_some(), "Should find the new rs,md index");
 }
 
@@ -1465,7 +1465,7 @@ fn test_find_content_index_case_insensitive_lookup_on_windows() {
     };
     crate::save_content_index(&idx, index_base).unwrap();
 
-    let result = crate::index::find_content_index_for_dir(&lookup_root, index_base, &[]);
+    let result = crate::index::find_content_index_for_dir(&lookup_root, index_base, &[]).unwrap();
     if cfg!(windows) {
         assert!(result.is_some(),
             "On Windows, lookup with different casing must find the saved index (path_eq)");
@@ -1504,7 +1504,7 @@ fn test_find_content_index_case_insensitive_lookup_without_meta() {
         }
     }
 
-    let result = crate::index::find_content_index_for_dir(&lookup_root, index_base, &[]);
+    let result = crate::index::find_content_index_for_dir(&lookup_root, index_base, &[]).unwrap();
     if cfg!(windows) {
         assert!(result.is_some(),
             "Fallback (no .meta) lookup with different casing must find the saved index on Windows");
@@ -1577,6 +1577,8 @@ fn test_read_root_from_file_index_roundtrip() {
         max_age_secs: 86_400,
         entries: Vec::new(),
         respect_git_exclude: false,
+        hidden: false,
+        no_ignore: false,
     };
 
     crate::index::save_compressed(&path, &idx, "test-file-index")

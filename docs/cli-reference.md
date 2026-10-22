@@ -65,7 +65,7 @@ If no index exists for the directory, it will be built automatically on first us
 | `-i, --ignore-case`  | Case-insensitive search                        |
 | `-c, --count`        | Show match count only                          |
 | `-e, --ext <EXT>`    | Filter by extension                            |
-| `--auto-reindex`     | Rebuild a stale index. Off by default; without it, xray uses the stale index and prints a warning          |
+| `--auto-reindex`     | Rebuild a stale index with its persisted traversal settings. Off by default; without it, xray uses the stale index and prints a warning |
 | `--dirs-only`        | Show only directories                          |
 | `--files-only`       | Show only files                                |
 | `--min-size <BYTES>` | Minimum file size filter                       |
@@ -190,7 +190,7 @@ xray grep "HttpClient" -d C:\Projects -e cs
 | `-d, --dir <DIR>`   | Directory whose content index to search (default: `.`)                                                                                                                                                                     |
 | `-c, --count`       | Show match count only                                                                                                                                                                                                      |
 | `--show-lines`      | Display actual line content from files                                                                                                                                                                                     |
-| `--auto-reindex`    | Enabled by default. Rebuild stale indexes with their original extensions; build missing indexes only when `--ext` supplies an extension configuration                                                                                                                                   |
+| `--auto-reindex`    | Enabled by default. Rebuild stale indexes with their original extensions and traversal settings; build missing indexes only when `--ext` supplies an extension configuration |
 | `--respect-git-exclude` | Respect `.git/info/exclude` during auto-rebuild (default: false)                                                                                                                                                        |
 | `-e, --ext <EXT>`   | Filter results by extension                                                                                                                                                                                                |
 | `--max-results <N>` | Limit number of results (0 = unlimited)                                                                                                                                                                                    |

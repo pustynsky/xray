@@ -3143,6 +3143,8 @@ mod ensure_file_index_tests {
             max_age_secs: 0,
             entries: Vec::new(),
             respect_git_exclude: false,
+            hidden: false,
+            no_ignore: false,
         }
     }
 

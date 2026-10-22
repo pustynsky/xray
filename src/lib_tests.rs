@@ -209,6 +209,8 @@ fn test_content_index_field_count_guard() {
         worker_panics: 0,
         format_version: crate::CONTENT_INDEX_VERSION,
         respect_git_exclude: false,
+        hidden: false,
+        no_ignore: false,
     };
     drop(_guard);
 }
@@ -1227,4 +1229,3 @@ fn test_tokenize_idx_010_uppercase_and_unicode_match_legacy() {
         assert_eq!(fast, legacy, "divergence on input {c:?}: fast={fast:?} legacy={legacy:?}");
     }
 }
-

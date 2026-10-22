@@ -1111,6 +1111,8 @@ fn load_or_build_content_index(
         lossy_file_count: 0,
         worker_panics: 0,
         respect_git_exclude,
+        hidden: false,
+        no_ignore: false,
     };
     let index = Arc::new(RwLock::new(empty_index));
 
@@ -1141,7 +1143,12 @@ fn load_or_build_content_index(
         direct_load
     } else {
         load_method = "fallback";
-        let fallback = if is_unresolved { None } else { find_content_index_for_dir(dir_str, idx_base, extensions) };
+        let fallback = if is_unresolved { None } else {
+            find_content_index_for_dir(dir_str, idx_base, extensions).unwrap_or_else(|err| {
+                warn!(error = %err, "serve: existing content cache unusable; rebuilding with explicit server options");
+                None
+            })
+        };
         if fallback.is_none() && !is_unresolved {
             crate::index::log_memory("serve: content fallback load miss; building");
         }

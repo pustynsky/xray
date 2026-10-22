@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ignore::WalkBuilder;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::error::SearchError;
 use code_xray::{canonicalize_or_warn, clean_path, extract_semantic_prefix, generate_trigrams, path_eq, read_file_lossy, stable_hash, tokenize, ContentIndex, ContentIndexHead, FileEntry, FileIndex, Posting, TrigramIndex, CONTENT_INDEX_VERSION, FILE_INDEX_VERSION};
@@ -1596,113 +1596,80 @@ pub(crate) fn validate_content_extensions(extensions: &[String]) -> Result<(), S
 /// This prevents a stale cache (e.g., built with `--ext cs` only) from
 /// being used when the server now requires `--ext cs,sql`.
 ///
-/// **Optimization:** Uses `.meta` sidecar files to check root and extensions
-/// without loading the full index (~200 bytes vs 100+ MB). Falls back to
-/// `read_root_from_index_file` if no sidecar exists. Only loads the full
-/// index after metadata confirms a match.
-pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expected_exts: &[String]) -> Option<ContentIndex> {
-    if !index_base.exists() {
-        return None;
+/// Lightweight root headers filter unrelated caches before full loading.
+/// Optional `.meta` sidecars can attribute otherwise unreadable alternates.
+/// Tries the exact key first, retaining failures until all candidates are
+/// exhausted: `Ok(None)` is missing, `Err` is an attributable unusable cache.
+pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expected_exts: &[String]) -> Result<Option<ContentIndex>, SearchError> {
+    let entries = match fs::read_dir(index_base) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    let clean = clean_path(&canonicalize_or_warn(dir).to_string_lossy());
+    let exact = (!expected_exts.is_empty())
+        .then(|| content_index_path_for(dir, &expected_exts.join(","), index_base));
+    let mut paths = entries.map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.retain(|path| path.extension().is_some_and(|ext| ext == "word-search"));
+    paths.sort();
+    if let Some(position) = paths.iter().position(|path| Some(path) == exact.as_ref()) {
+        let path = paths.remove(position);
+        paths.insert(0, path);
     }
-    let canonical = canonicalize_or_warn(dir);
-    let clean = clean_path(&canonical.to_string_lossy());
-
-    for entry in fs::read_dir(index_base).ok()?.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "word-search") {
+    let mut failure = None;
+    for path in paths {
+        let is_exact = exact.as_ref() == Some(&path);
+        let meta = load_index_meta(&path);
+        let root = read_root_from_index_file(&path);
+        let attributed_root = root.as_deref().or_else(|| meta.as_ref().map(|meta| meta.root.as_str()));
+        if let Some(root) = attributed_root {
+            if !path_eq(root, &clean) {
+                if is_exact && failure.is_none() {
+                    failure = Some(SearchError::IndexLoad {
+                        path: path.display().to_string(),
+                        message: "exact cache key has a different root".to_string(),
+                    });
+                }
+                continue;
+            }
+        } else if !is_exact {
+            // A rootless, sidecarless alternate cannot be attributed to this
+            // directory. Never let another root's damaged cache poison it.
+            warn!(target: "xray::index", path = %path.display(), "ignoring unattributable content cache (no readable root or metadata)");
             continue;
         }
-
-        // ── Fast filter via .meta sidecar (~200 bytes, no full deserialization) ──
-        if let Some(meta) = load_index_meta(&path) {
-            if !path_eq(&meta.root, &clean) {
-                continue; // root doesn't match — skip without loading
-            }
-            if let Err(err) = validate_content_extensions(&meta.extensions) {
-                warn!(target: "xray::index", path = %path.display(), error = %err, "find_content_index: skipping invalid extensions");
-                continue;
-            }
-            // Check extension superset from metadata
-            if !expected_exts.is_empty() {
-                let has_all = expected_exts.iter().all(|ext|
-                    meta.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))
-                );
-                if !has_all {
-                    debug!(target: "xray::index", path = %path.display(), cached = ?meta.extensions, expected = ?expected_exts, "find_content_index: skipping (extensions mismatch via meta)");
-                    continue;
-                }
-            }
-            // Metadata matches — check version before full load
-            match read_format_version_from_index_file(&path) {
-                Some(v) if v != CONTENT_INDEX_VERSION => {
-                    debug!(target: "xray::index", path = %path.display(), found = v, expected = CONTENT_INDEX_VERSION, "find_content_index: skipping (format version mismatch)");
-                    continue;
-                }
-                None => {
-                    warn!(target: "xray::index", path = %path.display(), "find_content_index: cannot read version, skipping");
-                    continue;
-                }
-                Some(_) => {}
-            }
-            match load_content_index_at_path(&path) {
-                Ok(index) => {
-                    if let Err(err) = validate_content_extensions(&index.extensions) {
-                        warn!(target: "xray::index", path = %path.display(), error = %err, "find_content_index: skipping invalid extensions");
-                        continue;
-                    }
-                    return Some(index);
-                }
-                Err(e) => {
-                    warn!(target: "xray::index", path = %path.display(), error = %e, "find_content_index: metadata matched but load failed");
-                    continue;
-                }
-            }
+        let relevant = is_exact || meta.as_ref().is_none_or(|meta|
+            validate_content_extensions(&meta.extensions).is_ok()
+                && expected_exts.iter().all(|ext|
+                    meta.extensions.iter().any(|cached| cached.eq_ignore_ascii_case(ext))));
+        if !relevant {
+            continue;
         }
-
-        // ── Fallback: no .meta sidecar — try lightweight root + version check ──
-        if let Some(root) = read_root_from_index_file(&path)
-            && !path_eq(&root, &clean) {
-                continue; // root doesn't match — skip without loading
-            }
-        // Check version before full deserialization
-        match read_format_version_from_index_file(&path) {
-            Some(v) if v != CONTENT_INDEX_VERSION => {
-                debug!(target: "xray::index", path = %path.display(), found = v, expected = CONTENT_INDEX_VERSION, "find_content_index: skipping (format version mismatch, fallback)");
-                continue;
-            }
-            None => {
-                warn!(target: "xray::index", path = %path.display(), "find_content_index: cannot read version, skipping (fallback)");
-                continue;
-            }
-            Some(_) => {}
-        }
-        // Root + version OK — load full index
         match load_content_index_at_path(&path) {
             Ok(index) => {
-                if path_eq(&index.root, &clean) {
-                    if let Err(err) = validate_content_extensions(&index.extensions) {
-                        warn!(target: "xray::index", path = %path.display(), error = %err, "find_content_index: skipping invalid extensions");
-                        continue;
-                    }
-                    // Validate that cached index has ALL expected extensions
-                    if !expected_exts.is_empty() {
-                        let has_all = expected_exts.iter().all(|ext|
-                            index.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))
-                        );
-                        if !has_all {
-                            debug!(target: "xray::index", path = %path.display(), cached = ?index.extensions, expected = ?expected_exts, "find_content_index: skipping (extensions mismatch via full load)");
-                            continue;
-                        }
-                    }
-                    return Some(index);
+                if !path_eq(&index.root, &clean)
+                    || validate_content_extensions(&index.extensions).is_err()
+                    || !expected_exts.iter().all(|ext|
+                        index.extensions.iter().any(|cached| cached.eq_ignore_ascii_case(ext)))
+                {
+                    continue;
                 }
+                return Ok(Some(index));
             }
-            Err(e) => {
-                warn!(target: "xray::index", path = %path.display(), error = %e, "find_content_index: skipping (load error)");
+            Err(err) => {
+                // Keep evidence until every compatible candidate has been tried.
+                // Sidecars may attribute failures, never supply traversal flags.
+                if failure.is_none() {
+                    failure = Some(err);
+                }
             }
         }
     }
-    None
+    match failure {
+        Some(err) => Err(err),
+        None => Ok(None),
+    }
 }
 
 /// Read the root field from an index file without deserializing the whole file.
@@ -2031,6 +1998,8 @@ pub fn build_index(args: &IndexArgs) -> Result<FileIndex, SearchError> {
         max_age_secs: args.max_age_hours * 3600,
         entries,
         respect_git_exclude: args.respect_git_exclude,
+        hidden: args.hidden,
+        no_ignore: args.no_ignore,
     };
 
     let elapsed = start.elapsed();
@@ -2330,6 +2299,8 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
         lossy_file_count,
         worker_panics,
         respect_git_exclude: args.respect_git_exclude,
+        hidden: args.hidden,
+        no_ignore: args.no_ignore,
     })
 }
 

@@ -416,11 +416,12 @@ catch {
     Remove-Item -Recurse -Force $tvDir -ErrorAction SilentlyContinue
 }
 
-# T-GREP-STALE: CLI grep auto-rebuilds stale content index (format version mismatch)
-Write-Host -NoNewline "  T-GREP-STALE grep-auto-rebuild-stale ... "
+# T-GREP-STALE: CLI grep refuses to overwrite an incompatible content cache
+Write-Host -NoNewline "  T-GREP-STALE grep-refuses-incompatible-cache ... "
 $total++
+$gsDir = Join-Path $env:TEMP "search_e2e_grep_stale_$PID"
+$searchBin3 = $null
 try {
-    $gsDir = Join-Path $env:TEMP "search_e2e_grep_stale_$PID"
     if (Test-Path $gsDir) { Remove-Item -Recurse -Force $gsDir }
     New-Item -ItemType Directory -Path $gsDir | Out-Null
     Set-Content -Path (Join-Path $gsDir "hello.rs") -Value "fn hello() { println!(""hello""); }"
@@ -430,16 +431,26 @@ try {
 
     # Create a stale index with format_version=0
     $ErrorActionPreference = "Continue"
-    & $searchBin3 test-create-stale-index -d $gsDir -e rs --version 0 2>&1 | Out-Null
+    $gsCreateOutput = (& $searchBin3 test-create-stale-index -d $gsDir -e rs --version 0 2>&1 |
+        ForEach-Object { $_.ToString() }) -join "`n"
+    $gsCreateExit = $LASTEXITCODE
     $ErrorActionPreference = "Stop"
+    if ($gsCreateExit -ne 0) { throw "Could not create incompatible cache: $gsCreateOutput" }
+    $gsCacheMatch = [regex]::Match($gsCreateOutput, 'Created stale content index \(version=0\) at ([^\r\n]+)')
+    if (-not $gsCacheMatch.Success) { throw "Missing incompatible cache path: $gsCreateOutput" }
+    $gsCachePath = $gsCacheMatch.Groups[1].Value.Trim()
+    $gsCacheHash = (Get-FileHash -LiteralPath $gsCachePath -Algorithm SHA256).Hash
 
-    # Run grep — should auto-rebuild and return results (exit 0), not fail
+    # Old caches did not record traversal settings; require an explicit rebuild.
     $ErrorActionPreference = "Continue"
-    $gsOutput = & $searchBin3 grep hello -d $gsDir -e rs 2>&1 | Out-String
+    $gsOutput = (& $searchBin3 grep hello -d $gsDir -e rs 2>&1 |
+        ForEach-Object { $_.ToString() }) -join "`n"
     $gsExitCode = $LASTEXITCODE
     $ErrorActionPreference = "Stop"
 
-    if ($gsExitCode -eq 0 -and $gsOutput -match "hello") {
+    $gsCacheUnchanged = (Test-Path -LiteralPath $gsCachePath) -and
+        (Get-FileHash -LiteralPath $gsCachePath -Algorithm SHA256).Hash -eq $gsCacheHash
+    if ($gsExitCode -eq 1 -and $gsOutput -match "Refusing to replace" -and $gsCacheUnchanged) {
         Write-Host "OK" -ForegroundColor Green
         $passed++
     }
@@ -449,13 +460,24 @@ try {
         $failed++
     }
 
-    & $searchBin3 cleanup --dir $gsDir 2>&1 | Out-Null
-    Remove-Item -Recurse -Force $gsDir -ErrorAction SilentlyContinue
 }
 catch {
     Write-Host "FAILED (exception: $_)" -ForegroundColor Red
     $failed++
-    Remove-Item -Recurse -Force $gsDir -ErrorAction SilentlyContinue
+}
+finally {
+    if ($searchBin3) {
+        $ErrorActionPreference = "Continue"
+        $gsCleanupOutput = (& $searchBin3 cleanup --dir $gsDir 2>&1 |
+            ForEach-Object { $_.ToString() }) -join "`n"
+        $gsCleanupExit = $LASTEXITCODE
+        $ErrorActionPreference = "Stop"
+        if ($gsCleanupExit -ne 0) {
+            Write-Warning "T-GREP-STALE cleanup failed: $gsCleanupOutput"
+            $failed++
+        }
+    }
+    if (Test-Path -LiteralPath $gsDir) { Remove-Item -LiteralPath $gsDir -Recurse -Force }
 }
 
 # === PARALLEL TEST SECTION ===
