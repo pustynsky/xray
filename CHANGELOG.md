@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Clarified agent review and release workflows.** Review skills now identify the exact diff scope, distinguish defects from validation blockers, and include uncommitted fixes in follow-up reviews. Release instructions are self-contained and verify published artifacts against clean tagged builds. Exploration budgets and reviewer delegation avoid redundant work without weakening tool or installer safety boundaries.
+
 - **Normalized CLI grep extension filters (#502).** Supplied comma-separated extensions are now trimmed and lowercased once, then applied consistently during index selection, token scoring (exact, substring, regex), and phrase candidate filtering. Padded, mixed-case, and duplicate extensions work without inflating results or counts. Empty entries remain invalid; omitting the filter still searches all indexed extensions. Query filters do not narrow the selected index's persisted extensions or rebuild settings.
 
 - **Preserved CLI traversal scope on expiry (#504).** File and content indexes now persist `hidden` and `no_ignore` alongside the existing `respect_git_exclude` setting. Automatic `fast`/`grep` rebuilds retain those settings, the selected content extensions, and the configured age. File format is now v3 (was v2); content format is v5 (was v4), including production sharded heads. Existing incompatible or corrupt caches are not silently overwritten by CLI queries: rebuild explicitly with `xray index -d ROOT` / `xray content-index -d ROOT -e EXTENSIONS`, deliberately including or omitting `--hidden` and `--no-ignore` for the desired scope. Compatible exact/superset caches are still tried before reporting an error; a missing cache and a valid empty index retain their normal behavior.

@@ -25,7 +25,9 @@ If a required reference is unavailable, report the specific coverage gap.
 
 1. Acquire repository state, diff/stat, and the target revision yourself. Reconcile
    supplied patches with that diff. Include staged changes when requested; name
-   relevant untracked files, which ordinary `git diff` does not include.
+   relevant untracked files, which ordinary `git diff` does not include. Record
+   the exact diff source, HEAD/base, and selected paths. If the requested target
+   is ambiguous, report a scope blocker instead of choosing an empty or wider diff.
 2. Read changed controlling bodies and their direct consumers. Trace only the
    additional paths needed to resolve a concrete risk or a requested question.
 3. When `xray_callers` is available, cross-check an empty result with scoped
@@ -74,3 +76,6 @@ must be sampled, list unread files and report PARTIAL rather than implying compl
 - Test a regression test's strength through counterfactual analysis: would it fail
   if the guard were inverted or the fallback used? Never edit code to mutate it.
 - Do not increase severity to compensate for uncertainty or to appear thorough.
+- Use the output reference's `Block reasons` field to separate defects, unavailable
+  validation, and unresolved scope. A missing tool does not authorize installation,
+  weaker gates, code changes, or repeated identical review passes.
