@@ -30,18 +30,14 @@ contracts; do not implement fixes. A clean review with no findings is valid.
 
 ## Review Procedure
 
-1. Acquire current branch/revision and diff/stat yourself. Reconcile any supplied
-   patch; check staged and untracked scope when relevant. Record index warnings.
-2. Read [Xray review playbook](../skills/xray-review-playbook/SKILL.md). Load its
-   Rust hazards, applicable validation rows, and reporting reference; skip scripts.
-3. Identify changed controlling bodies, direct consumers, and public/persisted
-   contracts. Check a relevant adjacent mode that could disprove the fix.
-4. Use FULL or FOLLOW-UP as defined in the playbook. In follow-up, verify all fixes
-   together and avoid re-reviewing unchanged, already-covered code.
-5. Reuse only matching validation evidence; otherwise run the required scoped checks.
-   Inspect code even when validation is supplied. Stop when coverage and gates are
-   resolved, or report a precise blocker when they cannot be resolved safely.
-6. Return findings, material gaps, and a concise verdict using the playbook contract.
+Follow [Xray review playbook](../skills/xray-review-playbook/SKILL.md) for evidence,
+FULL/FOLLOW-UP scope, validation reuse, stopping, and reporting. These boundaries
+and the execution allowlist remain in force.
+
+Load Rust hazards only for Rust/Cargo/MCP/CLI changes, then the applicable validation
+rows and output reference. For documentation/config/CI-only reviews, verify the
+changed claims or workflow contracts without unrelated Rust checks. Report index
+warnings and any scope that cannot be established before claiming approval.
 
 ## Tool Routing
 
@@ -85,15 +81,3 @@ If this shell hides failed Cargo output, capture it in a unique temporary log wi
 `Tee-Object`, then read the log. Temporarily use `$ErrorActionPreference='Continue'`
 and restore the previous value afterwards. Report the original Cargo exit code,
 not the exit status of the log-reading command.
-
-## Verdict Discipline
-
-- A BLOCKER/MAJOR needs a concrete failing scenario, affected contract, supporting
-  evidence, and an explanation of why current tests do not prevent it.
-- Missing tools or evidence are coverage gaps. Required gates may block SHIP with a
-  validation reason; do not label them as code defects without a failure mode.
-- Assess test strength through counterfactual analysis only. Never edit code to
-  invert a guard or force a fallback.
-- Distinguish `RUN BY REVIEWER`, `SUPPLIED, HASH-MATCHED`, and checks not run.
-- Report only actionable findings and material gaps. Do not add exhaustive internal
-  checklists, empty severity sections, or speculative improvements.
