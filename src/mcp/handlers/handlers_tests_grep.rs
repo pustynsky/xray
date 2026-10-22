@@ -3326,6 +3326,102 @@ fn test_grep_explicit_file_filter_narrows_results() {
 }
 
 #[test]
+fn test_grep_path_separators_across_modes_and_exclusions() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let src = root.join("src").join("handlers");
+    std::fs::create_dir_all(&src).unwrap();
+    for name in ["Target.cs", "MyTarget.cs", "Other.cs"] {
+        std::fs::write(src.join(name), "pathseparatorneedle\n").unwrap();
+    }
+    let index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(index)
+        .with_server_dir(root.to_string_lossy().to_string())
+        .with_server_ext("cs")
+        .with_index_base(root.join(".index"))
+        .build();
+    let target = crate::clean_path(&src.join("Target.cs").to_string_lossy());
+    let other = crate::clean_path(&src.join("Other.cs").to_string_lossy());
+    let filters = [
+        "src/handlers/Target.cs".to_string(),
+        r"src\handlers\Target.cs".to_string(),
+        r"src/handlers\Target.cs".to_string(),
+        target.clone(),
+        target.replace('/', "\\"),
+        target.replace("/handlers/", r"\handlers/"),
+    ];
+    for mode in [
+        json!({"substring": false}),
+        json!({"substring": true}),
+        json!({"regex": true}),
+        json!({"phrase": true}),
+        json!({"lineRegex": true}),
+    ] {
+        for count_only in [false, true] {
+            for filter in &filters {
+                let mut args = mode.clone();
+                args["terms"] = json!(["pathseparatorneedle"]);
+                args["file"] = json!(["missing/path", filter.to_uppercase(), r"src\handlers\Other.cs"]);
+                args["countOnly"] = json!(count_only);
+                for exclude_target in [false, true] {
+                    args["exclude"] = if exclude_target {
+                        json!(["missing/path", filter.to_uppercase()])
+                    } else {
+                        json!([])
+                    };
+                    let result = dispatch_tool(&ctx, "xray_grep", &args);
+                    assert!(!result.is_error, "args={args}: {}", result.content[0].text);
+                    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+                    let expected_status = if count_only { "counts_only" } else { "complete" };
+                    assert_eq!(output["resultStatus"]["status"], expected_status, "args={args}: {output}");
+                    let expected_count = if exclude_target { 1 } else { 2 };
+                    assert_eq!(output["coverage"]["indexedFiles"], expected_count, "args={args}: {output}");
+                    assert_eq!(output["summary"]["totalFiles"], expected_count, "args={args}: {output}");
+                    assert_eq!(output["summary"]["totalOccurrences"], expected_count, "args={args}: {output}");
+                    if !count_only {
+                        let mut paths: Vec<_> = output["files"].as_array().unwrap().iter()
+                            .map(|file| crate::clean_path(file["path"].as_str().unwrap()))
+                            .collect();
+                        paths.sort();
+                        let mut expected = vec![other.clone()];
+                        if !exclude_target { expected.push(target.clone()); }
+                        expected.sort();
+                        assert_eq!(paths, expected, "args={args}");
+                    }
+                }
+            }
+            let mut args = mode.clone();
+            args["terms"] = json!(["pathseparatorneedle"]);
+            args["file"] = json!([r"src\handlers\Target.cs"]);
+            args["exclude"] = json!(["src/handlers/Target.cs"]);
+            args["countOnly"] = json!(count_only);
+            let result = dispatch_tool(&ctx, "xray_grep", &args);
+            assert!(!result.is_error, "{}", result.content[0].text);
+            let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+            assert_eq!(output["resultStatus"]["status"], "scope_not_found", "{output}");
+            assert_eq!(output["resultStatus"]["complete"], false, "{output}");
+
+            args["terms"] = json!(["absentneedle"]);
+            args["exclude"] = json!([]);
+            let result = dispatch_tool(&ctx, "xray_grep", &args);
+            assert!(!result.is_error, "{}", result.content[0].text);
+            let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+            let expected_status = if count_only { "counts_only" } else { "not_found" };
+            assert_eq!(output["resultStatus"]["status"], expected_status, "{output}");
+            assert_eq!(output["resultStatus"]["complete"], true, "{output}");
+            assert_eq!(output["summary"]["totalFiles"], 0, "{output}");
+            assert_eq!(output["coverage"]["indexedFiles"], 1, "{output}");
+        }
+    }
+}
+
+#[test]
 fn test_grep_file_filter_substring_basename_matches_includes_siblings() {
     // file='Service.cs' is a SUBSTRING filter (not exact). The basename
     // substring "service.cs" appears in `Service.cs`, `MyService.cs`,

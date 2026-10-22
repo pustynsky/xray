@@ -380,7 +380,7 @@ NOTES:
   - Default: substring search via trigram index (finds IUserService, m_userService)
   - Use --exact to search for exact tokens only; one term can receive the file-stem signal
   - Use --show-lines to see actual source code lines from matching files
-  - --exclude-dir and --exclude filter results by path substring (case-insensitive)
+  - --exclude-dir and --exclude filter results by path substring (case-insensitive; both path separator styles accepted)
   - Context lines (-C/-B/-A) show surrounding code, like grep -C
 "#)]
 pub struct GrepArgs {

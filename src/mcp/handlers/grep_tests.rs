@@ -29,7 +29,7 @@ fn make_params<'a>(
         dir_filter,
         file_filter: &[],
         exclude_patterns: super::utils::ExcludePatterns::from_dirs(exclude_dir),
-        exclude_lower: exclude.iter().map(|s| s.to_lowercase()).collect(),
+        exclude_lower: exclude.iter().map(|s| utils::normalize_path_sep(s).to_lowercase()).collect(),
         dir_auto_converted_note: None,
         exact_file_path: &None,
         exact_file_path_canonical: &None,

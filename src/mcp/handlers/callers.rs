@@ -1273,7 +1273,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
     };
 
     let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&exclude_dir);
-    let exclude_file_lower: Vec<String> = exclude_file.iter().map(|s| s.to_lowercase()).collect();
+    let exclude_file_lower: Vec<String> = exclude_file.iter()
+        .map(|s| utils::normalize_path_sep(s).to_lowercase())
+        .collect();
     let ext_filter_list = super::utils::prepare_ext_filter(&ext_filter);
     let template_traversal = TemplateTraversalContext {
         def_idx: &def_idx,
@@ -2142,7 +2144,9 @@ fn handle_multi_method_callers(
 
     // Pre-compute filter patterns once for all methods
     let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&exclude_dir);
-    let exclude_file_lower: Vec<String> = exclude_file.iter().map(|s| s.to_lowercase()).collect();
+    let exclude_file_lower: Vec<String> = exclude_file.iter()
+        .map(|s| utils::normalize_path_sep(s).to_lowercase())
+        .collect();
     let ext_filter_list = super::utils::prepare_ext_filter(&ext_filter);
     // CALL-V-001: build the ext-method lookup once for the whole batch — its
     // cost is O(N) over `def_idx.extension_methods` and it doesn't change
@@ -2941,7 +2945,7 @@ struct CallerTreeContext<'a> {
     impact_analysis_truncated: &'a AtomicBool,
     /// Pre-computed exclude dir patterns (avoids per-file allocations)
     exclude_patterns: super::utils::ExcludePatterns,
-    /// Pre-lowercased exclude file substrings
+    /// Pre-lowercased, separator-normalized exclude file substrings
     exclude_file_lower: Vec<String>,
     /// Pre-split extension filter list
     ext_filter_list: Vec<String>,
@@ -2978,15 +2982,11 @@ fn passes_caller_file_filters(
         return false;
     }
 
-    if !exclude_patterns.is_empty() {
-        let path_lower = file_path.to_lowercase().replace('\\', "/");
+    if !exclude_patterns.is_empty() || !exclude_file_lower.is_empty() {
+        let path_lower = utils::normalize_path_sep(file_path).to_lowercase();
         if exclude_patterns.matches(&path_lower) {
             return false;
         }
-    }
-
-    if !exclude_file_lower.is_empty() {
-        let path_lower = file_path.to_lowercase();
         if exclude_file_lower.iter().any(|excluded| path_lower.contains(excluded.as_str())) {
             return false;
         }

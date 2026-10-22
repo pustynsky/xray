@@ -124,6 +124,53 @@ fn test_file_matches_filters_no_extension_file() {
     assert!(!file_matches_filters("Makefile", &ext, &[], &[]));
 }
 
+#[test]
+fn test_grep_path_separators_across_scoring_and_phrase_candidates() {
+    for prefix in ["C:/workspace/src/", r"C:\workspace\src\", r"C:\workspace/src\"] {
+        let excluded = format!("{prefix}handlers/Target.cs");
+        let kept = format!("{prefix}Keep.cs");
+        let index = make_test_index(
+            vec![&excluded, &kept],
+            vec![("pathseparatorneedle", vec![
+                Posting { file_id: 0, lines: vec![1] },
+                Posting { file_id: 1, lines: vec![1] },
+            ])],
+            vec![1, 1],
+        );
+        let terms = vec!["pathseparatorneedle".to_string()];
+        for filter in [
+            "src/handlers", r"src\handlers", r"src/handlers\Target.cs",
+            "C:/workspace/src/handlers/Target.cs",
+            r"C:\workspace\src\handlers\Target.cs",
+            r"C:\workspace/src\handlers/Target.cs",
+        ] {
+            let filters = vec!["missing/path".to_string(), filter.to_uppercase()];
+            for (exclude_dir, exclude) in [
+                (filters.as_slice(), &[][..]),
+                (&[][..], filters.as_slice()),
+            ] {
+                let paths: Vec<_> = index.files.iter()
+                    .filter(|path| file_matches_filters(path, &None, exclude_dir, exclude))
+                    .collect();
+                assert_eq!(paths, vec![&kept], "prefix={prefix}, filter={filter}");
+                let scored = score_grep_results(
+                    &index, &terms, &None, exclude_dir, exclude,
+                    grep_score_options(false, 1, false),
+                );
+                assert_eq!(
+                    scored.iter().map(|entry| &entry.file_path).collect::<Vec<_>>(),
+                    vec![&kept],
+                    "prefix={prefix}, filter={filter}",
+                );
+                let candidates = find_phrase_candidates(
+                    &index, &terms, &None, exclude_dir, exclude,
+                );
+                assert_eq!(candidates, std::collections::HashSet::from([1]));
+            }
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  expand_regex_terms() tests
 // ═══════════════════════════════════════════════════════════════════
@@ -770,4 +817,3 @@ fn test_serve_args_respect_git_exclude_flag_set() {
     let args = super::args::ServeArgs::try_parse_from(["xray", "--respect-git-exclude"]).unwrap();
     assert!(args.respect_git_exclude, "--respect-git-exclude should set the flag to true");
 }
-
