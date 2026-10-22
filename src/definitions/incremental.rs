@@ -864,9 +864,10 @@ pub(crate) fn reconcile_definition_index_nonblocking_with_angular_paths(
     respect_git_exclude: bool,
     precomputed_angular_paths: Option<&[PathBuf]>,
 ) -> (usize, usize, usize) {
+    let root = clean_path(&canonicalize_or_warn(dir).to_string_lossy());
     reconcile_definition_index_with_scope(
-        def_index, dir, extensions, respect_git_exclude, precomputed_angular_paths,
-        Some(&crate::IndexMutationScope::for_root(dir)),
+        def_index, &root, extensions, respect_git_exclude, precomputed_angular_paths,
+        Some(&crate::IndexMutationScope::for_root(&root)),
     )
 }
 
