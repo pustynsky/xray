@@ -1511,6 +1511,8 @@ pub fn save_content_index(index: &ContentIndex, index_base: &std::path::Path) ->
     let entries: Vec<(&String, &Vec<Posting>)> = index.index.iter().collect();
     save_sharded(&path, &head, entries, "content-index")?;
     save_index_meta(&path, &content_index_meta(index));
+    #[cfg(test)]
+    build_counts::after_content_save(&index.root, &path);
     Ok(())
 }
 
@@ -2020,9 +2022,70 @@ pub fn build_index(args: &IndexArgs) -> Result<FileIndex, SearchError> {
 
 // ─── Content index building ──────────────────────────────────────────
 
+#[cfg(test)]
+pub(crate) mod build_counts {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+
+    #[derive(Default)]
+    struct Counts {
+        calls: [usize; 2],
+        remove_saved_content: bool,
+    }
+
+    static COUNTS: LazyLock<Mutex<HashMap<PathBuf, Counts>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) struct Probe {
+        root: PathBuf,
+    }
+
+    impl Probe {
+        pub(crate) fn new(root: &str) -> Self {
+            let root = std::fs::canonicalize(root).unwrap();
+            let mut counts = COUNTS.lock().unwrap();
+            assert!(!counts.contains_key(&root));
+            counts.insert(root.clone(), Counts::default());
+            Self { root }
+        }
+
+        pub(crate) fn counts(&self) -> [usize; 2] {
+            COUNTS.lock().unwrap()[&self.root].calls
+        }
+
+        pub(crate) fn remove_next_saved_content(&self) {
+            COUNTS.lock().unwrap().get_mut(&self.root).unwrap().remove_saved_content = true;
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            COUNTS.lock().unwrap().remove(&self.root);
+        }
+    }
+
+    pub(crate) fn record(root: &Path, definition: bool) {
+        if let Some(counts) = COUNTS.lock().unwrap().get_mut(root) {
+            counts.calls[usize::from(definition)] += 1;
+        }
+    }
+
+    pub(crate) fn after_content_save(root: &str, path: &Path) {
+        let Ok(root) = std::fs::canonicalize(root) else { return; };
+        let remove = COUNTS.lock().unwrap().get_mut(&root)
+            .is_some_and(|counts| std::mem::take(&mut counts.remove_saved_content));
+        if remove {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+}
+
 pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, SearchError> {
     let root = fs::canonicalize(&args.dir)
         .map_err(|_| SearchError::DirNotFound(args.dir.clone()))?;
+    #[cfg(test)]
+    build_counts::record(&root, false);
     let root_str = clean_path(&root.to_string_lossy());
     let extensions: Vec<String> = args.ext.split(',').map(|s| s.trim().to_lowercase()).collect();
     validate_content_extensions(&extensions)?;
