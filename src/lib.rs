@@ -14,6 +14,33 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+/// Ownership checked under the index lock before a worker mutates or saves it.
+#[derive(Clone)]
+pub struct IndexMutationScope {
+    root: String,
+    generation: Option<(std::sync::Arc<std::sync::atomic::AtomicU64>, u64)>,
+}
+
+impl IndexMutationScope {
+    pub fn for_root(root: &str) -> Self {
+        Self { root: root.to_string(), generation: None }
+    }
+
+    pub fn for_worker(
+        root: &str,
+        generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        expected: u64,
+    ) -> Self {
+        Self { root: root.to_string(), generation: Some((generation, expected)) }
+    }
+
+    pub fn matches(&self, root: &str) -> bool {
+        path_eq(root, &self.root) && self.generation.as_ref().is_none_or(|(generation, expected)| {
+            generation.load(std::sync::atomic::Ordering::Acquire) == *expected
+        })
+    }
+}
+
 /// Default minimum token length used for indexing and search.
 /// Tokens shorter than this are discarded during tokenization.
 pub const DEFAULT_MIN_TOKEN_LEN: usize = 2;

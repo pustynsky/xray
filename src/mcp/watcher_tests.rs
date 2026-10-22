@@ -3,6 +3,144 @@ use super::*;
 use std::collections::HashMap;
 use serde_json::{json, Value};
 
+#[cfg(feature = "lang-rust")]
+fn workspace_scope_indexes(dir: &str) -> (ContentIndex, crate::definitions::DefinitionIndex) {
+    let content = crate::index::build_content_index(&crate::ContentIndexArgs {
+        dir: dir.to_string(), ext: "rs".into(), threads: 1, ..Default::default()
+    }).unwrap();
+    let definitions = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+        dir: dir.to_string(), ext: "rs".into(), threads: 1, respect_git_exclude: false,
+    });
+    (build_watch_index_from(content), definitions)
+}
+
+#[cfg(feature = "lang-rust")]
+fn workspace_scope_fixture() -> (tempfile::TempDir, [String; 2], crate::mcp::handlers::HandlerContext) {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = ["a", "b"].map(|name| {
+        let path = tmp.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("probe.rs"), format!("fn marker_{name}() {{}}\n")).unwrap();
+        crate::clean_path(&std::fs::canonicalize(path).unwrap().to_string_lossy())
+    });
+    let mut ctx = crate::mcp::handlers::HandlerContext::default();
+    ctx.index_base = tmp.path().join("indexes");
+    let (content, definitions) = workspace_scope_indexes(&roots[0]);
+    *ctx.index.write().unwrap() = content;
+    ctx.def_index = Some(Arc::new(RwLock::new(definitions)));
+    (tmp, roots, ctx)
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
+fn test_watcher_workspace_scope_rejects_prepared_work_and_round_trip() {
+    for mode in ["event", "rescan", "definitions"] {
+        for round_trip in [false, true] {
+            let (_tmp, roots, ctx) = workspace_scope_fixture();
+            let path = PathBuf::from(&roots[0]).join("probe.rs");
+            std::fs::write(&path, "fn stale_a() {}\n").unwrap();
+            let scope = code_xray::IndexMutationScope::for_worker(
+                &roots[0], Arc::clone(&ctx.watcher_generation), 0,
+            );
+            let prepared = Arc::new(std::sync::Barrier::new(2));
+            let resume = Arc::new(std::sync::Barrier::new(2));
+            let action_prepared = Arc::clone(&prepared);
+            let action_resume = Arc::clone(&resume);
+            install_definition_update_before_write_hook(Arc::new(
+                DefinitionUpdateBeforeWriteHook::with_action(&path, vec![1], Arc::new(move |_| {
+                    action_prepared.wait();
+                    action_resume.wait();
+                })),
+            ));
+            std::thread::scope(|threads| {
+                let worker = threads.spawn(|| {
+                    match mode {
+                        "event" => {
+                            process_watcher_batch_with_scope(
+                                &ctx.index, &ctx.def_index, &mut HashSet::from([path.clone()]),
+                                &mut HashSet::new(), &roots[0], &["rs".into()], &["rs".into()],
+                                false, &ctx.trigram_build_gate, &scope,
+                            ).index_changed
+                        }
+                        "rescan" => periodic_rescan_once_with_scope(
+                            &ctx.index, &ctx.def_index, &ctx.file_index, &ctx.file_index_dirty,
+                            &roots[0], &["rs".into()], &["rs".into()], &ctx.watcher_stats,
+                            false, &ctx.autosave_dirty, &ctx.trigram_build_gate, &scope,
+                        ).index_changed,
+                        _ => update_definition_index_with_scope(
+                            &ctx.def_index, &[], std::slice::from_ref(&path), Some(&scope),
+                        ).applied_changes,
+                    }
+                });
+                prepared.wait();
+                let final_root = if round_trip { &roots[0] } else { &roots[1] };
+                if round_trip { std::fs::write(&path, "fn current_a() {}\n").unwrap(); }
+                let (content, definitions) = workspace_scope_indexes(final_root);
+                let mut live_content = ctx.index.write().unwrap();
+                let mut live_definitions = ctx.def_index.as_ref().unwrap().write().unwrap();
+                *live_content = content;
+                *live_definitions = definitions;
+                ctx.watcher_generation.fetch_add(if round_trip { 2 } else { 1 }, Ordering::AcqRel);
+                resume.wait();
+                drop(live_definitions);
+                drop(live_content);
+                worker.join().unwrap();
+            });
+            remove_definition_update_before_write_hook(&path);
+            let content = ctx.index.read().unwrap();
+            assert!(!content.index.contains_key("stale_a"), "{mode}, round_trip={round_trip}");
+            assert!(!ctx.def_index.as_ref().unwrap().read().unwrap().name_index.contains_key("stale_a"));
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
+fn test_watcher_workspace_scope_autosave_reload_and_companion_mismatch() {
+    let (_tmp, roots, ctx) = workspace_scope_fixture();
+    let stale = code_xray::IndexMutationScope::for_worker(
+        &roots[0], Arc::clone(&ctx.watcher_generation), 0,
+    );
+    let (content, _) = workspace_scope_indexes(&roots[1]);
+    *ctx.index.write().unwrap() = content;
+    ctx.watcher_generation.store(1, Ordering::Release);
+    let current = code_xray::IndexMutationScope::for_worker(
+        &roots[1], Arc::clone(&ctx.watcher_generation), 1,
+    );
+    let path = PathBuf::from(&roots[1]).join("fresh.rs");
+    std::fs::write(&path, "fn fresh_b() {}\n").unwrap();
+    let outcome = process_watcher_batch_with_scope(
+        &ctx.index, &ctx.def_index, &mut HashSet::from([path]), &mut HashSet::new(),
+        &roots[1], &["rs".into()], &["rs".into()], false, &ctx.trigram_build_gate, &current,
+    );
+    assert!(outcome.index_changed);
+    assert!(ctx.index.read().unwrap().index.contains_key("fresh_b"));
+    assert!(!ctx.def_index.as_ref().unwrap().read().unwrap().name_index.contains_key("fresh_b"));
+    assert!(!periodic_autosave_with_scope(&ctx.index, &ctx.def_index, &ctx.index_base, Some(&stale)));
+    assert!(!crate::index::content_index_path_for(&roots[1], "rs", &ctx.index_base).exists());
+    assert!(!periodic_autosave_with_scope(&ctx.index, &ctx.def_index, &ctx.index_base, Some(&current)));
+    assert!(!crate::definitions::definition_index_path_for(&roots[0], "rs", &ctx.index_base).exists());
+    let (_, definitions) = workspace_scope_indexes(&roots[1]);
+    *ctx.def_index.as_ref().unwrap().write().unwrap() = definitions;
+    assert!(periodic_autosave_with_scope(&ctx.index, &ctx.def_index, &ctx.index_base, Some(&current)));
+    let content = crate::index::load_content_index(&roots[1], "rs", &ctx.index_base).unwrap();
+    let definitions = crate::definitions::load_definition_index(&roots[1], "rs", &ctx.index_base).unwrap();
+    assert!(content.index.contains_key("fresh_b"));
+    assert!(definitions.name_index.contains_key("fresh_b"));
+    assert!(content.files.iter().filter(|path| !path.is_empty()).all(|path| crate::is_path_within(path, &roots[1])));
+    assert!(definitions.files.iter().filter(|path| !path.is_empty()).all(|path| crate::is_path_within(path, &roots[1])));
+    // Same root is insufficient after A -> B -> A.
+    let (content, definitions) = workspace_scope_indexes(&roots[0]);
+    *ctx.index.write().unwrap() = content;
+    *ctx.def_index.as_ref().unwrap().write().unwrap() = definitions;
+    ctx.watcher_generation.store(2, Ordering::Release);
+    assert!(!periodic_autosave_with_scope(&ctx.index, &ctx.def_index, &ctx.index_base, Some(&stale)));
+    assert!(!crate::index::content_index_path_for(&roots[0], "rs", &ctx.index_base).exists());
+    let mut unsaved = false;
+    finish_worker_autosave_attempt(false, true, &ctx.autosave_dirty, &mut unsaved);
+    assert!(unsaved && ctx.autosave_dirty.load(Ordering::Acquire));
+}
+
 
 fn make_test_index() -> ContentIndex {
     let mut idx = HashMap::new();
@@ -1065,6 +1203,7 @@ fn test_process_watcher_batch_preserves_index_scope() {
     std::fs::write(&hidden, "class WatcherHidden {}\n").unwrap();
 
     let def_index = Arc::new(RwLock::new(crate::definitions::DefinitionIndex::default()));
+    def_index.write().unwrap().root = crate::clean_path(&root.to_string_lossy());
     let mut dirty = HashSet::from([ignored, hidden]);
     let mut removed = HashSet::new();
     let extensions = vec!["cs".to_string()];
@@ -2125,6 +2264,7 @@ fn definition_reactivation_escalates_to_write_lock_only_for_exhausted_input() {
             &worker_index,
             std::slice::from_ref(&worker_path),
             false,
+            None,
         );
         sender.send(result).unwrap();
     });
@@ -2156,6 +2296,7 @@ fn definition_reactivation_escalates_to_write_lock_only_for_exhausted_input() {
         &definition_index,
         std::slice::from_ref(&path),
         has_exhausted_dirty,
+        None,
     ));
     assert!(definition_index
         .as_ref()

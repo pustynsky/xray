@@ -20,6 +20,214 @@ use super::{
 use super::handlers_test_utils::make_ctx_with_defs;
 use serde_json::json;
 
+#[test]
+fn test_workspace_completion_companion_publication_ownership() {
+    use std::sync::atomic::Ordering;
+    for round_trip in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let a = crate::clean_path(&std::fs::canonicalize(a).unwrap().to_string_lossy());
+        let b = crate::clean_path(&std::fs::canonicalize(b).unwrap().to_string_lossy());
+        let ctx = HandlerContext::default();
+        {
+            let mut ws = ctx.workspace.write().unwrap();
+            ws.set_dir(a.clone());
+            ws.generation = 0;
+        }
+        ctx.content_ready.store(false, Ordering::Release);
+        let old_index = ctx.index.write().unwrap();
+        std::thread::scope(|threads| {
+            let result = threads.spawn(|| super::publish_companion_content_index(
+                &ctx, &a, 0, crate::ContentIndex { root: a.clone(), ..Default::default() }, false,
+            ));
+            {
+                let mut ws = ctx.workspace.write().unwrap();
+                ws.set_dir(b.clone());
+                ws.generation += 1;
+                if round_trip {
+                    ws.set_dir(a.clone());
+                    ws.generation += 1;
+                }
+            }
+            drop(old_index);
+            assert!(!result.join().unwrap());
+        });
+        assert!(!ctx.content_ready.load(Ordering::Acquire));
+        let (dir, generation) = {
+            let ws = ctx.workspace.read().unwrap();
+            (ws.dir.clone(), ws.generation)
+        };
+        assert!(super::publish_companion_content_index(
+            &ctx, &dir, generation,
+            crate::ContentIndex { root: dir.clone(), ..Default::default() }, false,
+        ));
+        assert!(ctx.content_ready.load(Ordering::Acquire));
+    }
+}
+
+#[test]
+fn test_workspace_completion_cold_content_publication() {
+    use std::sync::atomic::Ordering;
+    for superseded in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("probe.rs"), "fn cold_marker() {}\n").unwrap();
+        let dir = crate::clean_path(&std::fs::canonicalize(root).unwrap().to_string_lossy());
+        let mut ctx = HandlerContext::default();
+        ctx.server_ext = "rs".into();
+        ctx.index_base = tmp.path().join("indexes");
+        ctx.workspace.write().unwrap().set_dir(dir.clone());
+        ctx.content_ready.store(false, Ordering::Release);
+        let (done, completion) = std::sync::mpsc::channel();
+        super::CONTENT_CROSS_BUILD_COMPLETED.lock().unwrap().insert(dir.clone(), done);
+        let publication_barrier = ctx.index.read().unwrap();
+        assert_eq!(super::cross_load_content_index(&ctx, &dir), Some("background_build"));
+        if superseded {
+            let mut ws = ctx.workspace.write().unwrap();
+            ws.generation += 2; // A -> B -> A, with the same final path.
+        }
+        drop(publication_barrier);
+        completion.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(!ctx.content_building.load(Ordering::Acquire));
+        assert_eq!(ctx.content_ready.load(Ordering::Acquire), !superseded);
+        assert_eq!(ctx.index.read().unwrap().index.contains_key("cold_marker"), !superseded);
+    }
+}
+
+#[test]
+fn test_workspace_completion_git_readiness_ownership() {
+    use std::sync::atomic::Ordering;
+    let ctx = HandlerContext::default();
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir("a".into());
+        ws.generation = 0;
+    }
+    ctx.git_cache_ready.store(false, Ordering::Release);
+    let publication_barrier = ctx.git_cache.write().unwrap();
+    std::thread::scope(|threads| {
+        let stale = threads.spawn(|| super::publish_workspace_git_cache(
+            &ctx.git_cache, &ctx.git_cache_ready, &ctx.workspace, "a", 0, None,
+        ));
+        {
+            let mut ws = ctx.workspace.write().unwrap();
+            ws.set_dir("b".into());
+            ws.generation += 1;
+            ws.set_dir("a".into());
+            ws.generation += 1;
+        }
+        drop(publication_barrier);
+        stale.join().unwrap();
+    });
+    assert!(!ctx.git_cache_ready.load(Ordering::Acquire));
+    super::publish_workspace_git_cache(
+        &ctx.git_cache, &ctx.git_cache_ready, &ctx.workspace, "a", 2, None,
+    );
+    assert!(ctx.git_cache_ready.load(Ordering::Acquire));
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
+fn test_workspace_completion_same_root_pinned_reindexing() {
+    use std::sync::{Arc, RwLock};
+    use std::sync::atomic::Ordering;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("probe.rs"), "fn pinned_marker() {}\n").unwrap();
+    let dir = crate::clean_path(&std::fs::canonicalize(root).unwrap().to_string_lossy());
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "rs".into();
+    ctx.def_extensions = vec!["rs".into()];
+    ctx.index_base = tmp.path().join("indexes");
+    let definitions = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+        dir: dir.clone(), ext: "rs".into(), threads: 1, respect_git_exclude: false,
+    });
+    crate::definitions::save_definition_index(&definitions, &ctx.index_base).unwrap();
+    ctx.def_index = Some(Arc::new(RwLock::new(definitions)));
+    for tool in ["xray_reindex", "xray_reindex_definitions"] {
+        {
+            let mut ws = ctx.workspace.write().unwrap();
+            ws.set_dir(dir.clone());
+            ws.mode = WorkspaceBindingMode::PinnedCli;
+            ws.status = WorkspaceStatus::Reindexing;
+            ws.generation = 9;
+        }
+
+        let result = super::dispatch_tool(&ctx, tool, &json!({"ext": ["rs"]}));
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let ws = ctx.workspace.read().unwrap();
+        assert_eq!(ws.mode, WorkspaceBindingMode::PinnedCli);
+        assert_eq!(ws.generation, 9);
+        assert_eq!(ws.status, WorkspaceStatus::Resolved);
+        assert!(ctx.content_ready.load(Ordering::Acquire));
+        assert!(ctx.def_ready.load(Ordering::Acquire));
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
+fn test_workspace_completion_failed_primary_preserves_old_workers() {
+    use std::sync::{Arc, RwLock};
+    use std::sync::atomic::Ordering;
+    for tool in ["xray_reindex", "xray_reindex_definitions"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(b.join("probe.rs"), "fn new_workspace() {}\n").unwrap();
+        let a = crate::clean_path(&std::fs::canonicalize(a).unwrap().to_string_lossy());
+        let b = crate::clean_path(&std::fs::canonicalize(b).unwrap().to_string_lossy());
+        let mut ctx = HandlerContext::default();
+        ctx.server_ext = "rs".into();
+        ctx.index_base = tmp.path().join("indexes");
+        ctx.watch_enabled = true;
+        ctx.watcher_generation.store(7, Ordering::Release);
+        ctx.index.write().unwrap().root = a.clone();
+        ctx.def_index = Some(Arc::new(RwLock::new(crate::definitions::DefinitionIndex {
+            root: a.clone(), extensions: vec!["rs".into()], ..Default::default()
+        })));
+        {
+            let mut ws = ctx.workspace.write().unwrap();
+            ws.set_dir(a.clone());
+            ws.mode = WorkspaceBindingMode::ClientRoots;
+            ws.status = WorkspaceStatus::Resolved;
+            ws.generation = 11;
+        }
+        std::thread::scope(|threads| {
+            let _ = threads.spawn(|| {
+                if tool == "xray_reindex" {
+                    let _lock = ctx.index.write().unwrap();
+                    panic!("poison primary content publication");
+                } else {
+                    let _lock = ctx.def_index.as_ref().unwrap().write().unwrap();
+                    panic!("poison primary definition publication");
+                }
+            }).join();
+        });
+        let args = json!({"dir": b, "ext": ["rs"]});
+        let result = if tool == "xray_reindex" {
+            super::handle_xray_reindex_inner(&ctx, &args)
+        } else {
+            super::handle_xray_reindex_definitions_inner(&ctx, &args)
+        };
+        assert!(result.is_error);
+        let ws = ctx.workspace.read().unwrap();
+        assert!(code_xray::path_eq(&ws.dir, &a));
+        assert_eq!(ws.mode, WorkspaceBindingMode::ClientRoots);
+        assert_eq!(ws.status, WorkspaceStatus::Resolved);
+        assert_eq!(ws.generation, 11);
+        assert_eq!(ctx.watcher_generation.load(Ordering::Acquire), 7);
+        assert!(ctx.content_ready.load(Ordering::Acquire));
+        assert!(ctx.def_ready.load(Ordering::Acquire));
+    }
+}
+
 
 #[cfg(feature = "lang-rust")]
 fn definition_switch_fixture() -> (tempfile::TempDir, HandlerContext, Vec<String>) {
@@ -364,6 +572,7 @@ fn test_cross_load_content_index_preserves_watch_lazy_reverse_map_mode() {
     let mut ctx = HandlerContext::default();
     ctx.server_ext = "rs".to_string();
     ctx.index_base = index_base;
+    ctx.workspace.write().unwrap().set_dir(workspace_str.clone());
     {
         let mut current = ctx.index.write().unwrap();
         *current = crate::mcp::watcher::build_watch_index_from(crate::ContentIndex {
@@ -550,11 +759,11 @@ fn test_cross_load_content_index_stale_background_build_does_not_publish() {
 
     let action = cross_load_content_index(&ctx, &stale_workspace_str);
 
-    assert_eq!(action, Some("background_build"));
-    assert!(wait_until(|| !ctx.content_building.load(std::sync::atomic::Ordering::Acquire)),
-        "stale background content build should exit");
-    assert!(!ctx.content_ready.load(std::sync::atomic::Ordering::Acquire),
-        "stale background build must not mark the current workspace ready");
+    assert_eq!(action, Some("superseded"));
+    assert!(!ctx.content_building.load(std::sync::atomic::Ordering::Acquire),
+        "already superseded work should not start a build");
+    assert!(ctx.content_ready.load(std::sync::atomic::Ordering::Acquire),
+        "superseded work must not reset the current workspace readiness");
     let idx = ctx.index.read().unwrap();
     assert_eq!(idx.root, "old-workspace",
         "stale background build must not publish an index for another workspace");

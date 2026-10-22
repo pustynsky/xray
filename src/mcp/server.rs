@@ -85,6 +85,10 @@ fn handle_pending_response(raw: &Value, state: &mut ServerState, ctx: &HandlerCo
                     if let Some(first_root) = roots.first()
                         && let Some(uri) = first_root.get("uri").and_then(|u| u.as_str())
                             && let Some(path) = uri_to_path(uri) {
+                                // Index builders and worker ownership checks use canonical roots.
+                                let path = std::fs::canonicalize(&path)
+                                    .map(|p| crate::clean_path(&p.to_string_lossy()))
+                                    .unwrap_or(path);
                                 // Snapshot workspace + ready flags BEFORE touching
                                 // them. On panic-unwind the guard restores the
                                 // snapshot so the workspace cannot be left in a

@@ -1699,7 +1699,7 @@ fn test_reconcile_nonblocking_adds_new_files() {
     use std::sync::{Arc, RwLock};
 
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
+    let dir = crate::canonicalize_test_root(tmp.path());
     std::fs::write(dir.join("NewClass.cs"), "public class NewClass { }").unwrap();
 
     let index = DefinitionIndex {
@@ -1772,7 +1772,7 @@ fn test_reconcile_nonblocking_removes_deleted_files() {
     use std::path::PathBuf;
 
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
+    let dir = crate::canonicalize_test_root(tmp.path());
 
     // Create index with a file that doesn't exist on disk
     let mut index = DefinitionIndex {
@@ -1814,7 +1814,7 @@ fn test_reconcile_nonblocking_no_changes() {
     use std::sync::{Arc, RwLock};
 
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
+    let dir = crate::canonicalize_test_root(tmp.path());
 
     // Empty directory, empty index — nothing to do
     let index = DefinitionIndex {
@@ -1910,12 +1910,16 @@ fn test_reconcile_nonblocking_detects_modified_files() {
     use std::path::PathBuf;
 
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
+    let dir = crate::canonicalize_test_root(tmp.path());
     let cs_file = dir.join("Service.cs");
     std::fs::write(&cs_file, "public class OldService { }").unwrap();
 
     // Build initial index with the file
-    let mut index = DefinitionIndex::default();
+    let mut index = DefinitionIndex {
+        root: dir.to_string_lossy().to_string(),
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
     let clean = PathBuf::from(crate::clean_path(&cs_file.to_string_lossy()));
     super::incremental::update_file_definitions(&mut index, &clean);
     assert!(index.name_index.contains_key("oldservice"));
@@ -1928,7 +1932,7 @@ fn test_reconcile_nonblocking_detects_modified_files() {
 
     let arc_index = Arc::new(RwLock::new(index));
 
-    let (added, modified, _removed) = super::incremental::reconcile_definition_index_nonblocking(
+    let result = super::incremental::reconcile_definition_index_nonblocking(
         &arc_index,
         &dir.to_string_lossy(),
         &["cs".to_string()],
@@ -1936,7 +1940,7 @@ fn test_reconcile_nonblocking_detects_modified_files() {
     );
 
     // Should detect as modified (not added, since it was already in path_to_id)
-    assert!(modified > 0 || added > 0, "Should detect modified file");
+    assert_eq!(result, (0, 1, 0), "Should modify the existing file without adding or removing it");
 
     let idx = arc_index.read().unwrap();
     assert!(idx.name_index.contains_key("newservice"),
@@ -1944,6 +1948,73 @@ fn test_reconcile_nonblocking_detects_modified_files() {
     // OldService should be gone (apply_parsed_result removes old defs)
     assert!(!idx.name_index.contains_key("oldservice"),
         "OldService should be removed after modification");
+}
+
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn test_reconcile_nonblocking_accepts_canonical_root_alias() {
+    use std::sync::{Arc, RwLock};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = crate::canonicalize_test_root(tmp.path());
+    std::fs::create_dir(dir.join("child")).unwrap();
+    let alias = dir.join("child").join("..");
+    std::fs::write(dir.join("Keep.cs"), "public class Keep { }").unwrap();
+    std::fs::write(dir.join("Gone.cs"), "public class Gone { }").unwrap();
+    let mut index = build_definition_index(&DefIndexArgs {
+        dir: dir.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+        respect_git_exclude: false,
+    });
+    index.created_at = 32503680000;
+    let arc = Arc::new(RwLock::new(index));
+    std::fs::remove_file(dir.join("Gone.cs")).unwrap();
+
+    let result = incremental::reconcile_definition_index_nonblocking(
+        &arc, &alias.to_string_lossy(), &["cs".to_string()], false,
+    );
+    assert_eq!(result, (0, 0, 1), "same-root alias must apply the removal");
+    let index = arc.read().unwrap();
+    assert!(index.name_index.contains_key("keep"));
+    assert!(!index.name_index.contains_key("gone"));
+    assert_eq!(index.live_file_count(), 1);
+    assert_eq!(crate::index::definition_index_meta(&index).files, 1);
+    assert_eq!(index.files.len(), 2);
+    assert_eq!(index.files.iter().filter(|path| path.is_empty()).count(), 1);
+}
+
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn test_reconcile_nonblocking_rejects_foreign_root_and_extensions() {
+    use std::sync::{Arc, RwLock};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let dir = crate::canonicalize_test_root(tmp.path());
+    let other_dir = crate::canonicalize_test_root(other.path());
+    std::fs::write(dir.join("Keep.cs"), "public class Keep { }").unwrap();
+    std::fs::write(other_dir.join("Foreign.cs"), "public class Foreign { }").unwrap();
+    let index = build_definition_index(&DefIndexArgs {
+        dir: dir.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+        respect_git_exclude: false,
+    });
+    let expected = bincode::serialize(&index).unwrap();
+    let arc = Arc::new(RwLock::new(index));
+
+    for (scan_dir, extensions) in [
+        (&other_dir, vec!["cs".to_string()]),
+        (&dir, vec!["rs".to_string()]),
+    ] {
+        let result = incremental::reconcile_definition_index_nonblocking(
+            &arc, &scan_dir.to_string_lossy(), &extensions, false,
+        );
+        assert_eq!(result, (0, 0, 0));
+        assert_eq!(bincode::serialize(&*arc.read().unwrap()).unwrap(), expected,
+            "rejected reconciliation must not mutate the index");
+    }
 }
 
 #[test]
@@ -2162,9 +2233,10 @@ fn def_index_meta_uses_live_count_after_removal() {
     let arc = Arc::new(RwLock::new(index));
     std::fs::remove_file(dir.join("g.cs")).unwrap();
     let extensions = vec!["cs".to_string()];
-    let _ = incremental::reconcile_definition_index_nonblocking(
+    let (_, _, removed) = incremental::reconcile_definition_index_nonblocking(
         &arc, &dir.to_string_lossy(), &extensions, false,
     );
+    assert_eq!(removed, 1, "reconciliation must apply the removal before checking metadata");
 
     let idx = arc.read().unwrap();
     let meta = crate::index::definition_index_meta(&idx);
@@ -2172,5 +2244,4 @@ fn def_index_meta_uses_live_count_after_removal() {
         "IndexMeta.files MUST be the live count, not the Vec capacity \
          (cross-session ratchet bug)");
 }
-
 

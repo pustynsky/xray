@@ -4,7 +4,7 @@ description: "Review Xray Rust, Cargo metadata, MCP/CLI diffs, general docs/conf
 tools: [read, execute, xray/xray_branch_status, xray/xray_callers, xray/xray_definitions, xray/xray_fast, xray/xray_git_blame, xray/xray_git_diff, xray/xray_git_history, xray/xray_grep, xray/xray_help, xray/xray_info]
 agents: []
 argument-hint: "Review a diff, branch, PR, or working tree. For follow-up, supply prior findings, reviewed revision/scope, the consolidated fixes, and validation evidence."
-model: Claude Opus 5 (copilot)
+model: claude-opus-5.5
 user-invocable: true
 disable-model-invocation: false
 ---

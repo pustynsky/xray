@@ -258,6 +258,9 @@ pub fn start_watcher(
     watcher.watch(&dir, RecursiveMode::Recursive)?;
 
     let dir_str = clean_path(&dir.to_string_lossy());
+    let scope = code_xray::IndexMutationScope::for_worker(
+        &dir_str, Arc::clone(&watcher_generation), my_generation,
+    );
 
     info!(dir = %dir_str, debounce_ms, "File watcher started");
 
@@ -354,13 +357,13 @@ pub fn start_watcher(
         // thread on the next event, and `periodic_autosave` itself also
         // no-ops on read failure).
         let (content_added, content_modified, content_removed) =
-            reconcile_content_index(&index, &dir_str, &content_extensions, respect_git_exclude);
+            reconcile_content_index_with_scope(&index, &dir_str, &content_extensions, respect_git_exclude, &scope);
 
         let def_changed = if let Some(ref def_idx) = def_index {
             // Non-blocking reconciliation: parse files OUTSIDE the lock, apply INSIDE.
             // def_ready stays true — MCP requests work on old data during parsing.
-            let (added, modified, removed) = definitions::reconcile_definition_index_nonblocking(
-                def_idx, &dir_str, &definition_extensions, respect_git_exclude
+            let (added, modified, removed) = definitions::reconcile_definition_index_with_scope(
+                def_idx, &dir_str, &definition_extensions, respect_git_exclude, None, Some(&scope),
             );
             added + modified + removed > 0
         } else {
@@ -378,7 +381,7 @@ pub fn start_watcher(
         let mut removed_files: HashSet<PathBuf> = HashSet::new();
         let flush_batch = |dirty_files: &mut HashSet<PathBuf>,
                            removed_files: &mut HashSet<PathBuf>| {
-            let outcome = process_watcher_batch(
+            let outcome = process_watcher_batch_with_scope(
                 &index,
                 &def_index,
                 dirty_files,
@@ -388,6 +391,7 @@ pub fn start_watcher(
                 &definition_extensions,
                 respect_git_exclude,
                 &trigram_build_gate,
+                &scope,
             );
             if outcome.index_changed {
                 index_epoch.fetch_add(1, Ordering::AcqRel);
@@ -421,7 +425,7 @@ pub fn start_watcher(
             // quiet-interval tick in the watcher loop actually retries
             // (without this flag, callers would clear `have_unsaved` and the
             // retry could not happen until AUTOSAVE_MAX_INTERVAL).
-            let saved_ok = periodic_autosave(&index, &def_index, &index_base);
+            let saved_ok = periodic_autosave_with_scope(&index, &def_index, &index_base, Some(&scope));
             last_autosave = std::time::Instant::now();
             if !saved_ok {
                 have_unsaved = true;
@@ -503,9 +507,9 @@ pub fn start_watcher(
                                 // Only clear `have_unsaved` on success so the
                                 // retry actually happens.
                                 let had_autosave_dirty = begin_autosave_attempt(&autosave_dirty);
-                                let saved_ok = periodic_autosave(&index, &def_index, &index_base);
+                                let saved_ok = periodic_autosave_with_scope(&index, &def_index, &index_base, Some(&scope));
                                 last_autosave = std::time::Instant::now();
-                                finish_autosave_attempt(saved_ok, had_autosave_dirty, &mut have_unsaved);
+                                finish_worker_autosave_attempt(saved_ok, had_autosave_dirty, &autosave_dirty, &mut have_unsaved);
                             }
                         }
                 }
@@ -516,9 +520,9 @@ pub fn start_watcher(
                     // Check generation on each timeout (watcher restart)
                     if watcher_generation.load(Ordering::Acquire) != my_generation {
                         info!(dir = %dir_str, my_generation, "Watcher generation changed, exiting");
-                        // MCP-WCH-005: flush pending events before exit so a
-                        // workspace switch doesn't drop incremental updates
-                        // already received from the FS.
+                        // MCP-WCH-005: drain through the scoped path. A
+                        // superseded worker must not touch replacement indexes;
+                        // the new worker reconciles changes from disk.
                         if !dirty_files.is_empty() || !removed_files.is_empty() {
                             let _ = flush_batch(&mut dirty_files, &mut removed_files);
                             have_unsaved = true;
@@ -528,7 +532,7 @@ pub fn start_watcher(
                         // (from this final flush or a prior batch that hadn't
                         // hit the 5min mark yet) before we drop the receiver.
                         if have_unsaved || autosave_dirty.load(std::sync::atomic::Ordering::Relaxed) {
-                            let _ = periodic_autosave(&index, &def_index, &index_base);
+                            let _ = periodic_autosave_with_scope(&index, &def_index, &index_base, Some(&scope));
                         }
                         break;
                     }
@@ -539,9 +543,9 @@ pub fn start_watcher(
                         // max interval is the unconditional ceiling).
                         if autosave_due(have_unsaved || autosave_dirty.load(std::sync::atomic::Ordering::Relaxed), last_autosave.elapsed()) {
                             let had_autosave_dirty = begin_autosave_attempt(&autosave_dirty);
-                            let saved_ok = periodic_autosave(&index, &def_index, &index_base);
+                            let saved_ok = periodic_autosave_with_scope(&index, &def_index, &index_base, Some(&scope));
                             last_autosave = std::time::Instant::now();
-                            finish_autosave_attempt(saved_ok, had_autosave_dirty, &mut have_unsaved);
+                            finish_worker_autosave_attempt(saved_ok, had_autosave_dirty, &autosave_dirty, &mut have_unsaved);
                         }
                         continue;
                     }
@@ -560,9 +564,9 @@ pub fn start_watcher(
                     // burst started.
                     if autosave_due(have_unsaved || autosave_dirty.load(std::sync::atomic::Ordering::Relaxed), last_autosave.elapsed()) {
                         let had_autosave_dirty = begin_autosave_attempt(&autosave_dirty);
-                        let saved_ok = periodic_autosave(&index, &def_index, &index_base);
+                        let saved_ok = periodic_autosave_with_scope(&index, &def_index, &index_base, Some(&scope));
                         last_autosave = std::time::Instant::now();
-                        finish_autosave_attempt(saved_ok, had_autosave_dirty, &mut have_unsaved);
+                        finish_worker_autosave_attempt(saved_ok, had_autosave_dirty, &autosave_dirty, &mut have_unsaved);
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -579,7 +583,7 @@ pub fn start_watcher(
                     // note on the generation-change path. Persist any
                     // unsaved work before the receiver is dropped.
                     if have_unsaved || autosave_dirty.load(std::sync::atomic::Ordering::Relaxed) {
-                        let _ = periodic_autosave(&index, &def_index, &index_base);
+                        let _ = periodic_autosave_with_scope(&index, &def_index, &index_base, Some(&scope));
                     }
                     break;
                 }
@@ -646,6 +650,16 @@ struct DefUpdateResult {
     applied_paths: Vec<PathBuf>,
     retry_dirty_paths: Vec<PathBuf>,
     retry_removed_paths: Vec<PathBuf>,
+}
+
+impl DefUpdateResult {
+    fn unchanged() -> Self {
+        Self {
+            ok: true, lock_wait_ms: 0.0, update_ms: 0.0, applied_dirty: 0,
+            applied_changes: false, applied_paths: Vec::new(),
+            retry_dirty_paths: Vec::new(), retry_removed_paths: Vec::new(),
+        }
+    }
 }
 
 struct BatchProcessResult {
@@ -809,6 +823,7 @@ pub(crate) fn reindex_paths_sync_scoped(
 ///
 /// Returns `false` if a poisoned RwLock is detected, signaling the caller to exit.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn process_watcher_batch(
     index: &Arc<RwLock<ContentIndex>>,
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
@@ -819,6 +834,26 @@ fn process_watcher_batch(
     definition_extensions: &[String],
     respect_git_exclude: bool,
     trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
+) -> BatchProcessResult {
+    process_watcher_batch_with_scope(
+        index, def_index, dirty_files, removed_files, canonical_server_dir,
+        content_extensions, definition_extensions, respect_git_exclude, trigram_build_gate,
+        &code_xray::IndexMutationScope::for_root(canonical_server_dir),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_watcher_batch_with_scope(
+    index: &Arc<RwLock<ContentIndex>>,
+    def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
+    dirty_files: &mut HashSet<PathBuf>,
+    removed_files: &mut HashSet<PathBuf>,
+    canonical_server_dir: &str,
+    content_extensions: &[String],
+    definition_extensions: &[String],
+    respect_git_exclude: bool,
+    trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
+    scope: &code_xray::IndexMutationScope,
 ) -> BatchProcessResult {
     let dirty_paths: Vec<PathBuf> = dirty_files.drain().collect();
     let content_candidates: Vec<PathBuf> = dirty_paths.iter()
@@ -850,7 +885,7 @@ fn process_watcher_batch(
         true,
     );
 
-    let outcome = process_batch_scoped(
+    let outcome = process_batch_with_scope(
         index,
         def_index,
         &mut content_dirty_files,
@@ -858,6 +893,7 @@ fn process_watcher_batch(
         removed_files,
         trigram_build_gate,
         Some(content_extensions),
+        Some(scope),
     );
     dirty_files.extend(outcome.retry_dirty_paths.iter().cloned());
     removed_files.extend(outcome.retry_removed_paths.iter().cloned());
@@ -886,6 +922,7 @@ fn process_batch(
 }
 
 
+#[cfg(test)]
 fn process_batch_scoped(
     index: &Arc<RwLock<ContentIndex>>,
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
@@ -894,6 +931,23 @@ fn process_batch_scoped(
     removed_files: &mut HashSet<PathBuf>,
     trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
     expected_extensions: Option<&[String]>,
+) -> BatchProcessResult {
+    process_batch_with_scope(
+        index, def_index, content_dirty_files, definition_dirty_files, removed_files,
+        trigram_build_gate, expected_extensions, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_batch_with_scope(
+    index: &Arc<RwLock<ContentIndex>>,
+    def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
+    content_dirty_files: &mut HashSet<PathBuf>,
+    definition_dirty_files: &mut HashSet<PathBuf>,
+    removed_files: &mut HashSet<PathBuf>,
+    trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
+    expected_extensions: Option<&[String]>,
+    scope: Option<&code_xray::IndexMutationScope>,
 ) -> BatchProcessResult {
     let content_update_count = content_dirty_files.len();
     let definition_update_count = definition_dirty_files.len();
@@ -926,7 +980,7 @@ fn process_batch_scoped(
     let batch_start = std::time::Instant::now();
 
     // Update content index using batch_purge for O(total_postings) instead of O(N × total_postings)
-    let content_result = update_content_index_scoped(index, &removed_clean, &content_dirty_clean, expected_extensions);
+    let content_result = update_content_index_with_scope(index, &removed_clean, &content_dirty_clean, expected_extensions, scope);
     if !content_result.ok {
         return BatchProcessResult {
             healthy: false,
@@ -943,7 +997,7 @@ fn process_batch_scoped(
 
     // Update definition index (if available)
     let definition_result =
-        update_definition_index(def_index, &removed_clean, &definition_dirty_clean);
+        update_definition_index_with_scope(def_index, &removed_clean, &definition_dirty_clean, scope);
     if !definition_result.ok {
         return BatchProcessResult {
             healthy: false,
@@ -1142,6 +1196,16 @@ fn update_content_index_scoped(
     dirty_clean: &[PathBuf],
     expected_extensions: Option<&[String]>,
 ) -> ContentUpdateResult {
+    update_content_index_with_scope(index, removed_clean, dirty_clean, expected_extensions, None)
+}
+
+fn update_content_index_with_scope(
+    index: &Arc<RwLock<ContentIndex>>,
+    removed_clean: &[PathBuf],
+    dirty_clean: &[PathBuf],
+    expected_extensions: Option<&[String]>,
+    scope: Option<&code_xray::IndexMutationScope>,
+) -> ContentUpdateResult {
     // ── Phase 1: Tokenize all dirty files OUTSIDE the lock (~5ms × N) ──
     // During this phase, MCP requests work normally on the current index data.
     let mut unique_dirty_paths = HashSet::new();
@@ -1167,6 +1231,10 @@ fn update_content_index_scoped(
 
     #[cfg(test)]
     wait_at_content_update_before_write_hook(&tokenized_paths);
+    #[cfg(test)]
+    if scope.is_some() {
+        wait_at_definition_update_before_write_hook(dirty_clean);
+    }
 
     // ── Phase 2: Apply under WRITE LOCK (targeted purge + ~0.1ms × N insert) ──
     let write_wait_start = std::time::Instant::now();
@@ -1175,7 +1243,8 @@ fn update_content_index_scoped(
             let lock_wait_ms = write_wait_start.elapsed().as_secs_f64() * 1000.0;
             let update_start = std::time::Instant::now();
             let idx = &mut *idx;
-            if expected_extensions.is_some_and(|extensions| idx.extensions != extensions) {
+            if expected_extensions.is_some_and(|extensions| idx.extensions != extensions)
+                || scope.is_some_and(|scope| !scope.matches(&idx.root)) {
                 debug!("Discarding watcher content batch after extension scope changed");
                 return ContentUpdateResult {
                     ok: true, lock_wait_ms, update_ms: 0.0,
@@ -1380,6 +1449,7 @@ fn reactivate_exhausted_definition_inputs(
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
     dirty_paths: &[PathBuf],
     has_exhausted_dirty: bool,
+    scope: Option<&code_xray::IndexMutationScope>,
 ) -> bool {
     if !has_exhausted_dirty {
         return true;
@@ -1389,6 +1459,7 @@ fn reactivate_exhausted_definition_inputs(
     };
     match def_index.write() {
         Ok(mut index) => {
+            if scope.is_some_and(|scope| !scope.matches(&index.root)) { return true; }
             for path in dirty_paths {
                 let key = crate::path_identity_key(path);
                 if index
@@ -1416,6 +1487,15 @@ fn update_definition_index(
     removed_clean: &[PathBuf],
     dirty_clean: &[PathBuf],
 ) -> DefUpdateResult {
+    update_definition_index_with_scope(def_index, removed_clean, dirty_clean, None)
+}
+
+fn update_definition_index_with_scope(
+    def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
+    removed_clean: &[PathBuf],
+    dirty_clean: &[PathBuf],
+    scope: Option<&code_xray::IndexMutationScope>,
+) -> DefUpdateResult {
     let (relevant_removed, has_exhausted_dirty) =
         inspect_definition_batch(def_index, removed_clean, dirty_clean);
     let removed_clean = relevant_removed.as_slice();
@@ -1436,6 +1516,7 @@ fn update_definition_index(
         def_index,
         dirty_clean,
         has_exhausted_dirty,
+        scope,
     ) {
         return DefUpdateResult {
             ok: false,
@@ -1450,13 +1531,14 @@ fn update_definition_index(
     }
 
 
-    update_definition_index_batch(def_index, removed_clean, dirty_clean)
+    update_definition_index_batch(def_index, removed_clean, dirty_clean, scope)
 }
 
 fn update_definition_index_batch(
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
     removed_clean: &[PathBuf],
     dirty_clean: &[PathBuf],
+    scope: Option<&code_xray::IndexMutationScope>,
 ) -> DefUpdateResult {
     let Some(def_idx) = def_index else {
         return DefUpdateResult {
@@ -1481,6 +1563,9 @@ fn update_definition_index_batch(
 
     let (workspace_root, existing_owner_keys) = match def_idx.read() {
         Ok(index) => {
+            if scope.is_some_and(|scope| !scope.matches(&index.root)) {
+                return DefUpdateResult::unchanged();
+            }
             let owner_keys = all_changed_paths
                 .iter()
                 .map(|path| definitions::definition_input_key(path))
@@ -1647,6 +1732,9 @@ fn update_definition_index_batch(
     let write_wait_start = std::time::Instant::now();
     match def_idx.write() {
         Ok(mut index) => {
+            if scope.is_some_and(|scope| !scope.matches(&index.root)) {
+                return DefUpdateResult::unchanged();
+            }
             let lock_wait_ms = write_wait_start.elapsed().as_secs_f64() * 1000.0;
             let update_start = std::time::Instant::now();
             let conflicts = definitions::definition_fingerprint_conflicts(
@@ -2009,10 +2097,30 @@ pub(crate) fn autosave_due(have_unsaved: bool, since_last_save: Duration) -> boo
 /// the next quiet-interval tick will re-attempt the save while still
 /// throttling at AUTOSAVE_QUIET_INTERVAL instead of busy-retrying every
 /// debounce tick.
+fn finish_worker_autosave_attempt(
+    saved_ok: bool,
+    had_autosave_dirty: bool,
+    autosave_dirty: &AtomicBool,
+    have_unsaved: &mut bool,
+) {
+    if !saved_ok && had_autosave_dirty { autosave_dirty.store(true, Ordering::Release); }
+    finish_autosave_attempt(saved_ok, had_autosave_dirty, have_unsaved);
+}
+
+#[cfg(test)]
 fn periodic_autosave(
     index: &Arc<RwLock<ContentIndex>>,
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
     index_base: &std::path::Path,
+) -> bool {
+    periodic_autosave_with_scope(index, def_index, index_base, None)
+}
+
+fn periodic_autosave_with_scope(
+    index: &Arc<RwLock<ContentIndex>>,
+    def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
+    index_base: &std::path::Path,
+    scope: Option<&code_xray::IndexMutationScope>,
 ) -> bool {
     let start = std::time::Instant::now();
 
@@ -2042,6 +2150,9 @@ fn periodic_autosave(
             // We only skip when the index has never held any file.
             match index.read() {
                 Ok(idx) => {
+                    if scope.is_some_and(|scope| !scope.matches(&idx.root)) {
+                        return (None, false);
+                    }
                     if idx.files.is_empty() {
                         return (None, true);
                     }
@@ -2078,6 +2189,9 @@ fn periodic_autosave(
             };
             match def_idx.read() {
                 Ok(idx) => {
+                    if scope.is_some_and(|scope| !scope.matches(&idx.root)) {
+                        return (None, false);
+                    }
                     if idx.files.is_empty() {
                         return (None, true);
                     }
@@ -2827,6 +2941,7 @@ fn angular_template_drift_paths(
 ///   distinguish "rescan ran, all good" from "rescan recovered a
 ///   missed event" at a glance.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn periodic_rescan_once(
     index: &Arc<RwLock<ContentIndex>>,
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
@@ -2839,6 +2954,28 @@ pub(crate) fn periodic_rescan_once(
     respect_git_exclude: bool,
     autosave_dirty: &Arc<AtomicBool>,
     trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
+) -> RescanOutcome {
+    periodic_rescan_once_with_scope(
+        index, def_index, file_index, file_index_dirty, dir, content_extensions,
+        definition_extensions, stats, respect_git_exclude, autosave_dirty, trigram_build_gate,
+        &code_xray::IndexMutationScope::for_root(dir),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn periodic_rescan_once_with_scope(
+    index: &Arc<RwLock<ContentIndex>>,
+    def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
+    file_index: &Arc<RwLock<Option<FileIndex>>>,
+    file_index_dirty: &Arc<AtomicBool>,
+    dir: &str,
+    content_extensions: &[String],
+    definition_extensions: &[String],
+    stats: &Arc<WatcherStats>,
+    respect_git_exclude: bool,
+    autosave_dirty: &Arc<AtomicBool>,
+    trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
+    scope: &code_xray::IndexMutationScope,
 ) -> RescanOutcome {
     let start = Instant::now();
     stats.periodic_rescan_total.fetch_add(1, Ordering::Relaxed);
@@ -2897,25 +3034,27 @@ pub(crate) fn periodic_rescan_once(
         let ext_matched = state.ext_matched;
         let dir_owned = dir.to_string();
         let def_extensions_owned = definition_extensions.to_vec();
-        let (content_outcome, def_outcome) = std::thread::scope(|scope| {
+        let (content_outcome, def_outcome) = std::thread::scope(|threads| {
             let content_handle = content_drift.then(|| {
-                scope.spawn(|| {
-                    reconcile_content_index_with_disk_files(
+                threads.spawn(|| {
+                    reconcile_content_index_with_disk_files_scoped(
                         index,
                         ext_matched,
                         walk_start_secs,
                         content_extensions,
+                        Some(scope),
                     )
                 })
             });
-            let def_handle = scope.spawn(|| {
+            let def_handle = threads.spawn(|| {
                 def_index.as_ref().map(|definition_index| {
-                    definitions::reconcile_definition_index_nonblocking_with_angular_paths(
+                    definitions::reconcile_definition_index_with_scope(
                         definition_index,
                         &dir_owned,
                         &def_extensions_owned,
                         respect_git_exclude,
                         Some(&angular_definition_paths),
+                        Some(scope),
                     )
                 })
             });
@@ -3035,6 +3174,9 @@ pub fn start_periodic_rescan(
         );
     }
     let dir_str = clean_path(&dir.to_string_lossy());
+    let scope = code_xray::IndexMutationScope::for_worker(
+        &dir_str, Arc::clone(&watcher_generation), my_generation,
+    );
     info!(dir = %dir_str, interval_sec = effective, "periodic rescan thread starting");
 
     std::thread::spawn(move || {
@@ -3059,7 +3201,7 @@ pub fn start_periodic_rescan(
                 return;
             }
 
-            let outcome = periodic_rescan_once(
+            let outcome = periodic_rescan_once_with_scope(
                 &index,
                 &def_index,
                 &file_index,
@@ -3071,6 +3213,7 @@ pub fn start_periodic_rescan(
                 respect_git_exclude,
                 &autosave_dirty,
                 &trigram_build_gate,
+                &scope,
             );
             if outcome.index_changed {
                 index_epoch.fetch_add(1, Ordering::AcqRel);
@@ -3093,11 +3236,25 @@ pub fn start_periodic_rescan(
 /// - Phase 4: batch_purge + apply (WRITE lock — brief)
 ///
 /// Uses a 2-second safety margin on `created_at` to handle clock precision.
+#[cfg(test)]
 fn reconcile_content_index(
     index: &Arc<RwLock<ContentIndex>>,
     dir: &str,
     extensions: &[String],
     respect_git_exclude: bool,
+) -> (usize, usize, usize) {
+    reconcile_content_index_with_scope(
+        index, dir, extensions, respect_git_exclude,
+        &code_xray::IndexMutationScope::for_root(dir),
+    )
+}
+
+fn reconcile_content_index_with_scope(
+    index: &Arc<RwLock<ContentIndex>>,
+    dir: &str,
+    extensions: &[String],
+    respect_git_exclude: bool,
+    scope: &code_xray::IndexMutationScope,
 ) -> (usize, usize, usize) {
     // Capture walk start time BEFORE the walk so files modified during the
     // walk/tokenize phases remain eligible for the next reconciliation.
@@ -3106,7 +3263,7 @@ fn reconcile_content_index(
         .unwrap_or(std::time::Duration::ZERO)
         .as_secs();
     let dir_state = scan_dir_state(dir, extensions, respect_git_exclude);
-    reconcile_content_index_with_disk_files(index, dir_state.ext_matched, walk_start, extensions)
+    reconcile_content_index_with_disk_files_scoped(index, dir_state.ext_matched, walk_start, extensions, Some(scope))
 }
 
 /// Same as [`reconcile_content_index`] but consumes a pre-built `disk_files`
@@ -3120,11 +3277,22 @@ fn reconcile_content_index(
 /// - `walk_start` captured BEFORE the walk producing `disk_files` (this value
 ///   is stored in `idx.created_at` only when no already-indexed file fails
 ///   tokenization, to bound the next rescan's mtime threshold).
+#[cfg(test)]
 pub(crate) fn reconcile_content_index_with_disk_files(
     index: &Arc<RwLock<ContentIndex>>,
     disk_files: HashMap<PathBuf, SystemTime>,
     walk_start: u64,
     expected_extensions: &[String],
+) -> (usize, usize, usize) {
+    reconcile_content_index_with_disk_files_scoped(index, disk_files, walk_start, expected_extensions, None)
+}
+
+fn reconcile_content_index_with_disk_files_scoped(
+    index: &Arc<RwLock<ContentIndex>>,
+    disk_files: HashMap<PathBuf, SystemTime>,
+    walk_start: u64,
+    expected_extensions: &[String],
+    scope: Option<&code_xray::IndexMutationScope>,
 ) -> (usize, usize, usize) {
     let start = std::time::Instant::now();
     let disk_files = &disk_files;
@@ -3135,7 +3303,7 @@ pub(crate) fn reconcile_content_index_with_disk_files(
     // ── Phase 2: Determine changes (READ LOCK — instant) ──
     let (to_tokenize, to_remove, purge_ids, added, modified) = match index.read() {
         Ok(idx) => {
-            if idx.extensions != expected_extensions {
+            if idx.extensions != expected_extensions || scope.is_some_and(|scope| !scope.matches(&idx.root)) {
                 debug!("Discarding content reconciliation after extension scope changed");
                 return (0, 0, 0);
             }
@@ -3210,12 +3378,17 @@ pub(crate) fn reconcile_content_index_with_disk_files(
         .collect();
 
     // ── Phase 4: Apply under WRITE LOCK (targeted purge + ~0.1ms × N insert) ──
+    #[cfg(test)]
+    if scope.is_some() {
+        let paths = tokenized.iter().map(|result| result.path.clone()).collect::<Vec<_>>();
+        wait_at_definition_update_before_write_hook(&paths);
+    }
     let mut applied_added = 0usize;
     let mut applied_modified = 0usize;
     match index.write() {
         Ok(mut idx) => {
             let idx = &mut *idx;
-            if idx.extensions != expected_extensions {
+            if idx.extensions != expected_extensions || scope.is_some_and(|scope| !scope.matches(&idx.root)) {
                 debug!("Discarding prepared content reconciliation after extension scope changed");
                 return (0, 0, 0);
             }
