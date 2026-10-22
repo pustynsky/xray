@@ -78,7 +78,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "terms": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Search terms. Each array entry is one term. Multi-term OR/AND via `mode`. Duplicate terms are ignored (case-insensitive for token/substring/phrase/token-regex; exact for lineRegex). Literal commas inside an entry are preserved (e.g. regex `^[^,]+,[^,]+$`)."
+                        "description": "Search terms, one entry per term; OR/AND via mode. Dedup: case-insensitive token/substring/phrase, exact token-regex/lineRegex source. Commas within entries are preserved."
                     },
                     "dir": {
                         "type": "string",
@@ -101,7 +101,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "regex": {
                         "type": "boolean",
-                        "description": "Treat as regex pattern (default: false)"
+                        "description": "Whole-token regex, including alternatives. Preserves source syntax; case-insensitive by default, overridable with inline flags."
                     },
                     "phrase": {
                         "type": "boolean",

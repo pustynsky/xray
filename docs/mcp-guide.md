@@ -329,6 +329,23 @@ All grep modes page files only after their final deterministic ranking and befor
 
 Ranking is TF-IDF descending then path ascending for token, token-regex, and substring modes; phrase and lineRegex use occurrences descending then path ascending; invert uses path ascending. Substring-OR auto-balance filters the full ranked sequence before pagination. If one file cannot fit with line details, the response drops `lineContent` and `lines`; if its metadata still cannot fit, `single_item_exceeds_response_budget` returns `isError=true` without advancing the offset.
 
+**Token regex (`regex=true`, CLI `--regex`):** pattern syntax is preserved, not
+lowercased: `\d+` and `\D+` remain different conditions. Matching is
+case-insensitive by default; inline flags can override it. The entire expression
+matches a whole indexed token, including each branch of `alpha|beta`, so that
+pattern does not match `alphabet` or `prebeta`. Noncapturing wrapping preserves
+user capture numbers and names. Invalid source is an error, not an empty result.
+Tokens contain no whitespace, so `\s+` legitimately returns no matches.
+
+Only identical regex sources are deduplicated, preserving their first occurrence.
+Different source spellings remain separate even when their matches overlap;
+overlapping-pattern AND accounting remains a known limitation (#468), not fixed
+by syntax preservation. Remove redundant equivalent patterns when using AND.
+Literal token/substring/phrase normalization and raw-line `lineRegex` behavior
+are unchanged. MCP preserves whitespace inside each pattern; CLI retains its
+existing comma-separated, trimmed pattern input. Continuation tokens remain
+bound to the original request, not to normalized or compiled patterns.
+
 > **MCP ↔ CLI parameter name mapping:** MCP `mode: "and"` = CLI `--all`, MCP `substring: false` = CLI `--exact`, MCP `countOnly: true` = CLI `-c/--count`, MCP `showLines: true` = CLI `--show-lines`, MCP `contextLines` = CLI `-C/--context`. See [CLI Reference — `xray grep`](cli-reference.md#xray-grep--search-inverted-content-index) for CLI usage.
 
 ### Parameters

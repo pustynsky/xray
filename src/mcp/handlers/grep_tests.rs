@@ -426,7 +426,7 @@ fn test_parse_grep_args_deduplicates_terms_by_mode() {
 
     let regex_args = json!({"terms": ["^Foo$", "^Foo$", "^foo$"], "regex": true});
     let regex_result = parse_grep_args(&regex_args, "C:/project").unwrap();
-    assert_eq!(regex_result.terms, vec!["^Foo$".to_string()]);
+    assert_eq!(regex_result.terms, vec!["^Foo$".to_string(), "^foo$".to_string()]);
 
     let line_regex_args = json!({
         "terms": ["^Foo$", "^FOO$", "^Foo$", " ^Foo$"],

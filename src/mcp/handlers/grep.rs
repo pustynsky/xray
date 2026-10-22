@@ -2744,7 +2744,7 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
     };
 
     if terms.len() > 1 {
-        let case_insensitive_terms = !use_line_regex;
+        let case_insensitive_terms = !use_regex;
         let mut seen_terms = HashSet::with_capacity(terms.len());
         terms.retain(|term| {
             let key = if case_insensitive_terms {
@@ -3648,11 +3648,10 @@ fn search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     }
 
     // --- Normal token search
-    // Each `terms` entry is one search term, taken verbatim from the array
-    // (already trimmed, empty entries dropped). Lowercase here for the
-    // tokenizer; user-supplied case is preserved upstream for phrase mode.
+    // Regex syntax is case-sensitive even when matching is case-insensitive.
+    // Ordinary terms use the tokenizer's lowercase representation.
     let raw_terms: Vec<String> = parsed.terms.iter()
-        .map(|s| s.to_lowercase())
+        .map(|s| if parsed.use_regex { s.clone() } else { s.to_lowercase() })
         .filter(|s| !s.is_empty())
         .collect();
 
