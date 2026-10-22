@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Normalized Windows path separators in grep and caller filters (#498).** MCP grep `file`/`exclude`, MCP callers `excludeFile`, and CLI grep `--exclude`/`--exclude-dir` now treat `\` and `/` alike, including mixed-separator relative and absolute paths. Existing substring matching and scope-status behavior are unchanged.
+- **Normalized Windows path separators in grep and caller filters (#498).** MCP grep `file`/`exclude`, MCP callers `excludeFile`, and CLI grep `--exclude`/`--exclude-dir` now treat `\` and `/` alike, including mixed-separator relative and absolute paths. Existing substring matching and scope-status behavior are unchanged. Caller regression expectations follow host-native filename display on Windows and Unix.
 
 - **Made the cross-client setup regression work with Windows PowerShell's input encoding.** The test sends MCP requests as UTF-8 without a BOM and restores the host's original encoding afterward.
 

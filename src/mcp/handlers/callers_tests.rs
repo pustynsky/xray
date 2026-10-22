@@ -4711,6 +4711,11 @@ fn test_multi_method_returns_results_array() {
 #[test]
 fn test_callers_path_separators_single_and_batch() {
     for prefix in ["C:/workspace/src/", r"C:\workspace\src\", r"C:\workspace/src\"] {
+        // Caller nodes display filenames using the host's native path semantics.
+        let displayed_file = |name: &str| {
+            let path = format!("{prefix}{name}");
+            std::path::Path::new(&path).file_name().unwrap().to_str().unwrap().to_string()
+        };
         let ctx = build_callers_fixture_with_n_callers(2);
         {
             let mut defs = ctx.def_index.as_ref().unwrap().write().unwrap();
@@ -4745,9 +4750,9 @@ fn test_callers_path_separators_single_and_batch() {
                     .collect();
                 baseline_paths.sort();
                 let expected_baseline = if direction == "up" {
-                    vec!["Caller0.cs", "Caller1.cs"]
+                    vec![displayed_file("Caller0.cs"), displayed_file("Caller1.cs")]
                 } else {
-                    vec!["OrderService.cs"]
+                    vec![displayed_file("OrderService.cs")]
                 };
                 assert_eq!(baseline_paths, expected_baseline, "prefix={prefix}, args={baseline_args}: {baseline}");
                 for excluded in [
@@ -4768,7 +4773,7 @@ fn test_callers_path_separators_single_and_batch() {
                         .map(|node| node["file"].as_str().unwrap())
                         .collect();
                     let expected = if direction == "up" {
-                        vec!["Caller1.cs"]
+                        vec![displayed_file("Caller1.cs")]
                     } else {
                         vec![]
                     };
