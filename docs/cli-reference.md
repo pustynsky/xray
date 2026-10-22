@@ -118,6 +118,10 @@ xray content-index -d C:\Projects -e cs --hidden --no-ignore
 
 Searches the inverted index for tokens. Results use TF-IDF ranking; a single `--exact` term also receives a normalized file-stem signal when it matches the stem. Supports multi-term search (AND/OR) and regex pattern matching against indexed tokens.
 
+Without `--ext`, grep reuses an existing content index for the directory and searches all its indexed extensions. If no usable index exists, it reports an error with an indexing command instead of building an empty index. With `--ext`, grep first tries the exact cache, then an existing index covering all requested extensions, before building one. A stale index is rebuilt with its original extensions, not just the query filter.
+
+Content indexing requires non-empty extensions. Blank values and empty comma-separated entries such as `rs,,cs` are rejected. Old caches with empty extension configurations are ignored during index discovery; valid indexes with no matching files remain usable.
+
 ```bash
 # Search for a single term (results ranked by relevance)
 xray grep "HttpClient" -d C:\Projects
@@ -186,7 +190,7 @@ xray grep "HttpClient" -d C:\Projects -e cs
 | `-d, --dir <DIR>`   | Directory whose content index to search (default: `.`)                                                                                                                                                                     |
 | `-c, --count`       | Show match count only                                                                                                                                                                                                      |
 | `--show-lines`      | Display actual line content from files                                                                                                                                                                                     |
-| `--auto-reindex`    | Rebuild a stale index. Off by default; without it, xray uses the stale index and prints a warning                                                                                                                                                                                      |
+| `--auto-reindex`    | Enabled by default. Rebuild stale indexes with their original extensions; build missing indexes only when `--ext` supplies an extension configuration                                                                                                                                   |
 | `--respect-git-exclude` | Respect `.git/info/exclude` during auto-rebuild (default: false)                                                                                                                                                        |
 | `-e, --ext <EXT>`   | Filter results by extension                                                                                                                                                                                                |
 | `--max-results <N>` | Limit number of results (0 = unlimited)                                                                                                                                                                                    |
