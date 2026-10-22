@@ -5,13 +5,51 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  classify:
+    name: CI policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.classify.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Test CI policy
+        shell: pwsh
+        run: |
+          & .\scripts\test-ci-policy.ps1
+          exit $LASTEXITCODE
+      - name: Classify changes
+        id: classify
+        shell: pwsh
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          . .\scripts\ci-policy.ps1
+          $mode = Get-CiMode -EventName $env:CI_EVENT -BaseSha $env:CI_BASE_SHA -HeadSha $env:CI_HEAD_SHA
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "mode=$mode" -Encoding utf8
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "CI mode: **$mode**. Only explicitly allowed documentation paths can skip heavy checks." -Encoding utf8
+
   setup:
     name: MCP setup (${{ matrix.shell }})
+    needs: classify
+    if: needs.classify.outputs.mode == 'full'
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -43,6 +81,8 @@ jobs:
 
   clippy:
     name: Clippy (${{ matrix.os }})
+    needs: classify
+    if: needs.classify.outputs.mode == 'full'
     strategy:
       fail-fast: false
       matrix:
@@ -59,6 +99,8 @@ jobs:
 
   test-windows:
     name: Test (windows-latest)
+    needs: classify
+    if: needs.classify.outputs.mode == 'full'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -85,6 +127,8 @@ jobs:
 
   test-ubuntu:
     name: Test (ubuntu-latest)
+    needs: classify
+    if: needs.classify.outputs.mode == 'full'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -99,7 +143,8 @@ jobs:
 
   setup-integration:
     name: MCP user setup (${{ matrix.shell }})
-    needs: test-windows
+    needs: [classify, test-windows]
+    if: needs.classify.outputs.mode == 'full'
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -142,6 +187,8 @@ jobs:
 
   feature-matrix:
     name: Feature matrix (${{ matrix.features }})
+    needs: classify
+    if: needs.classify.outputs.mode == 'full'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -171,6 +218,8 @@ jobs:
 
   audit:
     name: cargo audit
+    needs: classify
+    if: needs.classify.outputs.mode == 'full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -188,9 +237,35 @@ jobs:
 
   deny:
     name: cargo deny
+    needs: classify
+    if: needs.classify.outputs.mode == 'full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  gate:
+    name: CI gate
+    if: always()
+    needs: [classify, setup, clippy, test-windows, test-ubuntu, setup-integration, feature-matrix, audit, deny]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify expected CI results
+        shell: pwsh
+        env:
+          CI_NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          . .\scripts\ci-policy.ps1
+          $results = $env:CI_NEEDS_JSON | ConvertFrom-Json -ErrorAction Stop
+          Assert-CiResults -Needs $results
+          $message = if ($results.classify.outputs.mode -eq 'docs') {
+            'CI gate passed: policy tests passed; heavy checks were not required for these documentation changes.'
+          } else {
+            'CI gate passed: all required full checks succeeded.'
+          }
+          Write-Host $message
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $message -Encoding utf8

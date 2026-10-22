@@ -148,6 +148,7 @@ The current tracked workflow is [.github/workflows/ci.yml](../.github/workflows/
 
 | Job | OS | Command | E2E |
 |---|---|---|---|
+| `classify` | Ubuntu, PowerShell 7 | Policy regression tests and conservative PR change classification | Synthetic Git repositories |
 | `setup` | Windows, PowerShell 5.1 and 7 | Local MCP setup, legacy migration, extension detection, and setup dependencies | Setup fixtures |
 | `clippy` | Windows, Ubuntu | `cargo clippy --workspace --all-targets --locked -- -D warnings` | No |
 | `test-windows`, `test-ubuntu` | Windows, Ubuntu | `cargo test --workspace --locked` | No |
@@ -155,6 +156,40 @@ The current tracked workflow is [.github/workflows/ci.yml](../.github/workflows/
 | `feature-matrix` | Ubuntu | default, all features, no default, and isolated C#/TypeScript/Rust/XML checks | No |
 | `audit` | Ubuntu | `cargo audit --deny warnings --ignore RUSTSEC-2025-0141` | No |
 | `deny` | Ubuntu | `cargo deny check` | No |
+| `gate` | Ubuntu, PowerShell 7 | Validate every expected job result for the selected mode | No |
+
+Pull requests skip heavy jobs only when every changed path is in the exact
+allowlist in [ci-policy.ps1](../scripts/ci-policy.ps1). The list contains existing
+documentation, license files, and selected Markdown agent/skill customizations.
+New files outside the list, executable scripts, workflow changes, source code,
+and mixed changes require full CI. Renames classify both old and new paths.
+The diff covers the merge base through the PR head, not only its latest commit.
+Invalid SHAs, missing or ambiguous history, or Git errors fail classification.
+
+Pushes to `main` and manual `workflow_dispatch` runs always use full CI.
+Use Actions **Run workflow** to select a ref for a manual Full once this workflow
+is available on the default branch. No scheduled run is added.
+
+New pushes cancel older runs of the same pull request. Every non-PR run uses
+its own concurrency group keyed by run ID, so neither running nor pending main
+and manual runs are displaced by another run.
+
+The `CI gate` check runs even when dependencies fail or are skipped. It requires
+successful classification and every heavy job to succeed in full mode or be
+skipped in documentation mode. Missing results, cancellation, or an unexpected
+skip fail the gate. A documentation-mode success explicitly reports that heavy
+checks were not required; it does not claim they passed. Repository rules must
+be configured separately if this check is to be required for merging.
+
+Run the routing and gate regression tests locally with:
+
+```powershell
+powershell -NoProfile -File .\scripts\test-ci-policy.ps1
+pwsh -NoProfile -File .\scripts\test-ci-policy.ps1
+```
+
+These tests use isolated Git repositories and synthetic job results. They do
+not replace verification of job scheduling and `if`/`needs` behavior in Actions.
 
 The Windows Rust job uploads its debug executable as a one-day artifact.
 Both `setup-integration` jobs download that binary from the same workflow run
