@@ -376,6 +376,8 @@ NOTES:
       xray content-index -d C:\Projects -e cs,rs,py
   - Without --ext, reuse an existing index and search all its indexed extensions
   - With --ext, reuse a covering index before rebuilding; empty extensions are invalid
+  - --ext accepts comma-separated extensions, trimmed and case-insensitive (e.g. " RS, cs ")
+  - The query extension filter does not narrow the index's persisted build settings
   - Results use TF-IDF relevance; one exact token can also receive a normalized file-stem signal
   - Multi-term: comma-separated, OR by default, AND with --all
   - Regex: pattern matched against all indexed tokens (e.g. 754K unique tokens)
@@ -405,7 +407,7 @@ pub struct GrepArgs {
     #[arg(long, default_value = "true")]
     pub auto_reindex: bool,
 
-    /// Filter by file extension.
+    /// Filter by comma-separated file extensions (trimmed, case-insensitive; empty entries invalid).
     #[arg(short, long)]
     pub ext: Option<String>,
 

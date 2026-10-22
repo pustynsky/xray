@@ -381,13 +381,13 @@ use std::time::Duration;
 /// Check if a file path passes extension + exclude_dir + exclude filters.
 fn file_matches_filters(
     file_path: &str,
-    ext: &Option<String>,
+    ext: &Option<Vec<String>>,
     exclude_dir: &[String],
     exclude: &[String],
 ) -> bool {
     if let Some(ext) = ext {
         let m = Path::new(file_path).extension().and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case(ext));
+            .is_some_and(|e| ext.iter().any(|ext| e.eq_ignore_ascii_case(ext)));
         if !m { return false; }
     }
     if !exclude_dir.is_empty() || !exclude.is_empty() {
@@ -471,30 +471,32 @@ fn cache_rebuild_required(err: SearchError, dir: &str, command: &str, ext: Optio
     ))
 }
 
+fn normalize_grep_extensions(ext: &Option<String>) -> Option<Vec<String>> {
+    ext.as_ref().map(|exts| exts.split(',').map(|ext| ext.trim().to_lowercase()).collect())
+}
+
 fn load_grep_index(
     dir: &str,
-    ext: &Option<String>,
+    ext: &Option<Vec<String>>,
     auto_reindex: bool,
     respect_git_exclude: bool,
     idx_base: &Path,
 ) -> Result<(ContentIndex, Duration), SearchError> {
     let start = Instant::now();
-    let expected_exts: Vec<String> = ext.as_ref().map(|exts|
-        exts.split(',').map(|s| s.trim().to_lowercase()).collect()
-    ).unwrap_or_default();
+    let expected_exts = ext.as_deref().unwrap_or_default();
     if ext.is_some() {
-        crate::index::validate_content_extensions(&expected_exts)?;
+        crate::index::validate_content_extensions(expected_exts)?;
     }
 
-    let loaded = find_content_index_for_dir(dir, idx_base, &expected_exts)
-        .map_err(|err| cache_rebuild_required(err, dir, "content-index", Some(ext.as_deref().unwrap_or("<extensions>"))))?;
+    let ext_csv = ext.as_ref().map(|exts| exts.join(","));
+    let loaded = find_content_index_for_dir(dir, idx_base, expected_exts)
+        .map_err(|err| cache_rebuild_required(err, dir, "content-index", Some(ext_csv.as_deref().unwrap_or("<extensions>"))))?;
     let mut index = match loaded {
         Some(idx) => idx,
         None => {
-            let Some(exts) = ext.as_ref().filter(|_| auto_reindex) else {
+            let Some(rebuild_ext) = ext_csv.filter(|_| auto_reindex) else {
                 return Err(SearchError::IndexNotFound { dir: dir.to_string() });
             };
-            let rebuild_ext = exts.clone();
             eprintln!("Auto-rebuilding content index for '{}' (ext={})...", dir, rebuild_ext);
             let new_idx = build_content_index(&ContentIndexArgs {
                 dir: dir.to_string(), ext: rebuild_ext,
@@ -536,7 +538,7 @@ fn load_grep_index(
 fn find_phrase_candidates(
     index: &ContentIndex,
     phrase_tokens: &[String],
-    ext: &Option<String>,
+    ext: &Option<Vec<String>>,
     exclude_dir: &[String],
     exclude: &[String],
 ) -> std::collections::HashSet<u32> {
@@ -586,6 +588,7 @@ fn verify_phrase_matches(
 fn cmd_grep_phrase(
     index: &ContentIndex,
     args: &GrepArgs,
+    ext: &Option<Vec<String>>,
     load_elapsed: Duration,
 ) -> Result<(), SearchError> {
     let search_start = Instant::now();
@@ -612,7 +615,7 @@ fn cmd_grep_phrase(
         &phrase_tokens,
         |file_id| {
             index.files.get(file_id as usize).is_some_and(|path| {
-                file_matches_filters(path, &args.ext, &args.exclude_dir, &args.exclude)
+                file_matches_filters(path, ext, &args.exclude_dir, &args.exclude)
             })
         },
     );
@@ -750,7 +753,7 @@ fn exact_file_stem_boost_enabled(exact: bool, regex: bool) -> bool {
 fn score_grep_results(
     index: &ContentIndex,
     terms: &[String],
-    ext: &Option<String>,
+    ext: &Option<Vec<String>>,
     exclude_dir: &[String],
     exclude: &[String],
     options: GrepScoreOptions,
@@ -807,7 +810,8 @@ fn score_grep_results(
 
 fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     let start = Instant::now();
-    let (index, load_elapsed) = load_grep_index(&args.dir, &args.ext, args.auto_reindex, args.respect_git_exclude, &index_dir())?;
+    let ext = normalize_grep_extensions(&args.ext);
+    let (index, load_elapsed) = load_grep_index(&args.dir, &ext, args.auto_reindex, args.respect_git_exclude, &index_dir())?;
     let search_start = Instant::now();
 
     // Default: substring search (like MCP). Disabled by --exact, --regex, or --phrase.
@@ -815,7 +819,7 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
 
     // Phrase search: separate code path with early return
     if args.phrase {
-        return cmd_grep_phrase(&index, &args, load_elapsed);
+        return cmd_grep_phrase(&index, &args, &ext, load_elapsed);
     }
 
     // ─── Normal token search ────────────────────────────────
@@ -831,7 +835,7 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     let results = score_grep_results(
         &index,
         &terms,
-        &args.ext,
+        &ext,
         &args.exclude_dir,
         &args.exclude,
         GrepScoreOptions {

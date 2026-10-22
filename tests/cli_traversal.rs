@@ -35,6 +35,145 @@ fn run(root: &Path, mode: &str, extensions: bool) -> Output {
     command.output().unwrap()
 }
 
+fn run_grep(root: &Path, pattern: &str, mode: &str, ext: Option<&str>, flags: &[&str]) -> Output {
+    use std::os::windows::process::CommandExt;
+    #[allow(clippy::disallowed_methods, reason = "Integration crate cannot access the binary-private background_command; applies CREATE_NO_WINDOW here")]
+    let mut command = Command::new(env!("CARGO_BIN_EXE_xray"));
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    command.arg("grep").arg(pattern).arg("-d").arg(root).args(flags);
+    if !mode.is_empty() {
+        command.arg(mode);
+    }
+    if let Some(ext) = ext {
+        command.arg("-e").arg(ext);
+    }
+    command.output().unwrap()
+}
+
+#[test]
+#[ignore = "requires Windows file-symlink privilege; run explicitly for real CLI smoke"]
+fn grep_normalized_extensions_cli_modes() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("systemtemp");
+    fs::create_dir_all(&base).unwrap();
+    let fixture = tempfile::Builder::new().prefix("cli502-").tempdir_in(&base).unwrap();
+    let root = fs::canonicalize(fixture.path()).unwrap();
+    let canonical = root.to_string_lossy();
+    let cache_dir = dirs::data_local_dir().unwrap().join("xray");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let prefix = extract_semantic_prefix(&root);
+    let content_hash = stable_hash(&[canonical.as_bytes(), b"rs,cs,txt"]) as u32;
+    let content_path = cache_dir.join(format!("{prefix}_{content_hash:08x}.word-search"));
+    let content_target = root.join("cache.word-search");
+    let meta_target = root.join("content.meta");
+    let names = ["probe.RS", "probe.Cs", "probe.txt"];
+    let mut content = ContentIndex {
+        root: clean_path(&canonical), format_version: code_xray::CONTENT_INDEX_VERSION,
+        created_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        max_age_secs: 86400, extensions: vec!["rs".into(), "cs".into(), "txt".into()],
+        file_token_counts: vec![7; 3], total_tokens: 21,
+        ..Default::default()
+    };
+    for name in names {
+        let path = root.join(name);
+        fs::write(&path, "scope_not_found scope_not_found alpha beta\nscope_not_found alpha beta\n").unwrap();
+        content.files.push(path.to_string_lossy().into_owned());
+    }
+    for token in ["alpha", "beta", "scope_not_found"] {
+        content.index.insert(token.into(), (0..3).map(|file_id| code_xray::Posting {
+            file_id, lines: if token == "scope_not_found" { vec![1, 1, 2] } else { vec![1, 2] },
+        }).collect());
+    }
+    // Two-character substring queries scan the sorted token list directly.
+    content.trigram.tokens = vec!["alpha".into(), "beta".into(), "scope_not_found".into()];
+    let original_bytes = bincode::serialize(&content).unwrap();
+    let original_meta = br#"{"fixture":"502; fresh queries must not rewrite this"}"#;
+    fs::write(&content_target, &original_bytes).unwrap();
+    fs::write(&meta_target, original_meta).unwrap();
+    let mut links = CacheLinks(Vec::new());
+    links.add(&content_target, content_path.clone());
+    links.add(&meta_target, PathBuf::from(format!("{}.meta", content_path.display())));
+    let cache_paths = || {
+        let mut paths: Vec<_> = fs::read_dir(&cache_dir).unwrap().map(|entry| entry.unwrap().path())
+            .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with(&format!("{prefix}_")))
+            .collect();
+        paths.sort();
+        paths
+    };
+    let original_paths = cache_paths();
+    assert_eq!(original_paths.len(), 2);
+
+    for (mode, pattern, absent) in [
+        ("--exact", "scope_not_found", "genuinely_absent"),
+        ("", "sc", "zz"),
+        ("--regex", "^scope_not_found$", "^genuinely_absent$"),
+        ("--phrase", "scope_not_found alpha", "genuinely_absent alpha"),
+    ] {
+        for (ext, expected) in [
+            (Some("rs"), 1), (Some("cs"), 1), (Some("RS"), 1), (Some(" CS "), 1),
+            (Some(" rs "), 1), (Some("rs,cs"), 2), (Some(" CS, rS "), 2),
+            (Some("rs,RS,cs,CS"), 2), (None, 3),
+        ] {
+            for _ in 0..2 {
+                for count in [false, true] {
+                    let flags: &[&str] = if count { &["--count"] } else { &[] };
+                    let output = run_grep(&root, pattern, mode, ext, flags);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let unit = if mode == "--phrase" { "lines" } else { "occurrences" };
+                    assert_eq!(output.status.code(), Some(0), "{mode} {ext:?}: {stderr}");
+                    assert!(stderr.contains(&format!("{expected} files, {} {unit}", expected * 2)),
+                        "{mode} {ext:?}: {stderr}");
+                    assert!(!stderr.contains("rebuild"), "{stderr}");
+                    if count {
+                        assert!(stdout.is_empty(), "{stdout}");
+                    } else {
+                        assert_eq!(stdout.lines().count(), expected, "{stdout}");
+                        let single_cs = ext.is_some_and(|e| e.trim().eq_ignore_ascii_case("cs"));
+                        assert!(stdout.contains(if single_cs {
+                            names[1]
+                        } else { names[0] }), "{stdout}");
+                        assert_eq!(stdout.contains(names[1]), expected > 1 || single_cs, "{stdout}");
+                        assert_eq!(stdout.contains(names[2]), ext.is_none(), "{stdout}");
+                        assert!(stdout.lines().all(|line| line.ends_with("lines: 1, 2)")), "{stdout}");
+                    }
+                }
+            }
+        }
+        let missing_patterns = if mode == "--phrase" {
+            vec![absent, "alpha scope_not_found", "scope_not_found beta"]
+        } else { vec![absent] };
+        for missing in missing_patterns {
+            let output = run_grep(&root, missing, mode, Some(" rs, CS "), &["--count"]);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(0), "{stderr}");
+            assert!(output.stdout.is_empty());
+            assert!(stderr.contains("0 files, 0 "), "{stderr}");
+        }
+        let output = run_grep(&root, pattern, mode, Some(" RS, cs "), &["--max-results", "1"]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{stderr}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 1);
+        assert!(stderr.contains("2 files, 4 "), "{stderr}");
+    }
+    assert_eq!(fs::read(&content_target).unwrap(), original_bytes);
+    assert_eq!(fs::read(&meta_target).unwrap(), original_meta);
+    assert_eq!(cache_paths(), original_paths);
+
+    // Invalid query scopes must fail before even trying to load a corrupt cache.
+    fs::write(&content_target, b"corrupt cache").unwrap();
+    for ext in ["", " ", "\t", ",", ",rs", "rs,", "rs,,cs", "rs, ,cs"] {
+        let output = run_grep(&root, "scope_not_found", "--exact", Some(ext), &["--count"]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{ext:?}: {stderr}");
+        assert!(output.stdout.is_empty());
+        assert!(stderr.contains("Content index extensions must be non-empty"), "{ext:?}: {stderr}");
+        assert!(!stderr.contains("rebuild") && !stderr.contains("Refusing to replace"), "{stderr}");
+    }
+    assert_eq!(fs::read(&content_target).unwrap(), b"corrupt cache");
+    assert_eq!(fs::read(&meta_target).unwrap(), original_meta);
+    assert_eq!(cache_paths(), original_paths);
+}
+
 #[test]
 #[ignore = "requires Windows file-symlink privilege; run explicitly for real CLI smoke"]
 fn existing_cache_refusal_and_valid_empty_cli_output() {
