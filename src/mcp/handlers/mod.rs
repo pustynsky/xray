@@ -248,7 +248,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "ext": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "File extensions to parse, e.g., [\"rs\",\"toml\"] (default: the server's definition-parser extensions)"
+                        "description": "Default: definition-parser extensions/first compiled parser. CSV/trim/lowercase; reject empty segments/no compiled bulk parser (XML excluded) before mutation."
                     }
                 },
                 "required": []
@@ -3248,13 +3248,32 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
                 .unwrap_or_else(|_| d.to_string())
         })
         .unwrap_or_else(|| current_dir.clone());
-    // 2026-04-25 list-params migration: `ext` is array<string>. Bridge into a
-    // comma-joined String for downstream `build_definition_index`.
-    let ext = match utils::read_string_array(args, "ext") {
-        Ok(v) if v.is_empty() => effective_definition_build_extensions(ctx).join(","),
-        Ok(v) => v.join(","),
+    let extensions = match utils::read_string_array(args, "ext") {
+        Ok(v) if v.is_empty() => effective_definition_build_extensions(ctx),
+        Ok(v) => v,
         Err(e) => return ToolCallResult::error(e),
     };
+    // Validate the selected defaults too, before any workspace or index mutation.
+    // Keep empty CSV segments: the builder discards them and can wipe a live graph.
+    let extensions: Vec<String> = extensions.iter()
+        .flat_map(|entry| entry.split(','))
+        .map(|entry| entry.trim().to_lowercase())
+        .collect();
+    if extensions.iter().any(|entry| entry.is_empty()) {
+        return ToolCallResult::error(
+            "'ext' must not contain empty comma-separated extension segments.".to_string(),
+        );
+    }
+    let supported = crate::definitions::definition_extensions();
+    if !extensions.iter().any(|entry| supported.contains(&entry.as_str())) {
+        return ToolCallResult::error(format!(
+            "'ext' must include at least one compiled bulk-definition parser extension: {}. \
+             XML is supported on demand, not by bulk definition reindexing.",
+            supported.join(", "),
+        ));
+    }
+    // One normalized configuration for build, save (index.extensions), and reload.
+    let ext = extensions.join(",");
 
     // Determine if workspace is changing
     let previous_dir = current_dir.clone();

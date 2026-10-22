@@ -1403,7 +1403,11 @@ Force rebuild the AST definition index (tree-sitter) and reload it into the serv
 | Parameter | Type   | Default          | Description                              |
 | --------- | ------ | ---------------- | ---------------------------------------- |
 | `dir`     | string | server's `--dir` | Directory to reindex                     |
-| `ext`     | array&lt;string&gt; | server's `--ext` | File extensions to parse (e.g., `["rs"]`). **BREAKING 2026-04-25:** array required |
+| `ext`     | array&lt;string&gt; | server's definition-parser extensions, or first compiled parser | Optional file extensions to parse (e.g., `["sql", "json"]`). Omitted, `null`, `[]`, and blank-only elements use this fallback, not the raw content `--ext` value |
+
+Nonblank entries are split on commas, trimmed, and lowercased. Blank array elements are skipped; empty comma-separated segments (for example `[","]`, `["sql,"]`, or `["sql,,json"]`) are rejected. The selected effective configuration, including configured defaults, must contain at least one compiled bulk-definition parser: SQL is always available; C#, TypeScript/TSX, and Rust depend on build features. XML is on-demand only and does not qualify. Mixed supported/unsupported extensions are accepted without filtering, reordering, or deduplication. Wrong container or element types return the standard array-of-strings error.
+
+Invalid extensions return an MCP tool error (`isError: true`, text content), before workspace switching, index replacement, readiness changes, or cache writes. The previous live index and persisted cache remain usable. Build, save, and reload use the same normalized extensions. A valid scope with zero matching files or zero definitions still succeeds.
 
 ### Response
 

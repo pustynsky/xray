@@ -21,6 +21,292 @@ use super::handlers_test_utils::make_ctx_with_defs;
 use serde_json::{Value, json};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
+struct Definition503Fixture {
+    _temp: tempfile::TempDir,
+    ctx: HandlerContext,
+    alternate: String,
+}
+
+#[derive(Debug, PartialEq)]
+struct Definition503Snapshot {
+    state: Value,
+    content: Vec<u8>,
+    definitions: Vec<u8>,
+    cache: std::collections::BTreeMap<std::path::PathBuf, Option<Vec<u8>>>,
+}
+
+impl Definition503Fixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let workspace = temp.path().join("workspace");
+        let alternate = temp.path().join("alternate");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&alternate).unwrap();
+        std::fs::write(
+            workspace.join("marker.sql"),
+            "CREATE PROCEDURE dbo.Definition503Marker AS SELECT 1;\n",
+        ).unwrap();
+        let root = crate::clean_path(
+            &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+        );
+        let mut ctx = make_ctx_with_defs();
+        ctx.server_ext = "json".to_string();
+        ctx.def_extensions = vec!["sql".to_string()];
+        ctx.index_base = temp.path().join("indexes");
+        ctx.watch_enabled = true;
+        let mut definitions = crate::definitions::build_definition_index(
+            &crate::definitions::DefIndexArgs {
+                dir: root.clone(), ext: "sql".to_string(), threads: 1,
+                respect_git_exclude: false,
+            },
+        );
+        assert!(definitions.definitions.iter().any(|d| d.name == "Definition503Marker"));
+        definitions.definition_generation = 41;
+        crate::definitions::save_definition_index(&definitions, &ctx.index_base).unwrap();
+        *ctx.def_index.as_ref().unwrap().write().unwrap() =
+            crate::definitions::load_definition_index(&root, "sql", &ctx.index_base).unwrap();
+        ctx.index.write().unwrap().root = root.clone();
+        {
+            let mut ws = ctx.workspace.write().unwrap();
+            ws.set_dir(root);
+            ws.mode = WorkspaceBindingMode::ManualOverride;
+            ws.status = WorkspaceStatus::Resolved;
+            ws.generation = 9;
+        }
+        ctx.index_epoch.store(17, Ordering::Release);
+        ctx.watcher_generation.store(13, Ordering::Release);
+        let fixture = Self {
+            _temp: temp, ctx,
+            alternate: crate::clean_path(
+                &std::fs::canonicalize(alternate).unwrap().to_string_lossy(),
+            ),
+        };
+        fixture.assert_marker();
+        fixture
+    }
+
+    fn query(&self) -> Value {
+        let result = super::dispatch_tool(&self.ctx, "xray_definitions", &json!({
+            "name": ["Definition503Marker"], "exactNameOnly": true,
+        }));
+        assert!(!result.is_error, "{}", result.content[0].text);
+        serde_json::from_str(&result.content[0].text).unwrap()
+    }
+
+    fn assert_marker(&self) {
+        for _ in 0..2 {
+            let output = self.query();
+            assert!(output["definitions"].as_array().unwrap().iter().any(
+                |d| d["name"] == "Definition503Marker"
+            ), "{output}");
+        }
+    }
+
+    fn snapshot(&self) -> Definition503Snapshot {
+        fn inventory(
+            root: &std::path::Path,
+            path: &std::path::Path,
+            entries: &mut std::collections::BTreeMap<std::path::PathBuf, Option<Vec<u8>>>,
+        ) {
+            let bytes = if path.is_dir() { None } else { Some(std::fs::read(path).unwrap()) };
+            entries.insert(path.strip_prefix(root).unwrap().to_path_buf(), bytes);
+            if path.is_dir() {
+                for entry in std::fs::read_dir(path).unwrap() {
+                    inventory(root, &entry.unwrap().path(), entries);
+                }
+            }
+        }
+        let ws = self.ctx.workspace.read().unwrap();
+        let state = json!({
+            "dir": ws.dir, "canonicalDir": ws.canonical_dir,
+            "mode": format!("{:?}", ws.mode), "status": format!("{:?}", ws.status),
+            "generation": ws.generation,
+            "contentReady": self.ctx.content_ready.load(Ordering::Acquire),
+            "defReady": self.ctx.def_ready.load(Ordering::Acquire),
+            "epoch": self.ctx.index_epoch.load(Ordering::Acquire),
+            "watcherGeneration": self.ctx.watcher_generation.load(Ordering::Acquire),
+            "contentBuilding": self.ctx.content_building.load(Ordering::Acquire),
+            "defBuilding": self.ctx.def_building.load(Ordering::Acquire),
+            "fileIndexDirty": self.ctx.file_index_dirty.load(Ordering::Acquire),
+            "autosaveDirty": self.ctx.autosave_dirty.load(Ordering::Acquire),
+        });
+        drop(ws);
+        let mut cache = std::collections::BTreeMap::new();
+        inventory(&self.ctx.index_base, &self.ctx.index_base, &mut cache);
+        Definition503Snapshot {
+            state,
+            content: bincode::serialize(&*self.ctx.index.read().unwrap()).unwrap(),
+            definitions: bincode::serialize(
+                &*self.ctx.def_index.as_ref().unwrap().read().unwrap(),
+            ).unwrap(),
+            cache,
+        }
+    }
+
+    fn refuse(&self, args: Value, expected: &str) {
+        let before = self.snapshot();
+        let result = super::dispatch_tool(&self.ctx, "xray_reindex_definitions", &args);
+        let after_query = self.query();
+        assert!(result.is_error,
+            "args={args}; reindex={}; subsequent query={after_query}", result.content[0].text);
+        assert!(result.content[0].text.contains(expected), "{}", result.content[0].text);
+        assert_eq!(self.snapshot(), before, "args={args}");
+        self.assert_marker();
+    }
+}
+
+#[test]
+fn test_503_invalid_definition_extensions_preserve_live_and_persisted_state() {
+    let fixture = Definition503Fixture::new();
+    let cases = [
+        (json!([","]), "empty"),
+        (json!([",,,"]), "empty"),
+        (json!(["sql,"]), "empty"),
+        (json!([",sql"]), "empty"),
+        (json!(["sql,,json"]), "empty"),
+        (json!(["sql, \t ,json"]), "empty"),
+        (json!(["sql", ","]), "empty"),
+        (json!(["json", "toml"]), "parser"),
+        (json!(["xml"]), "parser"),
+        (json!(["csproj,config,resx"]), "parser"),
+        (json!("sql"), "must be an array of strings"),
+        (json!(true), "must be an array of strings"),
+        (json!(7), "must be an array of strings"),
+        (json!({}), "must be an array of strings"),
+        (json!(["sql", null]), "element [1]"),
+        (json!(["sql", false]), "element [1]"),
+        (json!(["sql", 7]), "element [1]"),
+        (json!(["sql", {}]), "element [1]"),
+        (json!(["sql", []]), "element [1]"),
+    ];
+    for (ext, expected) in cases {
+        for switch in [false, true] {
+            let mut args = json!({"ext": ext});
+            if switch { args["dir"] = json!(fixture.alternate); }
+            fixture.refuse(args, expected);
+        }
+    }
+    for (feature_enabled, ext) in [
+        (cfg!(feature = "lang-csharp"), "cs"),
+        (cfg!(feature = "lang-typescript"), "ts"),
+        (cfg!(feature = "lang-typescript"), "tsx"),
+        (cfg!(feature = "lang-rust"), "rs"),
+    ] {
+        if !feature_enabled {
+            fixture.refuse(json!({"dir": fixture.alternate, "ext": [ext]}), "parser");
+        }
+    }
+}
+
+#[test]
+fn test_503_definition_extension_fallbacks_are_validated() {
+    let mut fixture = Definition503Fixture::new();
+    fixture.ctx.watch_enabled = false;
+    let fallback_forms = [
+        json!({}), json!({"ext": null}), json!({"ext": []}),
+        json!({"ext": ["", " \t "]}),
+    ];
+    for defaults in [vec![" SQL ".to_string()], Vec::new()] {
+        fixture.ctx.def_extensions = defaults.clone();
+        for args in &fallback_forms {
+            let result = super::dispatch_tool(&fixture.ctx, "xray_reindex_definitions", args);
+            assert!(!result.is_error, "{}", result.content[0].text);
+            let expected = if defaults.is_empty() {
+                crate::definitions::definition_extensions()[0]
+            } else { "sql" };
+            assert_eq!(
+                fixture.ctx.def_index.as_ref().unwrap().read().unwrap().extensions,
+                vec![expected.to_string()],
+            );
+        }
+    }
+    // Restore the known SQL graph before testing invalid configured defaults.
+    let result = super::dispatch_tool(&fixture.ctx, "xray_reindex_definitions", &json!({"ext": ["sql"]}));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    fixture.assert_marker();
+    fixture.ctx.watch_enabled = true;
+    for defaults in [vec![",".to_string()], vec!["sql,".to_string()],
+        vec!["json".to_string()], vec!["xml".to_string()], vec![" ".to_string()]]
+    {
+        fixture.ctx.def_extensions = defaults;
+        for args in &fallback_forms {
+            let mut args = args.clone();
+            args["dir"] = json!(fixture.alternate);
+            fixture.refuse(args, "'ext'");
+        }
+    }
+}
+
+#[test]
+fn test_503_definition_extensions_normalize_without_filtering_and_reload() {
+    let mut fixture = Definition503Fixture::new();
+    fixture.ctx.watch_enabled = false;
+    let expected = vec!["json", "sql", "toml", "sql", "xml"];
+    let result = super::dispatch_tool(&fixture.ctx, "xray_reindex_definitions", &json!({
+        "ext": ["", " JSON , SQL ", " \t ", "TOML", " sql , XML "],
+    }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let live = fixture.ctx.def_index.as_ref().unwrap().read().unwrap();
+    assert_eq!(live.extensions, expected);
+    assert_eq!(live.definition_generation, 42);
+    let loaded = crate::definitions::load_definition_index(
+        &fixture.ctx.server_dir(), &expected.join(","), &fixture.ctx.index_base,
+    ).unwrap();
+    assert_eq!(loaded.extensions, expected);
+    assert!(loaded.definitions.iter().any(|d| d.name == "Definition503Marker"));
+    drop(live);
+    fixture.assert_marker();
+}
+
+#[test]
+fn test_503_valid_definition_scope_can_have_zero_files_or_definitions() {
+    for empty_file in [false, true] {
+        let mut fixture = Definition503Fixture::new();
+        fixture.ctx.watch_enabled = false;
+        if empty_file {
+            std::fs::write(
+                std::path::Path::new(&fixture.alternate).join("empty.sql"),
+                "-- no definitions here\n",
+            ).unwrap();
+        }
+        let content = crate::index::build_content_index(&crate::ContentIndexArgs {
+            dir: fixture.alternate.clone(), ext: fixture.ctx.server_ext.clone(),
+            threads: 1, ..Default::default()
+        }).unwrap();
+        crate::index::save_content_index(&content, &fixture.ctx.index_base).unwrap();
+        let result = super::dispatch_tool(&fixture.ctx, "xray_reindex_definitions", &json!({
+            "dir": fixture.alternate, "ext": ["sql"],
+        }));
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["status"], "ok");
+        assert_eq!(output["files"], usize::from(empty_file));
+        assert_eq!(output["definitions"], 0);
+        assert_eq!(output["contentIndexAction"], "loaded_cache");
+        assert!(fixture.ctx.def_ready.load(Ordering::Acquire));
+        assert_eq!(fixture.ctx.workspace.read().unwrap().status, WorkspaceStatus::Resolved);
+        let loaded = crate::definitions::load_definition_index(
+            &fixture.alternate, "sql", &fixture.ctx.index_base,
+        ).unwrap();
+        assert!(loaded.definitions.is_empty());
+        assert_eq!(loaded.files.len(), usize::from(empty_file));
+    }
+}
+
+#[test]
+fn test_503_definition_extension_schema_preserves_optional_array_fallback() {
+    let tools = super::tool_definitions_with_runtime(&["sql".to_string()], false);
+    let schema = &tools.iter().find(|tool| tool.name == "xray_reindex_definitions")
+        .unwrap().input_schema;
+    let ext = &schema["properties"]["ext"];
+    assert_eq!(ext["type"], "array");
+    assert_eq!(ext["items"]["type"], "string");
+    assert!(ext.get("minItems").is_none());
+    assert!(ext.get("enum").is_none());
+    assert!(ext["items"].get("enum").is_none());
+    assert!(!schema["required"].as_array().unwrap().iter().any(|key| key == "ext"));
+}
+
 #[test]
 fn test_workspace_completion_companion_publication_ownership() {
     use std::sync::atomic::Ordering;

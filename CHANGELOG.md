@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Fix #503: validate definition reindex extensions before mutation.** `xray_reindex_definitions` rejects empty comma segments and configurations with no compiled bulk-definition parser (including XML-only scopes), without changing the workspace, live index/readiness, or persisted cache. Effective defaults are validated too; omitted/null/empty/blank-only arrays retain the definition-parser fallback. Trimmed, lowercase extensions are shared by build/save/reload, preserving mixed unsupported entries, order, and duplicates. Valid zero-file/zero-definition scopes still succeed.
+
 - **Clarified agent review and release workflows.** Review skills now identify the exact diff scope, distinguish defects from validation blockers, and include uncommitted fixes in follow-up reviews. Release instructions are self-contained and verify published artifacts against clean tagged builds. Exploration budgets and reviewer delegation avoid redundant work without weakening tool or installer safety boundaries.
 
 - **Normalized CLI grep extension filters (#502).** Supplied comma-separated extensions are now trimmed and lowercased once, then applied consistently during index selection, token scoring (exact, substring, regex), and phrase candidate filtering. Padded, mixed-case, and duplicate extensions work without inflating results or counts. Empty entries remain invalid; omitting the filter still searches all indexed extensions. Query filters do not narrow the selected index's persisted extensions or rebuild settings.
