@@ -13,6 +13,7 @@ jobs:
   setup:
     name: MCP setup (${{ matrix.shell }})
     runs-on: windows-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -56,13 +57,10 @@ jobs:
       - name: cargo clippy --workspace --all-targets
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-  test:
-    name: Test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+  test-windows:
+    name: Test (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,21 +74,70 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test --workspace --locked
         run: cargo test --workspace --locked
-      - name: Test user MCP setup (PowerShell 5.1)
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          & .\scripts\test-mcp-setup.ps1 -UserMcpOnly -XrayBinary .\target\debug\xray.exe
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & .\scripts\test-setup-xray-repos.ps1 -XrayBinary .\target\debug\xray.exe
-          exit $LASTEXITCODE
-      - name: Test user MCP setup (PowerShell 7)
-        if: runner.os == 'Windows'
+      - name: Upload Windows test binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: xray-windows-test-binary
+          path: .\target\debug\xray.exe
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  test-ubuntu:
+    name: Test (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Git tests require full history (HEAD~1, file_history, branch detection).
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test --workspace --locked
+        run: cargo test --workspace --locked
+
+  setup-integration:
+    name: MCP user setup (${{ matrix.shell }})
+    needs: test-windows
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    env:
+      XRAY_BINARY: ${{ github.workspace }}\ci-artifacts\xray.exe
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Windows test binary
+        uses: actions/download-artifact@v4
+        with:
+          name: xray-windows-test-binary
+          path: .\ci-artifacts
+      - name: Verify Windows test binary
         shell: pwsh
         run: |
-          & .\scripts\test-mcp-setup.ps1 -UserMcpOnly -XrayBinary .\target\debug\xray.exe
+          if (-not (Test-Path -LiteralPath $env:XRAY_BINARY -PathType Leaf)) {
+            throw "Windows test binary not found: $env:XRAY_BINARY"
+          }
+          & $env:XRAY_BINARY --version
+          exit $LASTEXITCODE
+      - name: Test user MCP setup (PowerShell 5.1)
+        if: matrix.shell == 'powershell'
+        shell: powershell
+        run: |
+          & .\scripts\test-mcp-setup.ps1 -UserMcpOnly -XrayBinary $env:XRAY_BINARY
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & .\scripts\test-setup-xray-repos.ps1 -XrayBinary .\target\debug\xray.exe
+          & .\scripts\test-setup-xray-repos.ps1 -XrayBinary $env:XRAY_BINARY
+          exit $LASTEXITCODE
+      - name: Test user MCP setup (PowerShell 7)
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: |
+          & .\scripts\test-mcp-setup.ps1 -UserMcpOnly -XrayBinary $env:XRAY_BINARY
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\scripts\test-setup-xray-repos.ps1 -XrayBinary $env:XRAY_BINARY
           exit $LASTEXITCODE
 
   feature-matrix:
