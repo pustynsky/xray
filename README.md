@@ -268,6 +268,8 @@ xray serve --dir C:\Projects --ext cs --watch --definitions
 
 For end-user setup (download binary, configure Copilot Chat / Roo Code / Cline) see the [Installation guide](docs/installation.md). For the tools API, JSON-RPC schemas, and protocol details see the [MCP server guide](docs/mcp-guide.md).
 
+During a dynamic workspace switch, an already-running content build follows the latest binding; `contentIndexAction: "build_in_progress"` does not require another request to schedule it. Poll `xray_info` until the content entry has no `status` field (an empty index is also ready). If a build fails for the current workspace, content tools return the JSON error `INDEX_BUILD_FAILED`, and `xray_info` reports content `status: "failed"` with a retry hint. Fix the underlying cause and call `xray_reindex`; polling alone does not retry a failed build. A roots change awaiting explicit reindexing is not a build failure.
+
 ### Response delivery
 
 Set `XRAY_TRANSPORT_MAX_BYTES` in the MCP server environment when a client needs a hard response-text limit. For example, `16384` caps the combined UTF-8 text blocks, including guidance and metrics, at 16 KiB. The value must be an integer of at least 512. It is read when finalizing each response; unset leaves the existing per-tool budgets in place. This is a text-content limit, not a limit on the surrounding JSON-RPC envelope. If useful content cannot fit, Xray returns a compact error instead of claiming a complete result.

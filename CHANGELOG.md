@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Resumed superseded content builds (#506).** A single content worker now follows the latest workspace after stale results or errors, including cold startup, without publishing outgoing or ABA-generation results or starting duplicate builders. Latest cache publications win. Current-workspace build failures are reported as `INDEX_BUILD_FAILED` and `xray_info` content status `failed`, with an explicit `xray_reindex` retry hint; polling alone does not retry failures. Primary reindex publication and rollback no longer overwrite newer roots bindings. Empty content indexes remain ready.
+
 - **Completed workspace switches consistently (#505).** Roots-driven reindexing (including symlink/junction roots) and definition reindexing now retarget watchers and periodic rescans, refresh companion indexes and Git state, and reject stale worker mutations and saves. Definition reconciliation accepts canonical aliases of the same root without accepting a different workspace. Pinned-workspace rules remain unchanged. After updating an affected server, restart it and run both `xray_reindex` and `xray_reindex_definitions` to rebuild contaminated caches.
 
 - **Fixed CLI grep without an extension filter (#499).** `xray grep` now reuses an existing content index before trying to build one, keeps its original extensions when rebuilding, and ignores legacy caches with empty extension configurations. Without a usable index or `--ext`, it reports an indexing hint instead of creating an empty cache. Blank extensions and empty comma-separated entries are rejected; valid zero-match and zero-file scopes remain supported.

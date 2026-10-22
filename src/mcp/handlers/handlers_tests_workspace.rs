@@ -18,7 +18,8 @@ use super::{
     rollback_workspace_state,
 };
 use super::handlers_test_utils::make_ctx_with_defs;
-use serde_json::json;
+use serde_json::{Value, json};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 #[test]
 fn test_workspace_completion_companion_publication_ownership() {
@@ -72,30 +73,476 @@ fn test_workspace_completion_companion_publication_ownership() {
 fn test_workspace_completion_cold_content_publication() {
     use std::sync::atomic::Ordering;
     for superseded in [false, true] {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("root");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("probe.rs"), "fn cold_marker() {}\n").unwrap();
-        let dir = crate::clean_path(&std::fs::canonicalize(root).unwrap().to_string_lossy());
-        let mut ctx = HandlerContext::default();
-        ctx.server_ext = "rs".into();
-        ctx.index_base = tmp.path().join("indexes");
-        ctx.workspace.write().unwrap().set_dir(dir.clone());
-        ctx.content_ready.store(false, Ordering::Release);
-        let (done, completion) = std::sync::mpsc::channel();
-        super::CONTENT_CROSS_BUILD_COMPLETED.lock().unwrap().insert(dir.clone(), done);
-        let publication_barrier = ctx.index.read().unwrap();
-        assert_eq!(super::cross_load_content_index(&ctx, &dir), Some("background_build"));
+        let mut fixture = ContentBuildFixture::new();
+        let dir = fixture.dirs[0].clone();
+        fixture.pause(&dir);
+        fixture.start(false);
+        fixture.reached(0);
         if superseded {
-            let mut ws = ctx.workspace.write().unwrap();
-            ws.generation += 2; // A -> B -> A, with the same final path.
+            fixture.ctx.workspace.write().unwrap().generation += 2;
+            std::fs::write(std::path::Path::new(&dir).join("probe.rs"), "fn fresh_marker() {}\n").unwrap();
+            fixture.pause(&dir);
+            fixture.release(0);
+            fixture.reached(1);
+            assert!(!fixture.ctx.content_ready.load(Ordering::Acquire));
+            assert!(!fixture.ctx.index.read().unwrap().index.contains_key("outgoing_marker"));
+            fixture.release(1);
+        } else {
+            fixture.release(0);
         }
-        drop(publication_barrier);
-        completion.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
-        assert!(!ctx.content_building.load(Ordering::Acquire));
-        assert_eq!(ctx.content_ready.load(Ordering::Acquire), !superseded);
-        assert_eq!(ctx.index.read().unwrap().index.contains_key("cold_marker"), !superseded);
+        fixture.finish();
+        assert!(fixture.ctx.content_ready.load(Ordering::Acquire));
+        assert!(fixture.ctx.index.read().unwrap().index.contains_key(if superseded { "fresh_marker" } else { "outgoing_marker" }));
     }
+}
+
+struct ContentBuildFixture {
+    _tmp: tempfile::TempDir,
+    ctx: HandlerContext,
+    dirs: Vec<String>,
+    probe: Arc<super::ContentBuildProbe>,
+    barriers: Vec<(String, std::sync::mpsc::Receiver<()>, Option<std::sync::mpsc::Sender<()>>)>,
+    completion: Option<std::sync::mpsc::Receiver<()>>,
+    terminal: Arc<AtomicBool>,
+}
+
+impl ContentBuildFixture {
+    fn new() -> Self {
+        std::fs::create_dir_all("target").unwrap();
+        let tmp = tempfile::tempdir_in(std::fs::canonicalize("target").unwrap()).unwrap();
+        let mut dirs = Vec::new();
+        for (name, token) in [("b", "outgoing_marker"), ("c", "current_marker"), ("d", "latest_marker")] {
+            let root = tmp.path().join(name);
+            std::fs::create_dir(&root).unwrap();
+            std::fs::write(root.join("probe.rs"), format!("fn {token}() {{}}\n")).unwrap();
+            dirs.push(crate::clean_path(&std::fs::canonicalize(root).unwrap().to_string_lossy()));
+        }
+        let ctx = HandlerContext {
+            server_ext: "rs".into(), index_base: tmp.path().join("indexes"),
+            ..Default::default()
+        };
+        ctx.workspace.write().unwrap().set_dir(dirs[0].clone());
+        ctx.content_ready.store(false, Ordering::Release);
+        ctx.file_index_dirty.store(false, Ordering::Release);
+        let probe = Arc::new(super::ContentBuildProbe::default());
+        super::CONTENT_BUILD_PROBES.lock().unwrap().insert(ctx.index_base.clone(), Arc::clone(&probe));
+        Self { _tmp: tmp, ctx, dirs, probe, barriers: Vec::new(), completion: None,
+            terminal: Arc::new(AtomicBool::new(false)) }
+    }
+
+    fn pause(&mut self, dir: &str) {
+        let (reached, paused) = std::sync::mpsc::channel();
+        let (resume, release) = std::sync::mpsc::channel();
+        super::CONTENT_CROSS_BUILD_BARRIERS.lock().unwrap().insert(
+            dir.to_string(), super::ContentCrossBuildBarrier { reached, resume: release },
+        );
+        self.barriers.push((dir.to_string(), paused, Some(resume)));
+    }
+
+    fn pause_preparation(&mut self, dir: &str) {
+        let (reached, paused) = std::sync::mpsc::channel();
+        let (resume, release) = std::sync::mpsc::channel();
+        super::CONTENT_PREPARATION_BARRIERS.lock().unwrap().insert(
+            dir.to_string(), super::ContentCrossBuildBarrier { reached, resume: release },
+        );
+        self.barriers.push((dir.to_string(), paused, Some(resume)));
+    }
+
+    fn reached(&self, stage: usize) {
+        self.barriers[stage].1.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    }
+
+    fn release(&mut self, stage: usize) {
+        if let Some(resume) = self.barriers[stage].2.take() { let _ = resume.send(()); }
+    }
+
+    fn start(&mut self, startup: bool) {
+        let (done, completion) = std::sync::mpsc::channel();
+        super::CONTENT_CROSS_BUILD_COMPLETED.lock().unwrap().insert(self.dirs[0].clone(), done);
+        self.completion = Some(completion);
+        if startup {
+            super::start_content_index_build(&self.ctx, 1, Arc::clone(&self.terminal));
+        } else {
+            assert_eq!(super::cross_load_content_index(&self.ctx, &self.dirs[0]), Some("background_build"));
+        }
+    }
+
+    fn switch(&self, dir: &str) -> Option<&'static str> {
+        {
+            let mut ws = self.ctx.workspace.write().unwrap();
+            ws.set_dir(dir.to_string());
+            ws.generation += 1;
+        }
+        super::cross_load_content_index(&self.ctx, dir)
+    }
+
+    fn cache(&self, dir: &str) {
+        let index = crate::build_content_index(&crate::ContentIndexArgs {
+            dir: dir.to_string(), ext: "rs".into(), threads: 1, ..Default::default()
+        }).unwrap();
+        crate::save_content_index(&index, &self.ctx.index_base).unwrap();
+    }
+
+    fn finish(&mut self) {
+        self.completion.as_ref().unwrap().recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        self.completion = None;
+        assert!(!self.ctx.content_building.load(Ordering::Acquire));
+        assert_eq!(self.probe.active.load(Ordering::Acquire), 0);
+        assert_eq!(self.probe.max_active.load(Ordering::Acquire), 1);
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.probe.calls.lock().unwrap().clone()
+    }
+}
+
+impl Drop for ContentBuildFixture {
+    fn drop(&mut self) {
+        for dir in &self.dirs {
+            super::CONTENT_CROSS_BUILD_BARRIERS.lock().unwrap().remove(dir);
+            super::CONTENT_PREPARATION_BARRIERS.lock().unwrap().remove(dir);
+        }
+        for (_, _, resume) in &mut self.barriers {
+            if let Some(resume) = resume.take() { let _ = resume.send(()); }
+        }
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.recv_timeout(std::time::Duration::from_secs(10));
+        }
+        for dir in &self.dirs {
+            super::CONTENT_CROSS_BUILD_BARRIERS.lock().unwrap().remove(dir);
+            super::CONTENT_CROSS_BUILD_COMPLETED.lock().unwrap().remove(dir);
+        }
+        super::CONTENT_BUILD_PROBES.lock().unwrap().remove(&self.ctx.index_base);
+    }
+}
+
+#[test]
+fn test_cross_load_content_index_superseded_build_follows_current_workspace() {
+    let mut fixture = ContentBuildFixture::new();
+    fixture.pause(&fixture.dirs[0].clone());
+    fixture.start(false);
+    fixture.reached(0);
+    assert_eq!(fixture.switch(&fixture.dirs[1]), Some("build_in_progress"));
+    for _ in 0..3 {
+        assert_eq!(super::cross_load_content_index(&fixture.ctx, &fixture.dirs[1]), Some("build_in_progress"));
+    }
+    assert!(!fixture.ctx.content_ready.load(Ordering::Acquire));
+    fixture.release(0);
+    fixture.finish();
+    assert!(fixture.ctx.content_ready.load(Ordering::Acquire), "latest workspace must eventually become ready");
+    let index = fixture.ctx.index.read().unwrap();
+    assert!(crate::path_eq(&index.root, &fixture.dirs[1]));
+    assert!(index.index.contains_key("current_marker"));
+    assert!(!index.index.contains_key("outgoing_marker"));
+    assert_eq!(fixture.calls(), fixture.dirs[..2]);
+}
+
+#[test]
+fn test_cross_load_content_index_preparation_remains_responsive_and_rechecks_binding() {
+    for (startup, publish_cache) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut fixture = ContentBuildFixture::new();
+        let b = fixture.dirs[0].clone();
+        let c = fixture.dirs[1].clone();
+        if startup {
+            fixture.ctx.watch_enabled = true;
+        } else {
+            fixture.ctx.index.write().unwrap().file_tokens_authoritative = true;
+        }
+        fixture.pause_preparation(&b);
+        fixture.start(startup);
+        fixture.reached(0);
+
+        let ctx = fixture.ctx.clone();
+        let (responded, response) = std::sync::mpsc::channel();
+        let request = std::thread::spawn(move || {
+            let info = super::dispatch_tool(&ctx, "xray_info", &json!({}));
+            let progress = super::dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["current_marker"]}));
+            let _ = responded.send((info, progress));
+        });
+        let (info, progress) = response.recv_timeout(std::time::Duration::from_secs(2))
+            .expect("real dispatch must respond while successful result preparation is paused");
+        request.join().unwrap();
+        let info: Value = serde_json::from_str(&info.content[0].text).unwrap();
+        assert_eq!(info["indexes"][0]["status"], "building");
+        assert!(progress.content[0].text.contains("building"));
+        assert!(!fixture.ctx.content_ready.load(Ordering::Acquire));
+        assert!(fixture.ctx.content_building.load(Ordering::Acquire));
+        assert!(!fixture.terminal.load(Ordering::Acquire));
+        assert!(!fixture.ctx.file_index_dirty.load(Ordering::Acquire));
+        let epoch = fixture.ctx.index_epoch.load(Ordering::Acquire);
+
+        if publish_cache { fixture.cache(&c); }
+        assert_eq!(fixture.switch(&c), Some(if publish_cache { "loaded_cache" } else { "build_in_progress" }));
+        assert_eq!(fixture.ctx.content_ready.load(Ordering::Acquire), publish_cache);
+        assert!(fixture.ctx.content_building.load(Ordering::Acquire));
+        assert_eq!(fixture.ctx.file_index_dirty.load(Ordering::Acquire), publish_cache);
+        fixture.release(0);
+        fixture.finish();
+
+        assert!(fixture.ctx.content_ready.load(Ordering::Acquire));
+        assert_eq!(fixture.terminal.load(Ordering::Acquire), startup);
+        assert!(fixture.ctx.content_build_failure.read().unwrap().is_none());
+        assert!(fixture.ctx.file_index_dirty.load(Ordering::Acquire));
+        assert_eq!(fixture.ctx.index_epoch.load(Ordering::Acquire), epoch + 1, "only the latest binding may publish");
+        let index = fixture.ctx.index.read().unwrap();
+        assert!(crate::path_eq(&index.root, &c));
+        assert!(index.index.contains_key("current_marker"));
+        assert!(!index.index.contains_key("outgoing_marker"));
+        assert!(!index.path_to_id.as_ref().unwrap().is_empty());
+        assert!(index.file_tokens_authoritative);
+        drop(index);
+        assert_eq!(fixture.calls(), if publish_cache { vec![b] } else { vec![b, c] });
+    }
+}
+
+#[test]
+fn test_cross_load_content_index_multiple_supersessions_and_startup_owner() {
+    for (startup, aba) in [(false, false), (false, true), (true, false)] {
+        let mut fixture = ContentBuildFixture::new();
+        let b = fixture.dirs[0].clone();
+        let c = fixture.dirs[1].clone();
+        let last = fixture.dirs[if aba { 0 } else { 2 }].clone();
+        fixture.pause(&b);
+        fixture.pause(&c);
+        fixture.start(startup);
+        fixture.reached(0);
+        assert_eq!(fixture.switch(&c), Some("build_in_progress"));
+        fixture.release(0);
+        fixture.reached(1);
+        assert!(!fixture.ctx.content_ready.load(Ordering::Acquire));
+        assert!(fixture.ctx.content_building.load(Ordering::Acquire));
+        std::fs::write(std::path::Path::new(&last).join("probe.rs"), "fn final_marker() {}\n").unwrap();
+        assert_eq!(fixture.switch(&last), Some("build_in_progress"));
+        fixture.release(1);
+        fixture.finish();
+        assert_eq!(fixture.calls(), vec![b, c, last.clone()]);
+        assert!(fixture.ctx.content_ready.load(Ordering::Acquire));
+        let index = fixture.ctx.index.read().unwrap();
+        assert!(crate::path_eq(&index.root, &last));
+        assert!(index.index.contains_key("final_marker"));
+        if startup { assert!(fixture.terminal.load(Ordering::Acquire)); }
+    }
+}
+
+#[test]
+fn test_cross_load_content_index_latest_cache_wins_or_appears_before_followup() {
+    for publish_cache in [true, false] {
+        let mut fixture = ContentBuildFixture::new();
+        let b = fixture.dirs[0].clone();
+        let c = fixture.dirs[1].clone();
+        fixture.pause(&b);
+        fixture.start(false);
+        fixture.reached(0);
+        if publish_cache {
+            fixture.cache(&c);
+            assert_eq!(fixture.switch(&c), Some("loaded_cache"));
+        } else {
+            assert_eq!(fixture.switch(&c), Some("build_in_progress"));
+            fixture.cache(&c);
+        }
+        std::fs::write(std::path::Path::new(&c).join("probe.rs"), "fn must_not_rebuild() {}\n").unwrap();
+        fixture.release(0);
+        fixture.finish();
+        assert_eq!(fixture.calls(), vec![b]);
+        assert!(fixture.ctx.content_ready.load(Ordering::Acquire));
+        assert!(fixture.ctx.index.read().unwrap().index.contains_key("current_marker"));
+        assert!(!fixture.ctx.index.read().unwrap().index.contains_key("must_not_rebuild"));
+    }
+}
+
+#[test]
+fn test_cross_load_content_index_stale_failure_terminal_failure_and_manual_recovery() {
+    for superseded in [true, false] {
+        let mut fixture = ContentBuildFixture::new();
+        let b = fixture.dirs[0].clone();
+        std::fs::remove_dir_all(&b).unwrap();
+        fixture.pause(&b);
+        fixture.start(false);
+        fixture.reached(0);
+        if superseded { assert_eq!(fixture.switch(&fixture.dirs[1]), Some("build_in_progress")); }
+        fixture.release(0);
+        fixture.finish();
+        if superseded {
+            assert!(fixture.ctx.content_ready.load(Ordering::Acquire));
+            assert!(super::current_content_build_failure(&fixture.ctx).is_none());
+        } else {
+            assert!(!fixture.ctx.content_ready.load(Ordering::Acquire));
+            let error = super::build_index_not_ready_response(&fixture.ctx, "content");
+            let body: Value = serde_json::from_str(&error.content[0].text).unwrap();
+            assert_eq!(body["error"], "INDEX_BUILD_FAILED");
+            assert!(body["hint"].as_str().unwrap().contains("xray_reindex"));
+            let info = super::handle_xray_info(&fixture.ctx, &json!({}));
+            let body: Value = serde_json::from_str(&info.content[0].text).unwrap();
+            assert_eq!(body["indexes"][0]["status"], "failed");
+            {
+                let mut ws = fixture.ctx.workspace.write().unwrap();
+                ws.generation += 1;
+                ws.status = WorkspaceStatus::Reindexing;
+            }
+            assert!(super::current_content_build_failure(&fixture.ctx).is_none());
+            let awaiting = super::handle_xray_info(&fixture.ctx, &json!({}));
+            let body: Value = serde_json::from_str(&awaiting.content[0].text).unwrap();
+            assert_eq!(body["indexes"][0]["status"], "building");
+            std::fs::create_dir(&b).unwrap();
+            std::fs::write(std::path::Path::new(&b).join("probe.rs"), "fn recovered_marker() {}\n").unwrap();
+            let result = super::handle_xray_reindex(&fixture.ctx, &json!({}));
+            assert!(!result.is_error, "{}", result.content[0].text);
+            assert!(fixture.ctx.content_ready.load(Ordering::Acquire));
+            assert!(super::current_content_build_failure(&fixture.ctx).is_none());
+            assert!(!fixture.ctx.content_building.load(Ordering::Acquire));
+            // A roots-only change is awaiting explicit reindexing, not a failed build.
+            fixture.ctx.workspace.write().unwrap().generation += 1;
+            fixture.ctx.content_ready.store(false, Ordering::Release);
+            assert!(super::current_content_build_failure(&fixture.ctx).is_none());
+        }
+    }
+}
+
+#[test]
+fn test_cross_load_content_index_empty_current_and_watch_save_failure() {
+    for empty in [true, false] {
+        let mut fixture = ContentBuildFixture::new();
+        let b = fixture.dirs[0].clone();
+        let c = fixture.dirs[1].clone();
+        if empty {
+            std::fs::remove_file(std::path::Path::new(&c).join("probe.rs")).unwrap();
+        } else {
+            fixture.ctx.index.write().unwrap().path_to_id = Some(Default::default());
+            std::fs::write(&fixture.ctx.index_base, b"not a directory").unwrap();
+        }
+
+        fixture.pause(&b);
+        fixture.start(false);
+        fixture.reached(0);
+        assert_eq!(fixture.switch(&c), Some("build_in_progress"));
+        fixture.release(0);
+        fixture.finish();
+        assert!(fixture.ctx.content_ready.load(Ordering::Acquire));
+        let index = fixture.ctx.index.read().unwrap();
+        assert!(crate::path_eq(&index.root, &c));
+        assert!(fixture.ctx.file_index_dirty.load(Ordering::Acquire));
+        assert!(fixture.ctx.index_epoch.load(Ordering::Acquire) > 1);
+        if empty {
+            assert_eq!(index.live_file_count(), 0);
+            drop(index);
+            let info = super::handle_xray_info(&fixture.ctx, &json!({}));
+            let body: Value = serde_json::from_str(&info.content[0].text).unwrap();
+            assert_eq!(body["indexes"][0]["files"], 0);
+            assert!(body["indexes"][0].get("status").is_none());
+        } else {
+            assert!(index.index.contains_key("current_marker"));
+            assert!(!index.path_to_id.as_ref().unwrap().is_empty());
+            assert!(index.file_tokens_authoritative);
+        }
+    }
+}
+
+struct ReleaseContentTestBarrier(Option<std::sync::mpsc::Sender<()>>);
+
+impl Drop for ReleaseContentTestBarrier {
+    fn drop(&mut self) {
+        if let Some(resume) = self.0.take() { let _ = resume.send(()); }
+    }
+}
+
+#[test]
+fn test_primary_reindex_supersession_fences_publication_status_and_rollback() {
+    for (definitions, fail, aba) in [
+        (false, false, false), (false, true, false), (true, false, false),
+        (false, false, true), (true, false, true),
+    ] {
+        let mut fixture = ContentBuildFixture::new();
+        fixture.ctx.def_index = make_ctx_with_defs().def_index;
+        fixture.ctx.def_extensions = vec!["rs".into()];
+        let b = fixture.dirs[0].clone();
+        let c = fixture.dirs[1].clone();
+        let epoch = fixture.ctx.index_epoch.load(Ordering::Acquire);
+        let watch_generation = fixture.ctx.watcher_generation.load(Ordering::Acquire);
+        let (reached, paused) = std::sync::mpsc::channel();
+        let (resume, release) = std::sync::mpsc::channel();
+        super::PRIMARY_REINDEX_BARRIERS.lock().unwrap().insert(
+            b.clone(), super::ContentCrossBuildBarrier { reached, resume: release },
+        );
+        let result = std::thread::scope(|threads| {
+            let release_on_drop = ReleaseContentTestBarrier(Some(resume));
+            let worker = threads.spawn(|| {
+                if definitions { super::handle_xray_reindex_definitions(&fixture.ctx, &json!({})) }
+                else { super::handle_xray_reindex(&fixture.ctx, &json!({})) }
+            });
+            paused.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            {
+                let mut ws = fixture.ctx.workspace.write().unwrap();
+                ws.set_dir(c.clone());
+                ws.generation += 1;
+                if aba {
+                    ws.set_dir(b.clone());
+                    ws.generation += 1;
+                }
+                ws.mode = WorkspaceBindingMode::ClientRoots;
+                ws.status = WorkspaceStatus::Reindexing;
+                fixture.ctx.content_ready.store(false, Ordering::Release);
+                fixture.ctx.def_ready.store(false, Ordering::Release);
+            }
+            if fail { std::fs::remove_dir_all(&b).unwrap(); }
+            drop(release_on_drop);
+            worker.join().unwrap()
+        });
+        assert!(result.is_error);
+        let body: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(body["error"], "WORKSPACE_SUPERSEDED");
+        let ws = fixture.ctx.workspace.read().unwrap();
+        assert!(crate::path_eq(&ws.dir, if aba { &b } else { &c }));
+        assert_eq!(ws.status, WorkspaceStatus::Reindexing);
+        assert_eq!(ws.mode, WorkspaceBindingMode::ClientRoots);
+        drop(ws);
+        assert!(!fixture.ctx.content_ready.load(Ordering::Acquire));
+        assert!(!fixture.ctx.def_ready.load(Ordering::Acquire));
+        assert!(!fixture.ctx.content_building.load(Ordering::Acquire));
+        assert!(!fixture.ctx.def_building.load(Ordering::Acquire));
+        assert_eq!(fixture.ctx.index_epoch.load(Ordering::Acquire), epoch);
+        assert_eq!(fixture.ctx.watcher_generation.load(Ordering::Acquire), watch_generation);
+        assert!(!crate::path_eq(&fixture.ctx.index.read().unwrap().root, &b));
+        assert!(!crate::path_eq(&fixture.ctx.def_index.as_ref().unwrap().read().unwrap().root, &b));
+        assert!(super::current_content_build_failure(&fixture.ctx).is_none());
+    }
+}
+
+#[test]
+fn test_primary_content_owner_hands_off_after_new_definition_commit() {
+    let mut fixture = ContentBuildFixture::new();
+    fixture.ctx.def_index = make_ctx_with_defs().def_index;
+    fixture.ctx.def_extensions = vec!["rs".into()];
+    let b = fixture.dirs[0].clone();
+    let c = fixture.dirs[1].clone();
+    let (reached, paused) = std::sync::mpsc::channel();
+    let (resume, release) = std::sync::mpsc::channel();
+    super::PRIMARY_REINDEX_BARRIERS.lock().unwrap().insert(
+        b, super::ContentCrossBuildBarrier { reached, resume: release },
+    );
+    let (done, completion) = std::sync::mpsc::channel();
+    super::CONTENT_CROSS_BUILD_COMPLETED.lock().unwrap().insert(c.clone(), done);
+    fixture.completion = Some(completion);
+    std::thread::scope(|threads| {
+        let release_on_drop = ReleaseContentTestBarrier(Some(resume));
+        let worker = threads.spawn(|| super::handle_xray_reindex(&fixture.ctx, &json!({})));
+        paused.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        {
+            let mut ws = fixture.ctx.workspace.write().unwrap();
+            ws.set_dir(c.clone());
+            ws.generation += 1;
+            ws.status = WorkspaceStatus::Reindexing;
+        }
+        let newer = super::handle_xray_reindex_definitions(&fixture.ctx, &json!({}));
+        assert!(!newer.is_error, "{}", newer.content[0].text);
+        let body: Value = serde_json::from_str(&newer.content[0].text).unwrap();
+        assert_eq!(body["contentIndexAction"], "build_in_progress");
+        drop(release_on_drop);
+        assert!(worker.join().unwrap().is_error);
+    });
+    fixture.finish();
+    assert!(fixture.ctx.content_ready.load(Ordering::Acquire));
+    assert!(fixture.ctx.index.read().unwrap().index.contains_key("current_marker"));
+    assert_eq!(fixture.calls(), vec![c]);
 }
 
 #[test]
@@ -496,7 +943,7 @@ fn test_rollback_workspace_state_restores_all_fields() {
     }
 
     // Roll back.
-    rollback_workspace_state(&ctx, &original_dir, original_mode, WorkspaceStatus::Resolved, original_generation);
+    rollback_workspace_state(&ctx, ("/bad/half_built", 999), &original_dir, original_mode, WorkspaceStatus::Resolved, original_generation);
 
     let ws = ctx.workspace.read().unwrap();
     assert_eq!(ws.dir, original_dir,

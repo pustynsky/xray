@@ -966,6 +966,8 @@ pub struct HandlerContext {
     /// Used to prevent concurrent builds. Different from `content_ready` which means
     /// "index is available for queries".
     pub content_building: Arc<AtomicBool>,
+    /// Explicit failure of a particular binding; roots awaiting reindex are not failures.
+    pub content_build_failure: Arc<RwLock<Option<ContentBuildFailure>>>,
     /// Whether a definition index build is currently in progress.
     /// Used to prevent concurrent builds. Different from `def_ready`.
     pub def_building: Arc<AtomicBool>,
@@ -1129,6 +1131,7 @@ impl Default for HandlerContext {
             file_index: Arc::new(RwLock::new(None)),
             file_index_dirty: Arc::new(AtomicBool::new(true)),
             content_building: Arc::new(AtomicBool::new(false)),
+            content_build_failure: Arc::new(RwLock::new(None)),
             def_building: Arc::new(AtomicBool::new(false)),
             index_epoch: Arc::new(AtomicU64::new(1)),
             watcher_generation: Arc::new(AtomicU64::new(0)),
@@ -1187,15 +1190,20 @@ fn build_index_not_ready_response(ctx: &HandlerContext, phase: &'static str) -> 
     } else {
         "Definition"
     };
+    let failure = if phase == "content" { current_content_build_failure(ctx) } else { None };
     let body = serde_json::json!({
-        "error": "INDEX_BUILDING",
+        "error": if failure.is_some() { "INDEX_BUILD_FAILED" } else { "INDEX_BUILDING" },
         "phase": phase,
-        "message": format!(
+        "message": failure.clone().unwrap_or_else(|| format!(
             "{} index is being built in the background.",
             phase_capitalized
-        ),
+        )),
         "filesIndexedSoFar": files_so_far,
-        "hint": "Poll xray_info — wait until the matching indexes[] entry has no 'status' field. An entry with 'status: \"building\"' means that index is not ready yet.",
+        "hint": if failure.is_some() {
+            "Retry xray_reindex for the current workspace. Polling xray_info does not retry a failed build."
+        } else {
+            "Poll xray_info — wait until the matching indexes[] entry has no 'status' field. An entry with 'status: \"building\"' means that index is not ready yet."
+        },
     });
     ToolCallResult::error(utils::json_to_string(&body))
 }
@@ -1503,7 +1511,7 @@ fn handle_xray_info(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     if ctx.content_ready.load(Ordering::Acquire) {
         if let Ok(idx) = ctx.index.read() {
             let live_files = idx.live_file_count();
-            if live_files > 0 {
+            {
                 // Get disk file size without loading
                 let exts_str = idx.extensions.join(",");
                 let disk_path = crate::index::content_index_path_for(&idx.root, &exts_str, &ctx.index_base);
@@ -1537,10 +1545,16 @@ fn handle_xray_info(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             memory_estimate["contentIndex"] = crate::index::estimate_content_index_memory(&idx);
         }
     } else {
-        indexes.push(json!({
+        let failure = current_content_build_failure(ctx);
+        let mut entry = json!({
             "type": "content",
-            "status": "building",
-        }));
+            "status": if failure.is_some() { "failed" } else { "building" },
+        });
+        if let Some(error) = failure {
+            entry["error"] = json!(error);
+            entry["hint"] = json!("Retry xray_reindex for the current workspace. Polling does not retry failed builds.");
+        }
+        indexes.push(entry);
     }
 
     // ── Definition index (in-memory) ──
@@ -2110,8 +2124,8 @@ struct WorkspaceSwitchPanicGuard<'a> {
     old_mode: WorkspaceBindingMode,
     old_status: WorkspaceStatus,
     old_generation: u64,
-    workspace_changed: bool,
     dismissed: bool,
+    expected: (String, u64),
 }
 
 impl<'a> WorkspaceSwitchPanicGuard<'a> {
@@ -2121,9 +2135,11 @@ impl<'a> WorkspaceSwitchPanicGuard<'a> {
         old_mode: WorkspaceBindingMode,
         old_status: WorkspaceStatus,
         old_generation: u64,
-        workspace_changed: bool,
+        _workspace_changed: bool,
     ) -> Self {
-        Self { ctx, previous_dir, old_mode, old_status, old_generation, workspace_changed, dismissed: false }
+        let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+        Self { ctx, previous_dir, old_mode, old_status, old_generation, dismissed: false,
+            expected: (ws.dir.clone(), ws.generation) }
     }
 
     /// Disarm the guard once the new index has been published and the
@@ -2134,6 +2150,13 @@ impl<'a> WorkspaceSwitchPanicGuard<'a> {
     fn dismiss(&mut self) {
         self.dismissed = true;
     }
+
+    fn rollback(&self) {
+        rollback_workspace_state(
+            self.ctx, (&self.expected.0, self.expected.1), &self.previous_dir,
+            self.old_mode, self.old_status, self.old_generation,
+        );
+    }
 }
 
 impl Drop for WorkspaceSwitchPanicGuard<'_> {
@@ -2141,18 +2164,7 @@ impl Drop for WorkspaceSwitchPanicGuard<'_> {
         if self.dismissed || !std::thread::panicking() {
             return;
         }
-        if self.workspace_changed {
-            rollback_workspace_state(
-                self.ctx,
-                &self.previous_dir,
-                self.old_mode,
-                self.old_status,
-                self.old_generation,
-            );
-        } else {
-            let mut ws = self.ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-            ws.status = self.old_status;
-        }
+        self.rollback();
     }
 }
 
@@ -2168,20 +2180,34 @@ fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     // upstream by `dispatch_request_with_panic_guard`. Without the guard a
     // handler panic would leave `content_building=true` forever and block
     // every future reindex until process restart.
-    let _guard = BuildingFlagGuard::new(&ctx.content_building);
-    handle_xray_reindex_inner(ctx, args)
+    let guard = BuildingFlagGuard::new(&ctx.content_building);
+    let result = handle_xray_reindex_inner(ctx, args);
+    let superseded = result.is_error && result.content.first()
+        .and_then(|content| serde_json::from_str::<Value>(&content.text).ok())
+        .is_some_and(|body| body["error"] == "WORKSPACE_SUPERSEDED");
+    let ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+    let follow = superseded && ws.status == WorkspaceStatus::Resolved && !ctx.content_ready.load(Ordering::Acquire);
+    let latest = (ws.dir.clone(), ws.generation);
+    drop(guard);
+    drop(ws);
+    if follow {
+        cross_load_content_index_with_options(ctx, &latest.0, 0, None, Some(latest.1));
+    }
+    result
 }
 
 /// Rolls back workspace state to pre-switch values after a failed reindex.
 /// Call this in every error branch when `workspace_changed` is true.
 fn rollback_workspace_state(
     ctx: &HandlerContext,
+    expected: (&str, u64),
     previous_dir: &str,
     old_mode: WorkspaceBindingMode,
     old_status: WorkspaceStatus,
     old_generation: u64,
 ) {
     let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+    if ws.generation != expected.1 || !code_xray::path_eq(&ws.dir, expected.0) { return; }
     ws.set_dir(previous_dir.to_string());
     ws.mode = old_mode;
     ws.generation = old_generation;
@@ -2276,9 +2302,14 @@ pub(crate) fn effective_definition_build_extensions(ctx: &HandlerContext) -> Vec
 
 /// Cross-load definition index on workspace switch.
 /// Returns "loaded_cache", "background_build", "build_in_progress", or None.
+#[cfg(test)]
 fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'static str> {
+    let generation = ctx.workspace.read().unwrap_or_else(|e| e.into_inner()).generation;
+    cross_load_definition_index_at_generation(ctx, dir, generation)
+}
+
+fn cross_load_definition_index_at_generation(ctx: &HandlerContext, dir: &str, expected_generation: u64) -> Option<&'static str> {
     let def_arc = ctx.def_index.as_ref()?;
-    let expected_generation = ctx.workspace.read().unwrap_or_else(|e| e.into_inner()).generation;
     let def_ext_vec = effective_definition_build_extensions(ctx);
     let def_ext_str = def_ext_vec.join(",");
 
@@ -2406,6 +2437,7 @@ fn publish_companion_content_index(
     *current = index;
     utils::record_content_index_publish(&ctx.index_epoch);
     ctx.content_ready.store(true, Ordering::Release);
+    *ctx.content_build_failure.write().unwrap_or_else(|e| e.into_inner()) = None;
     ctx.file_index_dirty.store(true, Ordering::Release);
     true
 }
@@ -2415,27 +2447,116 @@ static CONTENT_CROSS_BUILD_COMPLETED: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<()>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
+#[cfg(test)]
+struct ContentCrossBuildBarrier {
+    reached: std::sync::mpsc::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+static CONTENT_CROSS_BUILD_BARRIERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, ContentCrossBuildBarrier>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+static CONTENT_PREPARATION_BARRIERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, ContentCrossBuildBarrier>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
 fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static str> {
-    let expected_generation = ctx.workspace.read().unwrap_or_else(|e| e.into_inner()).generation;
-    let content_ext = ctx.server_ext.clone();
-    let content_loaded = load_content_index(dir, &content_ext, &ctx.index_base).ok()
-        .or_else(|| {
-            let ext_vec: Vec<String> = content_ext.split(',').map(|s| s.to_string()).collect();
-            find_content_index_for_dir(dir, &ctx.index_base, &ext_vec)
-        });
+    cross_load_content_index_with_options(ctx, dir, 0, None, None)
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ContentBuildProbe {
+    calls: std::sync::Mutex<Vec<String>>,
+    active: std::sync::atomic::AtomicUsize,
+    max_active: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+static CONTENT_BUILD_PROBES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Arc<ContentBuildProbe>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+struct ContentBuildInvocation(Option<Arc<ContentBuildProbe>>);
+
+#[cfg(test)]
+impl ContentBuildInvocation {
+    fn start(ctx: &HandlerContext, dir: &str) -> Self {
+        let probe = CONTENT_BUILD_PROBES.lock().unwrap().get(&ctx.index_base).cloned();
+        if let Some(probe) = &probe {
+            probe.calls.lock().unwrap().push(dir.to_string());
+            let active = probe.active.fetch_add(1, Ordering::AcqRel) + 1;
+            probe.max_active.fetch_max(active, Ordering::AcqRel);
+        }
+        Self(probe)
+    }
+}
+
+#[cfg(test)]
+impl Drop for ContentBuildInvocation {
+    fn drop(&mut self) {
+        if let Some(probe) = &self.0 { probe.active.fetch_sub(1, Ordering::AcqRel); }
+    }
+}
+
+pub(crate) fn start_content_index_build(
+    ctx: &HandlerContext,
+    threads: usize,
+    terminal: Arc<AtomicBool>,
+) {
+    crate::index::log_phase("contentBuildQueued", &[("cacheHitContent", "false".into())]);
+    cross_load_content_index_with_options(ctx, &ctx.server_dir(), threads, Some(terminal), None);
+}
+
+fn current_content_build_failure(ctx: &HandlerContext) -> Option<String> {
+    let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+    ctx.content_build_failure.read().unwrap_or_else(|e| e.into_inner()).as_ref()
+        .filter(|failure| failure.generation == ws.generation && code_xray::path_eq(&failure.dir, &ws.dir))
+        .map(|failure| failure.error.clone())
+}
+
+pub struct ContentBuildFailure {
+    dir: String,
+    generation: u64,
+    error: String,
+}
+
+fn cached_content_index(ctx: &HandlerContext, dir: &str) -> Option<ContentIndex> {
+    load_content_index(dir, &ctx.server_ext, &ctx.index_base).ok().or_else(|| {
+        let extensions: Vec<String> = ctx.server_ext.split(',').map(str::to_string).collect();
+        find_content_index_for_dir(dir, &ctx.index_base, &extensions)
+    })
+}
+
+fn cross_load_content_index_with_options(
+    ctx: &HandlerContext,
+    dir: &str,
+    threads: usize,
+    terminal: Option<Arc<AtomicBool>>,
+    generation: Option<u64>,
+) -> Option<&'static str> {
+    let expected_generation = generation.unwrap_or_else(|| ctx.workspace.read().unwrap_or_else(|e| e.into_inner()).generation);
+    let content_loaded = cached_content_index(ctx, dir);
 
     if let Some(idx) = content_loaded {
         let had_watch = ctx.index.read()
-            .map(|i| i.file_tokens_authoritative)
-            .unwrap_or(false);
+            .map(|i| i.file_tokens_authoritative || i.path_to_id.is_some())
+            .unwrap_or(false) || ctx.watch_enabled;
         let idx = if had_watch {
             crate::mcp::watcher::build_watch_index_from(idx)
         } else {
             idx
         };
         if !publish_companion_content_index(ctx, dir, expected_generation, idx, false) {
+            if let Some(terminal) = terminal { terminal.store(true, Ordering::Release); }
             return Some("superseded");
         }
+        if let Some(terminal) = terminal { terminal.store(true, Ordering::Release); }
         info!(dir = %dir, "Content index cross-loaded from cache on workspace switch");
         // Warm `file_tokens` in background so the first user edit avoids the
         // ~2.6 s rebuild under the watcher write lock. Lazy guard remains as
@@ -2450,60 +2571,30 @@ fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static 
     }
 
     // No cache — start background build
-    {
-        let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
-        if ws.generation != expected_generation || !code_xray::path_eq(&ws.dir, dir) {
-            return Some("superseded");
-        }
-        ctx.content_ready.store(false, Ordering::Release);
+    let ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+    if ws.generation != expected_generation || !code_xray::path_eq(&ws.dir, dir) {
+        if let Some(terminal) = terminal { terminal.store(true, Ordering::Release); }
+        return Some("superseded");
     }
-    let had_watch = ctx.index.read()
-        .map(|i| i.file_tokens_authoritative)
-        .unwrap_or(false);
-    let bg_ctx = ctx.clone();
-    let bg_dir = dir.to_string();
-    let bg_ext = content_ext;
-    let bg_building = Arc::clone(&ctx.content_building);
-    let bg_respect_git_exclude = ctx.respect_git_exclude;
+    ctx.content_ready.store(false, Ordering::Release);
+    *ctx.content_build_failure.write().unwrap_or_else(|e| e.into_inner()) = None;
     if ctx.content_building.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
-        info!(dir = %dir, "Content index background build already running (workspace switch)");
+        info!(dir = %dir, "Content index background build will follow the current workspace");
         return Some("build_in_progress");
     }
+    drop(ws);
+    let bg_ctx = ctx.clone();
+    let bg_dir = dir.to_string();
     std::thread::spawn(move || {
-        let mut build_succeeded = false;
-        info!(dir = %bg_dir, "Building content index in background (workspace switch)");
-        match build_content_index(&ContentIndexArgs {
-            dir: bg_dir.clone(), ext: bg_ext.clone(),
-            max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: bg_respect_git_exclude,
-            threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
-        }) {
-            Ok(idx) => {
-                let idx = if had_watch {
-                    crate::mcp::watcher::build_watch_index_from(idx)
-                } else {
-                    idx
-                };
-                if !publish_companion_content_index(&bg_ctx, &bg_dir, expected_generation, idx, true) {
-                    warn!(
-                        dir = %bg_dir,
-                        generation = expected_generation,
-                        "Discarding stale content index background build after workspace switch"
-                    );
-                } else {
-                    if had_watch {
-                        crate::mcp::watcher::schedule_rebuild_file_tokens(Arc::clone(&bg_ctx.index));
-                    }
-                    build_succeeded = true;
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to build content index");
-            }
+        let mut owner = ContentBuildOwner { ctx: &bg_ctx, active: true, terminal,
+            binding: (bg_dir.clone(), expected_generation) };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_content_build(&mut owner, bg_dir.clone(), expected_generation, threads);
+        }));
+        if result.is_err() {
+            warn!("Content index background build panicked");
         }
-        bg_building.store(false, Ordering::Release);
-        if build_succeeded {
-            crate::index::log_memory("reindex_def: content cross-build complete");
-        }
+        drop(owner);
         #[cfg(test)]
         if let Some(done) = CONTENT_CROSS_BUILD_COMPLETED.lock().unwrap().remove(&bg_dir) {
             let _ = done.send(());
@@ -2513,40 +2604,232 @@ fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static 
     Some("background_build")
 }
 
+struct ContentBuildOwner<'a> {
+    ctx: &'a HandlerContext,
+    active: bool,
+    terminal: Option<Arc<AtomicBool>>,
+    binding: (String, u64),
+}
+
+impl ContentBuildOwner<'_> {
+    // Caller holds the workspace write guard: releasing cannot steal a successor's gate.
+    fn finish(&mut self) {
+        self.ctx.content_building.store(false, Ordering::Release);
+        self.active = false;
+        if let Some(terminal) = &self.terminal { terminal.store(true, Ordering::Release); }
+    }
+}
+
+impl Drop for ContentBuildOwner<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let ws = self.ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+            if !self.ctx.content_ready.load(Ordering::Acquire)
+                && ws.generation == self.binding.1 && code_xray::path_eq(&ws.dir, &self.binding.0) {
+                *self.ctx.content_build_failure.write().unwrap_or_else(|e| e.into_inner()) =
+                    Some(ContentBuildFailure { dir: ws.dir.clone(), generation: ws.generation,
+                        error: "Content index background build panicked".into() });
+            }
+            self.finish();
+        }
+    }
+}
+
+fn run_content_build(owner: &mut ContentBuildOwner<'_>, mut dir: String, mut generation: u64, threads: usize) {
+    let ctx = owner.ctx;
+    loop {
+        owner.binding = (dir.clone(), generation);
+        let started = Instant::now();
+        let cached = cached_content_index(ctx, &dir);
+        let cache_hit = cached.is_some();
+        let result = match cached {
+            Some(index) => Ok(index),
+            None => {
+                #[cfg(test)]
+                let _invocation = ContentBuildInvocation::start(ctx, &dir);
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_content_index(&ContentIndexArgs {
+                dir: dir.clone(), ext: ctx.server_ext.clone(),
+                max_age_hours: 24, hidden: false, no_ignore: false,
+                respect_git_exclude: ctx.respect_git_exclude,
+                threads, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+                }))).unwrap_or_else(|_| Err(std::io::Error::other("Content index background build panicked").into()))
+            }
+        };
+        let build_elapsed = started.elapsed();
+        #[cfg(test)]
+        {
+            let barrier = CONTENT_CROSS_BUILD_BARRIERS.lock().unwrap().remove(&dir);
+            if let Some(barrier) = barrier {
+                let _ = barrier.reached.send(());
+                let _ = barrier.resume.recv_timeout(std::time::Duration::from_secs(10));
+            }
+        }
+        // LOCK ORDER: index -> workspace. Only snapshot/preflight under these guards.
+        let (had_watch, canonical_dir) = {
+            let current = ctx.index.read().unwrap_or_else(|e| e.into_inner());
+            let ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+            if ctx.content_ready.load(Ordering::Acquire)
+                && (code_xray::path_eq(&current.root, &ws.dir) || code_xray::path_eq(&current.root, &ws.canonical_dir)) {
+                owner.finish();
+                return;
+            }
+            if ws.generation != generation || !code_xray::path_eq(&ws.dir, &dir) {
+                dir = ws.dir.clone();
+                generation = ws.generation;
+                drop(ws);
+                drop(current);
+                continue;
+            }
+            (ctx.watch_enabled || current.file_tokens_authoritative || current.path_to_id.is_some(), ws.canonical_dir.clone())
+        };
+        let result = result.and_then(|index| {
+            if code_xray::path_eq(&index.root, &dir) || code_xray::path_eq(&index.root, &canonical_dir) {
+                Ok(index)
+            } else {
+                Err(std::io::Error::other("Built content index does not match the current workspace").into())
+            }
+        }).and_then(|mut index| {
+            #[cfg(test)]
+            {
+                let barrier = CONTENT_PREPARATION_BARRIERS.lock().unwrap().remove(&dir);
+                if let Some(barrier) = barrier {
+                    let _ = barrier.reached.send(());
+                    let _ = barrier.resume.recv_timeout(std::time::Duration::from_secs(10));
+                }
+            }
+            // Saving an owned result under its own root key does not publish shared state.
+            let save_started = Instant::now();
+            if !cache_hit {
+                match save_content_index(&index, &ctx.index_base) {
+                    Err(error) => warn!(%error, "Failed to save content index; keeping fresh in-memory index"),
+                    Ok(()) if owner.terminal.is_some() => {
+                        let root = index.root.clone();
+                        let extensions = index.extensions.join(",");
+                        let saved = crate::content_index_path_for(&root, &extensions, &ctx.index_base);
+                        crate::index::cleanup_stale_same_root_indexes(&ctx.index_base, &saved, &root, "word-search");
+                        drop(index);
+                        crate::index::force_mimalloc_collect();
+                        index = load_content_index(&root, &extensions, &ctx.index_base)
+                            .map_err(|error| std::io::Error::other(format!("Failed to reload saved content index: {error}")))?;
+                    }
+                    Ok(()) => {}
+                }
+            }
+            let save_elapsed = save_started.elapsed();
+            if had_watch { index = crate::mcp::watcher::build_watch_index_from(index); }
+            index.shrink_maps();
+            if code_xray::path_eq(&index.root, &dir) || code_xray::path_eq(&index.root, &canonical_dir) {
+                Ok((index, save_elapsed))
+            } else {
+                Err(std::io::Error::other("Prepared content index does not match the current workspace").into())
+            }
+        });
+        // LOCK ORDER: index -> workspace. Preparation may have been superseded.
+        let mut current = ctx.index.write().unwrap_or_else(|e| e.into_inner());
+        let ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+        // A cache publication for the latest binding wins over any outgoing work.
+        if ctx.content_ready.load(Ordering::Acquire)
+            && (code_xray::path_eq(&current.root, &ws.dir) || code_xray::path_eq(&current.root, &ws.canonical_dir)) {
+            owner.finish();
+            return;
+        }
+        if ws.generation != generation || !code_xray::path_eq(&ws.dir, &dir) {
+            dir = ws.dir.clone();
+            generation = ws.generation;
+            drop(ws);
+            drop(current);
+            continue;
+        }
+        match result {
+            Ok((index, save_elapsed)) => {
+                let file_count = index.files.len();
+                let token_count = index.index.len();
+                let previous = std::mem::replace(&mut *current, index);
+                utils::record_content_index_publish(&ctx.index_epoch);
+                *ctx.content_build_failure.write().unwrap_or_else(|e| e.into_inner()) = None;
+                ctx.content_ready.store(true, Ordering::Release);
+                ctx.file_index_dirty.store(true, Ordering::Release);
+                owner.finish();
+                drop(ws);
+                drop(current);
+                drop(previous);
+                if had_watch {
+                    crate::mcp::watcher::schedule_rebuild_file_tokens(Arc::clone(&ctx.index));
+                }
+                crate::index::log_phase("contentReady", &[
+                    ("cacheHitContent", cache_hit.to_string()),
+                    ("contentBuildMs", crate::index::format_duration_ms(build_elapsed)),
+                    ("contentSaveMs", crate::index::format_duration_ms(save_elapsed)),
+                    ("contentTotalBuildMs", crate::index::format_duration_ms(started.elapsed())),
+                    ("contentReadyAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
+                    ("contentFilesRead", file_count.to_string()),
+                    ("contentUniqueTokens", token_count.to_string()),
+                ]);
+                if owner.terminal.is_some() {
+                    warm_trigram_index(&ctx.index, &ctx.trigram_build_gate);
+                }
+                return;
+            }
+            Err(error) => {
+                warn!(%error, "Failed to build current content index");
+                *ctx.content_build_failure.write().unwrap_or_else(|e| e.into_inner()) =
+                    Some(ContentBuildFailure { dir, generation, error: error.to_string() });
+                crate::index::log_phase("contentBuildFailed", &[("error", error.to_string())]);
+                owner.finish();
+                return;
+            }
+        }
+    }
+}
+
 
 fn complete_workspace_reindex(
     ctx: &HandlerContext,
     dir: &str,
+    generation: u64,
     completion_needed: bool,
     content_primary: bool,
     filters_changed: bool,
 ) -> Option<&'static str> {
     let companion_action = if completion_needed {
         if content_primary {
-            cross_load_definition_index(ctx, dir)
+            cross_load_definition_index_at_generation(ctx, dir, generation)
         } else {
-            cross_load_content_index(ctx, dir)
+            cross_load_content_index_with_options(ctx, dir, 0, None, Some(generation))
         }
     } else {
         None
     };
     if completion_needed {
-        if let Ok(mut cache) = ctx.current_branch_cache.write() { cache.clear(); }
-        if let Ok(mut files) = ctx.file_index.write() { *files = None; }
-        ctx.file_index_dirty.store(true, Ordering::Release);
-        rebuild_git_cache_for_workspace(ctx, dir);
+        if let Ok(mut cache) = ctx.current_branch_cache.write() {
+            let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+            if ws.generation != generation || !code_xray::path_eq(&ws.dir, dir) { return Some("superseded"); }
+            cache.clear();
+        }
+        if let Ok(mut files) = ctx.file_index.write() {
+            let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+            if ws.generation != generation || !code_xray::path_eq(&ws.dir, dir) { return Some("superseded"); }
+            *files = None;
+            ctx.file_index_dirty.store(true, Ordering::Release);
+        }
+        rebuild_git_cache_for_workspace(ctx, dir, generation);
     }
     if ctx.watch_enabled && (completion_needed || filters_changed) {
-        restart_watcher_for_workspace(ctx, dir);
+        restart_watcher_for_workspace_at_generation(ctx, dir, generation);
     }
     companion_action
 }
 
 /// Restart file watcher for a new workspace directory.
+#[cfg(test)]
 fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
+    let generation = ctx.workspace.read().unwrap_or_else(|e| e.into_inner()).generation;
+    restart_watcher_for_workspace_at_generation(ctx, dir, generation);
+}
+
+fn restart_watcher_for_workspace_at_generation(ctx: &HandlerContext, dir: &str, generation: u64) {
     // Increment watcher generation — old watcher will detect the mismatch and exit.
     // This supports unlimited sequential workspace switches (generation counter, not boolean).
-    let new_gen = ctx.watcher_generation.fetch_add(1, Ordering::Release) + 1;
     // Start new watcher for new directory.
     let watch_dir = std::fs::canonicalize(dir)
         .unwrap_or_else(|_| std::path::PathBuf::from(dir));
@@ -2554,6 +2837,9 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
     let def_ext_vec = ctx.def_index.as_ref()
         .and_then(|idx| idx.read().ok().map(|idx| idx.extensions.clone()))
         .unwrap_or_else(|| ctx.def_extensions.clone());
+    let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+    if ws.generation != generation || !code_xray::path_eq(&ws.dir, dir) { return; }
+    let new_gen = ctx.watcher_generation.fetch_add(1, Ordering::Release) + 1;
     if let Err(e) = crate::mcp::watcher::start_watcher(
         Arc::clone(&ctx.index),
         ctx.def_index.as_ref().map(Arc::clone),
@@ -2606,11 +2892,11 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
 }
 
 /// Rebuild git history cache for a new workspace directory (background thread).
-fn rebuild_git_cache_for_workspace(ctx: &HandlerContext, dir: &str) {
+fn rebuild_git_cache_for_workspace(ctx: &HandlerContext, dir: &str, expected_generation: u64) {
     let generation = {
         let mut cache = ctx.git_cache.write().unwrap_or_else(|e| e.into_inner());
         let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
-        if !code_xray::path_eq(&ws.dir, dir) { return; }
+        if ws.generation != expected_generation || !code_xray::path_eq(&ws.dir, dir) { return; }
         *cache = None;
         ctx.git_cache_ready.store(false, Ordering::Release);
         ws.generation
@@ -2717,6 +3003,28 @@ pub(crate) fn publish_workspace_git_cache(
     }
 }
 
+fn superseded_reindex_response() -> ToolCallResult {
+    ToolCallResult::error(utils::json_to_string(&json!({
+        "error": "WORKSPACE_SUPERSEDED",
+        "message": "Workspace changed while reindexing; the outgoing result was not published.",
+        "hint": "Retry reindexing the current workspace if it still needs indexing.",
+    })))
+}
+
+#[cfg(test)]
+static PRIMARY_REINDEX_BARRIERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, ContentCrossBuildBarrier>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+fn pause_primary_reindex(dir: &str) {
+    let barrier = PRIMARY_REINDEX_BARRIERS.lock().unwrap().remove(dir);
+    if let Some(barrier) = barrier {
+        let _ = barrier.reached.send(());
+        let _ = barrier.resume.recv_timeout(std::time::Duration::from_secs(10));
+    }
+}
+
 fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let current_dir = ctx.server_dir();
     let dir = args.get("dir").and_then(|v| v.as_str())
@@ -2758,16 +3066,21 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
     };
     let completion_needed = workspace_changed || old_status == WorkspaceStatus::Reindexing;
 
-    // Update workspace binding if dir changed
-    if workspace_changed {
+    // Claim this binding only if no roots response has superseded the snapshot.
+    let expected_generation = {
         let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-        ws.set_dir(dir.clone());
-        ws.mode = WorkspaceBindingMode::ManualOverride;
-        ws.generation += 1;
-        ws.status = WorkspaceStatus::Reindexing;
-        info!(dir = %dir, previous = %previous_dir, generation = ws.generation, "Workspace switched via xray_reindex");
-
-    }
+        if ws.generation != old_generation || !code_xray::path_eq(&ws.dir, &previous_dir) {
+            return superseded_reindex_response();
+        }
+        if workspace_changed {
+            ws.set_dir(dir.clone());
+            ws.mode = WorkspaceBindingMode::ManualOverride;
+            ws.generation += 1;
+            ws.status = WorkspaceStatus::Reindexing;
+            info!(dir = %dir, previous = %previous_dir, generation = ws.generation, "Workspace switched via xray_reindex");
+        }
+        ws.generation
+    };
 
     // Panic-rollback safety: covers the window from here through the
     // `ws.status = Resolved` commit point below. Pairs with the dispatcher
@@ -2780,6 +3093,9 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
         old_generation,
         workspace_changed,
     );
+    switch_panic_guard.expected = (dir.clone(), expected_generation);
+    #[cfg(test)]
+    pause_primary_reindex(&dir);
 
     info!(dir = %dir, ext = %ext, "Rebuilding content index");
     let start = Instant::now();
@@ -2799,8 +3115,10 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
     ) {
         Ok(result) => result,
         Err(e) => {
-            if workspace_changed {
-                rollback_workspace_state(ctx, &previous_dir, old_mode, old_status, old_generation);
+            switch_panic_guard.rollback();
+            let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+            if ws.generation != old_generation || !code_xray::path_eq(&ws.dir, &previous_dir) {
+                return superseded_reindex_response();
             }
             return ToolCallResult::error(e);
         }
@@ -2823,8 +3141,12 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
     // Update in-memory cache
     match ctx.index.write() {
         Ok(mut idx) => {
-            *idx = new_index;
             let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+            if ws.generation != expected_generation || !code_xray::path_eq(&ws.dir, &dir) {
+                switch_panic_guard.dismiss();
+                return superseded_reindex_response();
+            }
+            *idx = new_index;
             if ctx.watch_enabled && (completion_needed || content_extensions_changed) {
                 ctx.watcher_generation.fetch_add(1, Ordering::AcqRel);
             }
@@ -2833,20 +3155,16 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
             }
             ws.status = WorkspaceStatus::Resolved;
             ctx.content_ready.store(true, Ordering::Release);
+            *ctx.content_build_failure.write().unwrap_or_else(|e| e.into_inner()) = None;
+            ctx.index_epoch.fetch_add(1, Ordering::AcqRel);
             switch_panic_guard.dismiss();
         }
         Err(e) => {
             // Rollback workspace state to avoid getting stuck in Reindexing
-            if workspace_changed {
-                rollback_workspace_state(ctx, &previous_dir, old_mode, old_status, old_generation);
-            } else {
-                let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-                ws.status = old_status;
-            }
+            switch_panic_guard.rollback();
             return ToolCallResult::error(format!("Failed to update in-memory index: {}", e));
         }
     }
-    ctx.index_epoch.fetch_add(1, Ordering::AcqRel);
 
     // Warm `file_tokens` in background so the first user edit avoids the
     // ~2.6 s rebuild under the watcher write lock. Lazy guard remains as
@@ -2861,7 +3179,7 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
 
     // Phase 2: Cross-load definition index on workspace switch
     let def_index_action = complete_workspace_reindex(
-        ctx, &dir, completion_needed, true, content_extensions_changed,
+        ctx, &dir, expected_generation, completion_needed, true, content_extensions_changed,
     );
 
     let elapsed = start.elapsed();
@@ -2886,9 +3204,12 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
 
     // Invalidate file-list index so xray_fast rebuilds it on next call
     if let Ok(mut fi) = ctx.file_index.write() {
-        *fi = None;
+        let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+        if ws.generation == expected_generation && code_xray::path_eq(&ws.dir, &dir) {
+            *fi = None;
+            ctx.file_index_dirty.store(true, Ordering::Relaxed);
+        }
     }
-    ctx.file_index_dirty.store(true, Ordering::Relaxed);
 
     ToolCallResult::success(utils::json_to_string(&output))
 }
@@ -2953,15 +3274,20 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
     };
     let completion_needed = workspace_changed || old_status == WorkspaceStatus::Reindexing;
 
-    // Update workspace binding if dir changed
-    if workspace_changed {
+    let expected_generation = {
         let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-        ws.set_dir(dir.clone());
-        ws.mode = WorkspaceBindingMode::ManualOverride;
-        ws.generation += 1;
-        ws.status = WorkspaceStatus::Reindexing;
-        info!(dir = %dir, previous = %previous_dir, generation = ws.generation, "Workspace switched via xray_reindex_definitions");
-    }
+        if ws.generation != old_generation || !code_xray::path_eq(&ws.dir, &previous_dir) {
+            return superseded_reindex_response();
+        }
+        if workspace_changed {
+            ws.set_dir(dir.clone());
+            ws.mode = WorkspaceBindingMode::ManualOverride;
+            ws.generation += 1;
+            ws.status = WorkspaceStatus::Reindexing;
+            info!(dir = %dir, previous = %previous_dir, generation = ws.generation, "Workspace switched via xray_reindex_definitions");
+        }
+        ws.generation
+    };
 
     // Panic-rollback safety: see `handle_xray_reindex_inner` for rationale.
     let mut switch_panic_guard = WorkspaceSwitchPanicGuard::new(
@@ -2972,6 +3298,9 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
         old_generation,
         workspace_changed,
     );
+    switch_panic_guard.expected = (dir.clone(), expected_generation);
+    #[cfg(test)]
+    pause_primary_reindex(&dir);
 
     info!(dir = %dir, ext = %ext, "Rebuilding definition index");
     let start = Instant::now();
@@ -3031,28 +3360,27 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
     // Update in-memory cache
     match def_index_arc.write() {
         Ok(mut idx) => {
-            crate::definitions::replace_live_definition_index(&mut idx, new_index);
             let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+            if ws.generation != expected_generation || !code_xray::path_eq(&ws.dir, &dir) {
+                switch_panic_guard.dismiss();
+                return superseded_reindex_response();
+            }
+            crate::definitions::replace_live_definition_index(&mut idx, new_index);
             if ctx.watch_enabled && (completion_needed || definition_extensions_changed) {
                 ctx.watcher_generation.fetch_add(1, Ordering::AcqRel);
             }
             if completion_needed { ctx.content_ready.store(false, Ordering::Release); }
             ws.status = WorkspaceStatus::Resolved;
             ctx.def_ready.store(true, Ordering::Release);
+            ctx.index_epoch.fetch_add(1, Ordering::AcqRel);
             switch_panic_guard.dismiss();
         }
         Err(e) => {
             // Rollback workspace state to avoid getting stuck in Reindexing
-            if workspace_changed {
-                rollback_workspace_state(ctx, &previous_dir, old_mode, old_status, old_generation);
-            } else {
-                let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-                ws.status = old_status;
-            }
+            switch_panic_guard.rollback();
             return ToolCallResult::error(format!("Failed to update in-memory definition index: {}", e));
         }
     }
-    ctx.index_epoch.fetch_add(1, Ordering::AcqRel);
 
     // Force mimalloc to return freed pages (old index) to OS
     crate::index::force_mimalloc_collect();
@@ -3060,7 +3388,7 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
 
     // ─── Cross-load content index on workspace switch ───
     let content_index_action = complete_workspace_reindex(
-        ctx, &dir, completion_needed, false, definition_extensions_changed,
+        ctx, &dir, expected_generation, completion_needed, false, definition_extensions_changed,
     );
 
     let elapsed = start.elapsed();
