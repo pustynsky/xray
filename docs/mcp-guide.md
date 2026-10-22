@@ -357,6 +357,11 @@ Ranking is TF-IDF descending then path ascending for token, token-regex, and sub
 | `autoBalance`  | boolean | true    | Trim dominant-term-only files in multi-term substring-OR queries — see [auto-balance](#xray_grep-multi-term-auto-balance) |
 | `maxOccurrencesPerTerm` | integer | 0 | Explicit auto-balance cap (0 = derive from the second-largest term)                          |
 
+`file` and `exclude` compare literal, case-insensitive path substrings with
+`\` and `/` treated alike, including mixed separators in relative or absolute
+paths. Entries in `file` use OR semantics, not exact-path or glob matching:
+`Target.cs` also selects `MyTarget.cs`. `excludeDir` still takes directory names.
+
 ### Response Fields
 
 ```json
@@ -601,6 +606,10 @@ Legacy `method + class` discovery remains supported. When it matches multiple C#
 | `includeGrepReferences` | Add `grepReferences[]` — files that contain the method name as text but are absent from the call tree. Catches delegate usage, method groups, reflection. Skipped for method names shorter than 4 characters. (default: false) |
 | `bodyLineStart`      | Clip the `rootMethod` body to start at this absolute file line (1-based). Affects `rootMethod` only, not caller bodies                             |
 | `bodyLineEnd`        | Clip the `rootMethod` body to end at this absolute file line (1-based). Use together with `bodyLineStart`                                          |
+
+`excludeFile` accepts literal, case-insensitive substrings with either `\` or
+`/`, including mixed separators in relative or absolute paths. This applies to
+both single-method and batch requests.
 
 ### Impact analysis
 

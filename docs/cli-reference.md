@@ -200,6 +200,10 @@ xray grep "HttpClient" -d C:\Projects -e cs
 | `--phrase`          | Phrase search: find exact phrase via index + verification. When the phrase contains punctuation (e.g., `</Property>`), a post-filter verifies matching lines against the raw untokenized text to eliminate false positives |
 | `--exact`           | Exact token matching only (disables default substring search); a single term can receive the normalized file-stem ranking signal                                                                                                                                                              |
 
+`--exclude` and `--exclude-dir` match literal, case-insensitive path substrings.
+Both `\` and `/` are accepted, including mixed separators in relative or absolute
+paths. The same filters apply to token, substring, regex, and phrase searches.
+
 ---
 
 ## `xray info` — Index Information

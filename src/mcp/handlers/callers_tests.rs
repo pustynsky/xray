@@ -4709,6 +4709,82 @@ fn test_multi_method_returns_results_array() {
 }
 
 #[test]
+fn test_callers_path_separators_single_and_batch() {
+    for prefix in ["C:/workspace/src/", r"C:\workspace\src\", r"C:\workspace/src\"] {
+        // Caller nodes display filenames using the host's native path semantics.
+        let displayed_file = |name: &str| {
+            let path = format!("{prefix}{name}");
+            std::path::Path::new(&path).file_name().unwrap().to_str().unwrap().to_string()
+        };
+        let ctx = build_callers_fixture_with_n_callers(2);
+        {
+            let mut defs = ctx.def_index.as_ref().unwrap().write().unwrap();
+            for path in &mut defs.files {
+                *path = format!("{prefix}{}", path.strip_prefix("src/").unwrap());
+            }
+            defs.path_to_id = defs.files.iter().enumerate()
+                .map(|(id, path)| (crate::path_identity_key(std::path::Path::new(path)), id as u32))
+                .collect();
+            ctx.index.write().unwrap().files = defs.files.clone();
+        }
+        for batch in [false, true] {
+            for direction in ["up", "down"] {
+                let (method, excluded_name) = if direction == "up" {
+                    ("process", "Caller0.cs")
+                } else {
+                    ("run0", "OrderService.cs")
+                };
+                let baseline_args = json!({
+                    "method": if batch { vec![method, "run1"] } else { vec![method] },
+                    "direction": direction,
+                    "depth": 1,
+                    "ext": ["cs"],
+                    "productionOnly": true,
+                });
+                let baseline_result = handle_xray_callers(&ctx, &baseline_args);
+                assert!(!baseline_result.is_error, "args={baseline_args}: {}", baseline_result.content[0].text);
+                let baseline: Value = serde_json::from_str(&baseline_result.content[0].text).unwrap();
+                let baseline_first = if batch { &baseline["results"][0] } else { &baseline };
+                let mut baseline_paths: Vec<_> = baseline_first["callTree"].as_array().unwrap().iter()
+                    .map(|node| node["file"].as_str().unwrap())
+                    .collect();
+                baseline_paths.sort();
+                let expected_baseline = if direction == "up" {
+                    vec![displayed_file("Caller0.cs"), displayed_file("Caller1.cs")]
+                } else {
+                    vec![displayed_file("OrderService.cs")]
+                };
+                assert_eq!(baseline_paths, expected_baseline, "prefix={prefix}, args={baseline_args}: {baseline}");
+                for excluded in [
+                    format!("src/{excluded_name}"),
+                    format!(r"src\{excluded_name}"),
+                    format!("C:/workspace/src/{excluded_name}"),
+                    format!(r"C:\workspace\src\{excluded_name}"),
+                    format!(r"C:\workspace/src\{excluded_name}"),
+                ] {
+                    let mut args = baseline_args.clone();
+                    args["excludeFile"] = json!(["missing/path", excluded.to_uppercase()]);
+                    let result = handle_xray_callers(&ctx, &args);
+                    assert!(!result.is_error, "args={args}: {}", result.content[0].text);
+                    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+                    let first = if batch { &output["results"][0] } else { &output };
+                    let tree = first["callTree"].as_array().unwrap();
+                    let paths: Vec<_> = tree.iter()
+                        .map(|node| node["file"].as_str().unwrap())
+                        .collect();
+                    let expected = if direction == "up" {
+                        vec![displayed_file("Caller1.cs")]
+                    } else {
+                        vec![]
+                    };
+                    assert_eq!(paths, expected, "prefix={prefix}, args={args}: {output}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn test_single_callers_offset_pages_top_level_roots() {
     let ctx = build_callers_fixture_with_n_callers(5);
     let full_result = handle_xray_callers(&ctx, &json!({

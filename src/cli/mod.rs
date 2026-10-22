@@ -27,6 +27,7 @@ use crate::definitions;
 use crate::mcp::handlers::token_regex::{
     expand_regex_terms_preserving_duplicates as expand_shared_regex_terms,
 };
+use crate::mcp::handlers::utils::normalize_path_sep;
 
 // ─── CLI ─────────────────────────────────────────────────────────────
 
@@ -381,8 +382,13 @@ fn file_matches_filters(
             .is_some_and(|e| e.eq_ignore_ascii_case(ext));
         if !m { return false; }
     }
-    if exclude_dir.iter().any(|excl| file_path.to_lowercase().contains(&excl.to_lowercase())) { return false; }
-    if exclude.iter().any(|excl| file_path.to_lowercase().contains(&excl.to_lowercase())) { return false; }
+    if !exclude_dir.is_empty() || !exclude.is_empty() {
+        let path_lower = normalize_path_sep(file_path).to_lowercase();
+        if exclude_dir.iter().chain(exclude)
+            .any(|excl| path_lower.contains(&normalize_path_sep(excl).to_lowercase())) {
+            return false;
+        }
+    }
     true
 }
 

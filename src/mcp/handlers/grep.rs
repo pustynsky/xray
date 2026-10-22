@@ -169,7 +169,7 @@ pub(crate) struct GrepSearchParams<'a> {
     pub search_start: Instant,
     pub dir_filter: &'a Option<String>,
     /// Optional file path/name substring filter. Empty = no filter; otherwise
-    /// each entry is one substring (case-insensitive, OR semantics) matched
+    /// each entry is one substring (case-insensitive, separator-normalized, OR semantics) matched
     /// against both the full file path and the basename.
     /// Ignored when `exact_file_path` is `Some(_)` — that mode supersedes
     /// substring scoping.
@@ -188,7 +188,7 @@ pub(crate) struct GrepSearchParams<'a> {
     pub exact_file_path_canonical: &'a Option<String>,
     /// Pre-computed exclude dir patterns (avoids per-file allocations)
     pub exclude_patterns: super::utils::ExcludePatterns,
-    /// Pre-lowercased exclude path substrings
+    /// Pre-lowercased, separator-normalized exclude path substrings
     pub exclude_lower: Vec<String>,
     /// Optional note to include in response summary when `dir=` was auto-converted
     /// from a file path to parent dir + file filter.
@@ -2429,7 +2429,7 @@ fn passes_common_file_filters(file_path: &str, params: &GrepSearchParams) -> boo
 
     let needs_lower = !params.exclude_patterns.is_empty() || !params.exclude_lower.is_empty();
     let path_lower = if needs_lower {
-        file_path.to_lowercase().replace('\\', "/")
+        utils::normalize_path_sep(file_path).to_lowercase()
     } else {
         String::new()
     };
@@ -2458,9 +2458,9 @@ fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
             .and_then(|n| n.to_str())
             .map(|s| s.to_lowercase())
             .unwrap_or_default();
-        let fp_lower = file_path.to_lowercase().replace('\\', "/");
+        let fp_lower = utils::normalize_path_sep(file_path).to_lowercase();
         let any_match = params.file_filter.iter()
-            .map(|t| t.to_lowercase())
+            .map(|t| utils::normalize_path_sep(t).to_lowercase())
             .any(|needle| {
                 fp_lower.contains(&needle) || basename_lower.contains(&needle)
             });
@@ -3533,7 +3533,7 @@ fn search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
     let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&parsed.exclude_dir);
     let exclude_lower: Vec<String> = parsed.exclude.iter()
-        .map(|s| s.to_lowercase())
+        .map(|s| utils::normalize_path_sep(s).to_lowercase())
         .collect();
     let requested_mode = grep_requested_mode(&parsed);
 

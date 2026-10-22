@@ -87,7 +87,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "file": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Restrict results to files whose path or basename contains any of these substrings (case-insensitive, OR semantics — e.g., [\"Service\",\"Client\"]). Combines with `dir`/`ext`/`excludeDir` via AND."
+                        "description": "Match any path/basename substring (case-insensitive; slash/backslash equivalent). AND with dir/ext/excludeDir."
                     },
                     "ext": {
                         "type": "array",
@@ -139,7 +139,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "exclude": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "File path substrings to exclude"
+                        "description": "Path substrings to exclude (case-insensitive; slash/backslash equivalent)."
                     },
                     "countOnly": {
                         "type": "boolean",
@@ -532,7 +532,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "excludeFile": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "File path substrings to exclude"
+                        "description": "Path substrings to exclude (case-insensitive; slash/backslash equivalent)."
                     },
                     "maxCallersPerLevel": {
                         "type": "integer",
