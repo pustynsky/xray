@@ -474,17 +474,34 @@ fn duration_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
 }
 
+#[test]
+fn regex_queue_473_capture_numbers_and_names() {
+    let compiled = compile_token_regex_patterns(&["(alpha)|(?P<Second>beta)".into()]).unwrap();
+    let regex = &compiled.patterns[0];
+    assert_eq!(regex.captures_len(), 3);
+    let alpha = regex.captures("alpha").unwrap();
+    assert_eq!(alpha.get(1).unwrap().as_str(), "alpha");
+    assert!(alpha.get(2).is_none());
+    let beta = regex.captures("beta").unwrap();
+    assert_eq!(beta.name("Second").unwrap().as_str(), "beta");
+    assert_eq!(regex.capture_names().collect::<Vec<_>>(), [None, None, Some("Second")]);
+    assert!(!regex.is_match("alphabet"));
+    assert!(!regex.is_match("prebeta"));
+}
+
 pub(crate) fn compile_token_regex_patterns(
     raw_terms: &[String],
 ) -> Result<CompiledTokenRegex, RegexExpansionError> {
     let started = Instant::now();
     let mut patterns = Vec::with_capacity(raw_terms.len());
     for pattern in raw_terms {
-        let compiled = regex::Regex::new(&format!("(?i)^{}$", pattern))
-            .map_err(|source| RegexExpansionError {
-                pattern: pattern.clone(),
-                source,
-            })?;
+        let invalid = |source| RegexExpansionError { pattern: pattern.clone(), source };
+        // Injected delimiters must not repair invalid user syntax.
+        regex::RegexBuilder::new(pattern).case_insensitive(true).build().map_err(invalid)?;
+        let compiled = regex::Regex::new(&format!("(?i)^(?:{pattern})$"))
+            // Terminate a trailing extended-mode comment before closing the group.
+            .or_else(|_| regex::Regex::new(&format!("(?i)^(?:{pattern}\n)$")))
+            .map_err(invalid)?;
         patterns.push(compiled);
     }
     Ok(CompiledTokenRegex {
@@ -672,4 +689,3 @@ pub(crate) fn expand_regex_terms_preserving_duplicates(
         RegexExpansionDedup::PreservePatternDuplicates,
     ))
 }
-

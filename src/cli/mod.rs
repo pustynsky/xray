@@ -826,8 +826,13 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     }
 
     // ─── Normal token search ────────────────────────────────
-    let raw_terms: Vec<String> = args.pattern.split(',')
-        .map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+    let mut raw_terms: Vec<String> = args.pattern.split(',')
+        .map(|s| if args.regex { s.trim().to_string() } else { s.trim().to_lowercase() })
+        .filter(|s| !s.is_empty()).collect();
+    if args.regex {
+        let mut seen = std::collections::HashSet::new();
+        raw_terms.retain(|term| seen.insert(term.clone()));
+    }
 
     let terms = expand_grep_terms(&raw_terms, &index, use_substring, args.regex)?;
 

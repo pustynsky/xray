@@ -9,6 +9,171 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 // --- Substring search handler integration tests ---
 
+fn regex_queue_output(ctx: &HandlerContext, args: &Value) -> Value {
+    let mut request = args.clone();
+    if args.get("__testTokenRegexStrategy").is_some() {
+        request["ext"] = json!(["cs"]);
+    }
+    let result = dispatch_tool(ctx, "xray_grep", &request);
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    if let Some(strategy) = args.get("__testTokenRegexStrategy") {
+        let expected = if strategy == "scoped" { "scopedFileTokens" } else { "globalVocabulary" };
+        assert_eq!(output["summary"]["regexExpansion"]["strategy"], expected);
+    }
+    output
+}
+
+fn regex_queue_paths(output: &Value) -> Vec<String> {
+    let mut paths: Vec<_> = output["files"].as_array().unwrap().iter()
+        .map(|file| file["path"].as_str().unwrap().to_string()).collect();
+    paths.sort();
+    paths
+}
+
+fn regex_queue_fixture(tokens: Vec<(&str, u32, Vec<u32>)>, files: Vec<&str>) -> HandlerContext {
+    let ctx = make_substring_ctx(tokens, files);
+    {
+        let mut index = ctx.index.write().unwrap();
+        index.rebuild_file_tokens();
+        index.file_tokens_authoritative = true;
+    }
+    ctx
+}
+
+fn regex_queue_ctx() -> HandlerContext {
+    regex_queue_fixture(
+        vec![
+            ("httpclient", 0, vec![1]), ("12345", 1, vec![1]),
+            ("alpha", 2, vec![1]), ("beta", 3, vec![1]),
+            ("alphabet", 4, vec![1]), ("prebeta", 5, vec![1]),
+            ("\u{e4}pfel", 6, vec![1]), ("outside", 7, vec![1]),
+        ],
+        vec!["letters.cs", "digits.cs", "alpha.cs", "beta.cs", "alphabet.cs", "prebeta.cs", "unicode.cs", "outside.txt"],
+    )
+}
+
+#[test]
+fn regex_queue_470_nondigit_source() {
+    for strategy in ["global", "scoped"] {
+        let output = regex_queue_output(&regex_queue_ctx(), &json!({
+            "terms": [r"\D+"], "regex": true, "__testTokenRegexStrategy": strategy
+        }));
+        assert_eq!(regex_queue_paths(&output),
+            ["alpha.cs", "alphabet.cs", "beta.cs", "letters.cs", "prebeta.cs", "unicode.cs"]);
+        assert_eq!(output["summary"]["termsSearched"], json!([r"\D+"]));
+    }
+}
+
+#[test]
+fn regex_queue_470_complementary_and_duplicate_sources() {
+    let ctx = regex_queue_fixture(
+        vec![("alpha", 0, vec![1]), ("12345", 1, vec![1]),
+            ("alpha", 2, vec![1]), ("12345", 2, vec![2]), ("outside", 3, vec![1])],
+        vec!["letters.cs", "digits.cs", "mixed.cs", "outside.txt"],
+    );
+    for strategy in ["global", "scoped"] {
+        for (mode, expected) in [
+            ("or", vec!["digits.cs", "letters.cs", "mixed.cs"]),
+            ("and", vec!["mixed.cs"]),
+        ] {
+            let output = regex_queue_output(&ctx, &json!({
+                "terms": [r"\d+", r"\D+", r"\D+"], "regex": true,
+                "mode": mode, "__testTokenRegexStrategy": strategy
+            }));
+            assert_eq!(regex_queue_paths(&output), expected, "{mode}/{strategy}");
+            assert_eq!(output["summary"]["termsSearched"], json!([r"\d+", r"\D+"]));
+        }
+    }
+}
+
+#[test]
+fn regex_queue_470_syntax_and_controls() {
+    let ctx = regex_queue_ctx();
+    for strategy in ["global", "scoped"] {
+        for (pattern, expected) in [
+            (r"\d+", vec!["digits.cs"]),
+            (r"\S+", vec!["alpha.cs", "alphabet.cs", "beta.cs", "digits.cs", "letters.cs", "prebeta.cs", "unicode.cs"]),
+            (r"\s+", vec![]), (r"\W+", vec![]), (r"\\D", vec![]),
+            ("HTTPCLIENT", vec!["letters.cs"]),
+            (r"\P{Nd}+", vec!["alpha.cs", "alphabet.cs", "beta.cs", "letters.cs", "prebeta.cs", "unicode.cs"]),
+            ("\u{c4}PFEL", vec!["unicode.cs"]),
+            ("(?i)ALPHA", vec!["alpha.cs"]),
+            ("(?-i)ALPHA", vec![]),
+            ("(?-i:ALPHA)|beta", vec!["beta.cs"]),
+            ("(?x)alpha # trailing comment", vec!["alpha.cs"]),
+        ] {
+            let output = regex_queue_output(&ctx, &json!({
+                "terms": [pattern], "regex": true, "__testTokenRegexStrategy": strategy
+            }));
+            assert_eq!(regex_queue_paths(&output), expected, "{pattern}/{strategy}");
+            assert_eq!(output["summary"]["termsSearched"], json!([pattern]));
+        }
+    }
+    for args in [
+        json!({"terms": ["HTTPCLIENT"], "substring": false}),
+        json!({"terms": ["CLIENT"], "substring": true}),
+    ] {
+        assert_eq!(regex_queue_paths(&regex_queue_output(&ctx, &args)), ["letters.cs"]);
+    }
+    let sources = ["ALPHA", "alpha", "(?P<Upper>alpha)", "(?P<upper>alpha)", "alpha"];
+    let output = regex_queue_output(&ctx, &json!({"terms": sources, "regex": true}));
+    assert_eq!(regex_queue_paths(&output), ["alpha.cs"]);
+    assert_eq!(output["summary"]["termsSearched"],
+        json!(["ALPHA", "alpha", "(?P<Upper>alpha)", "(?P<upper>alpha)"]));
+}
+
+#[test]
+fn regex_queue_473_whole_alternation() {
+    for strategy in ["global", "scoped"] {
+        for pattern in ["alpha|beta", "(?:alpha|beta)", "(alpha)|(beta)",
+            "^alpha$|^beta$", "alpha|(?:beta|absent)", "alpha|beta|"] {
+            let output = regex_queue_output(&regex_queue_ctx(), &json!({
+                "terms": [pattern], "regex": true, "__testTokenRegexStrategy": strategy
+            }));
+            assert_eq!(regex_queue_paths(&output), ["alpha.cs", "beta.cs"], "{pattern}/{strategy}");
+        }
+    }
+}
+
+#[test]
+fn regex_queue_invalid_source_before_empty_scope() {
+    for pattern in ["[", "\\", r"\q", "foo)|(?:bar", "(?x)alpha) # trailing comment"] {
+        for scope in [json!({}), json!({"file": ["absent.cs"]})] {
+            let mut args = json!({"terms": [pattern], "regex": true});
+            args.as_object_mut().unwrap().extend(scope.as_object().unwrap().clone());
+            let result = dispatch_tool(&regex_queue_ctx(), "xray_grep", &args);
+            assert!(result.is_error, "{pattern}: {}", result.content[0].text);
+            assert!(result.content[0].text.contains(pattern), "{}", result.content[0].text);
+        }
+    }
+}
+
+#[test]
+fn regex_queue_cursor_uses_original_request() {
+    let ctx = regex_queue_ctx();
+    let original = json!({"terms": [r"\D+"], "regex": true, "maxResults": 1});
+    let first = regex_queue_output(&ctx, &original);
+    let token = first["resultStatus"]["page"]["continuationToken"].as_str().unwrap();
+    for terms in [json!([r"\d+"]), json!([r"\D+", r"\D+"]), json!(["(?:\\D+)"])] {
+        let mut changed = original.clone();
+        changed["terms"] = terms;
+        changed["continuationToken"] = json!(token);
+        assert!(dispatch_tool(&ctx, "xray_grep", &changed).is_error);
+    }
+    let mut all = regex_queue_paths(&first);
+    let mut current = first;
+    while let Some(token) = current["resultStatus"]["page"]["continuationToken"].as_str() {
+        let mut next = original.clone();
+        next["continuationToken"] = json!(token);
+        current = regex_queue_output(&ctx, &next);
+        all.extend(regex_queue_paths(&current));
+    }
+    all.sort();
+    let unpaged = regex_queue_output(&ctx, &json!({"terms": [r"\D+"], "regex": true, "maxResults": 0}));
+    assert_eq!(all, regex_queue_paths(&unpaged));
+}
+
 fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&str>) -> HandlerContext {
     let mut index_map: HashMap<String, Vec<Posting>> = HashMap::new();
     for (token, file_id, lines) in &tokens_to_files {
@@ -1122,7 +1287,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
 }
 
 #[test]
-fn test_token_regex_case_duplicates_are_idempotent_in_and_mode() {
+fn test_token_regex_identical_sources_are_idempotent_in_and_mode() {
     let ctx = make_substring_ctx(
         vec![("foo", 0, vec![1])],
         vec!["C:\\test\\Program.cs"],
@@ -1133,7 +1298,7 @@ fn test_token_regex_case_duplicates_are_idempotent_in_and_mode() {
         "mode": "and"
     }));
     let duplicate_result = dispatch_tool(&ctx, "xray_grep", &json!({
-        "terms": ["^Foo$", "^FOO$"],
+        "terms": ["^Foo$", "^Foo$"],
         "regex": true,
         "mode": "and"
     }));
