@@ -15,6 +15,114 @@ fn save_grep_test_index(root: &Path, cache: &Path, ext: &str) -> ContentIndex {
 }
 
 #[test]
+fn test_502_normalize_query_extensions_preserves_invalid_entries() {
+    assert_eq!(normalize_grep_extensions(&None), None);
+    assert_eq!(normalize_grep_extensions(&Some(" RS, cs ,RS ".into())),
+        Some(vec!["rs".into(), "cs".into(), "rs".into()]));
+    assert_eq!(normalize_grep_extensions(&Some(".RS".into())), Some(vec![".rs".into()]));
+    for ext in ["", " ", "\t", ",", ",rs", "rs,", "rs,,cs", "rs, ,cs"] {
+        let normalized = normalize_grep_extensions(&Some(ext.into())).unwrap();
+        assert!(normalized.iter().any(String::is_empty), "{ext:?}");
+        assert!(matches!(crate::index::validate_content_extensions(&normalized), Err(SearchError::InvalidArgs(_))));
+    }
+}
+
+#[test]
+fn test_502_normalized_extensions_across_search_modes_preserve_cache() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("systemtemp");
+    fs::create_dir_all(&base).unwrap();
+    let fixture = tempfile::Builder::new().prefix("grep502-").tempdir_in(&base).unwrap();
+    let fixture_root = fs::canonicalize(fixture.path()).unwrap();
+    let root = fixture_root.join("sources");
+    let cache = fixture_root.join("cache");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&cache).unwrap();
+    let names = ["probe.RS", "probe.Cs", "probe.txt"];
+    for name in names {
+        fs::write(root.join(name), "scope_not_found scope_not_found alpha beta\nscope_not_found alpha beta\n").unwrap();
+    }
+    let original = save_grep_test_index(&root, &cache, "rs,cs,txt");
+    let path = content_index_path_for(&original.root, "rs,cs,txt", &cache);
+    let meta_path = path.with_extension("word-search.meta");
+    let bytes = fs::read(&path).unwrap();
+    let meta = fs::read(&meta_path).unwrap();
+    let cache_entries = fs::read_dir(&cache).unwrap().count();
+    let phrase_re = Regex::new(r"(?i)scope_not_found\s+alpha").unwrap();
+    let nonmatching_phrases = [
+        (vec!["alpha".into(), "scope_not_found".into()], Regex::new(r"(?i)alpha\s+scope_not_found").unwrap()),
+        (vec!["scope_not_found".into(), "beta".into()], Regex::new(r"(?i)scope_not_found\s+beta").unwrap()),
+    ];
+    for (ext, expected_names) in [
+        (Some("rs"), vec![names[0]]), (Some("cs"), vec![names[1]]),
+        (Some(" RS "), vec![names[0]]), (Some("rs,cs"), vec![names[0], names[1]]),
+        (Some(" CS, rS,RS "), vec![names[0], names[1]]), (None, names.to_vec()),
+    ] {
+        let ext = normalize_grep_extensions(&ext.map(str::to_string));
+        for auto_reindex in [false, true] {
+            let (index, _) = load_grep_index(&original.root, &ext, auto_reindex, false, &cache).unwrap();
+            assert_eq!(index.extensions, ["rs", "cs", "txt"]);
+            for (pattern, substring, regex) in [
+                ("scope_not_found", false, false), ("scope", true, false), ("^scope_not_found$", false, true),
+            ] {
+                let terms = expand_grep_terms(&[pattern.into()], &index, substring, regex).unwrap();
+                let results = score_grep_results(&index, &terms, &ext, &[], &[], grep_score_options(false, 1, false));
+                let mut filenames: Vec<_> = results.iter().map(|r| Path::new(&r.file_path).file_name().unwrap().to_str().unwrap()).collect();
+                filenames.sort();
+                let mut expected = expected_names.clone();
+                expected.sort();
+                assert_eq!(filenames, expected, "{pattern}: {ext:?}");
+                assert_eq!(results.iter().map(|r| r.lines.len()).sum::<usize>(), expected.len() * 2);
+                assert!(results.iter().all(|r| r.lines == [1, 2] && r.occurrences == 3));
+                let absent = expand_grep_terms(&["genuinely_absent".into()], &index, substring, regex).unwrap();
+                assert!(score_grep_results(&index, &absent, &ext, &[], &[], grep_score_options(false, 1, false)).is_empty());
+            }
+            let candidates = find_phrase_candidates(&index, &["scope_not_found".into(), "alpha".into()], &ext, &[], &[]);
+            assert_eq!(candidates.len(), expected_names.len());
+            let (results, _) = verify_phrase_matches(&index, &candidates, &phrase_re);
+            assert_eq!(results.len(), expected_names.len());
+            assert!(results.iter().all(|r| r.lines == [1, 2]));
+            assert!(find_phrase_candidates(&index, &["genuinely_absent".into(), "alpha".into()], &ext, &[], &[]).is_empty());
+            for (tokens, regex) in &nonmatching_phrases {
+                let candidates = find_phrase_candidates(&index, tokens, &ext, &[], &[]);
+                assert_eq!(candidates.len(), expected_names.len());
+                assert!(verify_phrase_matches(&index, &candidates, regex).0.is_empty());
+            }
+        }
+    }
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(fs::read(&meta_path).unwrap(), meta);
+    assert_eq!(fs::read_dir(&cache).unwrap().count(), cache_entries);
+}
+
+#[test]
+fn test_502_invalid_query_extensions_never_load_or_build() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("systemtemp");
+    fs::create_dir_all(&base).unwrap();
+    let fixture = tempfile::Builder::new().prefix("invalid502-").tempdir_in(&base).unwrap();
+    let root = fs::canonicalize(fixture.path()).unwrap();
+    let cache = root.join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    let dir = root.to_string_lossy();
+    for corrupt_cache in [false, true] {
+        let path = content_index_path_for(&dir, "rs,cs", &cache);
+        if corrupt_cache {
+            fs::write(&path, b"corrupt cache").unwrap();
+        }
+        for ext in ["", " ", "\t", ",", ",rs", "rs,", "rs,,cs", "rs, ,cs"] {
+            for auto in [false, true] {
+                let normalized = normalize_grep_extensions(&Some(ext.into()));
+                let err = load_grep_index(&dir, &normalized, auto, false, &cache).unwrap_err();
+                assert!(matches!(err, SearchError::InvalidArgs(_)), "{ext:?}: {err}");
+            }
+        }
+        assert_eq!(fs::read_dir(&cache).unwrap().count(), usize::from(corrupt_cache));
+        if corrupt_cache {
+            assert_eq!(fs::read(path).unwrap(), b"corrupt cache");
+        }
+    }
+}
+
+#[test]
 fn test_load_grep_index_without_ext_reuses_cache_repeatedly() {
     let root = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
@@ -41,7 +149,7 @@ fn test_load_grep_index_without_ext_reuses_cache_repeatedly() {
     assert_eq!(fs::read(&path).unwrap(), original_bytes);
     assert_eq!(fs::read(&meta_path).unwrap(), original_meta);
     assert!(!content_index_path_for(&original.root, "", cache.path()).exists());
-    let (explicit, _) = load_grep_index(&original.root, &Some("rs".into()), true, false, cache.path()).unwrap();
+    let (explicit, _) = load_grep_index(&original.root, &Some(vec!["rs".into()]), true, false, cache.path()).unwrap();
     assert_eq!(explicit.files, original.files);
     let absent = vec!["missing_term".to_string()];
     assert!(score_grep_results(&explicit, &absent, &None, &[], &[], grep_score_options(false, 1, false)).is_empty());
@@ -105,7 +213,7 @@ fn test_load_grep_index_superset_keeps_query_filter_separate() {
     fs::write(root.path().join("probe.rs"), "scope_not_found\n").unwrap();
     fs::write(root.path().join("probe.cs"), "scope_not_found\n").unwrap();
     let original = save_grep_test_index(root.path(), cache.path(), "rs,cs");
-    let query_ext = Some("rs".to_string());
+    let query_ext = Some(vec!["rs".to_string()]);
     for auto_reindex in [true, false] {
         let (index, _) = load_grep_index(&original.root, &query_ext, auto_reindex, false, cache.path()).unwrap();
         assert_eq!(index.extensions, ["rs", "cs"]);
@@ -120,7 +228,7 @@ fn test_load_grep_index_superset_keeps_query_filter_separate() {
 
 #[test]
 fn test_load_grep_index_rebuilds_selected_stale_cache_with_original_extensions() {
-    for ext in [None, Some("rs".to_string())] {
+    for ext in [None, Some(vec!["rs".to_string()])] {
         let root = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         fs::write(root.path().join("probe.rs"), "scope_not_found\n").unwrap();
@@ -167,7 +275,7 @@ fn test_504_hidden_scope_survives_expiry() {
     assert_eq!(original.files.len(), 1);
     original.created_at = 1;
     save_content_index(&original, &cache).unwrap();
-    let (rebuilt, _) = load_grep_index(&dir, &Some("rs".into()), true, false, &cache).unwrap();
+    let (rebuilt, _) = load_grep_index(&dir, &Some(vec!["rs".into()]), true, false, &cache).unwrap();
     assert_eq!(rebuilt.files.len(), 1, "expiry must not discard hidden scope");
 }
 
@@ -256,12 +364,12 @@ fn test_504_traversal_options_matrix_file_and_sharded_content() {
                 fs::remove_file(sidecar_path(&index_path_for(&dir, &cache))).unwrap();
                 write_traversal_probes(&root, "added");
                 let stale_file = load_fast_index(&dir, false, !respect, &cache).unwrap();
-                let (stale_content, _) = load_grep_index(&dir, &Some("rs".into()), false, !respect, &cache).unwrap();
+                let (stale_content, _) = load_grep_index(&dir, &Some(vec!["rs".into()]), false, !respect, &cache).unwrap();
                 assert!(stale_file.is_stale() && stale_content.is_stale());
                 assert_eq!(probe_paths(stale_file.entries.iter().map(|entry| entry.path.as_str())), before);
                 assert_eq!(probe_paths(stale_content.files.iter().map(String::as_str)), before);
                 let after = expected_probe_paths(&root, &["initial", "added"], hidden, no_ignore, respect);
-                for query_ext in [Some("rs".to_string()), None] {
+                for query_ext in [normalize_grep_extensions(&Some(" RS, rs ".into())), None] {
                     let rebuilt_file = load_fast_index(&dir, true, !respect, &cache).unwrap();
                     let (rebuilt_content, _) = load_grep_index(&dir, &query_ext, true, !respect, &cache).unwrap();
                     let disk_file = load_index(&dir, &cache).unwrap();
@@ -301,14 +409,14 @@ fn test_504_true_missing_and_valid_empty_scopes() {
     let dir = root.to_string_lossy().to_string();
     assert!(load_fast_index(&dir, true, false, &cache).is_ok());
     assert!(matches!(load_grep_index(&dir, &None, true, false, &cache), Err(SearchError::IndexNotFound { .. })));
-    let (content, _) = load_grep_index(&dir, &Some("rs".into()), true, false, &cache).unwrap();
+    let (content, _) = load_grep_index(&dir, &Some(vec!["rs".into()]), true, false, &cache).unwrap();
     assert!(content.files.is_empty());
     for auto in [false, true] {
         let (content, _) = load_grep_index(&dir, &None, auto, false, &cache).unwrap();
         assert!(content.files.is_empty());
     }
     for ext in ["", ",", "rs,"] {
-        assert!(load_grep_index(&dir, &Some(ext.into()), true, false, &cache).is_err());
+        assert!(load_grep_index(&dir, &normalize_grep_extensions(&Some(ext.into())), true, false, &cache).is_err());
     }
 }
 
@@ -365,7 +473,7 @@ fn test_504_existing_legacy_and_corrupt_caches_are_not_overwritten() {
             for auto in [false, true] {
                 let file_err = load_fast_index(&dir, auto, false, &cache).unwrap_err().to_string();
                 assert!(file_err.contains("xray index") && file_err.contains("--hidden") && file_err.contains("--no-ignore"));
-                for ext in [None, Some("rs".into()), Some("rs,cs".into())] {
+                for ext in [None, Some(vec!["rs".into()]), Some(vec!["rs".into(), "cs".into()])] {
                     let err = load_grep_index(&dir, &ext, auto, false, &cache).unwrap_err().to_string();
                     assert!(err.contains("xray content-index") && err.contains("--hidden") && err.contains("--no-ignore"), "{err}");
                 }
@@ -394,7 +502,7 @@ fn test_504_bad_exact_good_superset_and_unattributable_alternates() {
             fs::remove_file(sidecar_path(&superset_path)).unwrap();
         }
         let bad = fs::read(&exact_path).unwrap();
-        let (selected, _) = load_grep_index(&dir, &Some("rs".into()), true, false, &cache).unwrap();
+        let (selected, _) = load_grep_index(&dir, &Some(vec!["rs".into()]), true, false, &cache).unwrap();
         assert_eq!(selected.extensions, superset.extensions);
         assert_eq!(fs::read(&exact_path).unwrap(), bad);
         let (selected, _) = load_grep_index(&dir, &None, true, false, &cache).unwrap();
@@ -403,7 +511,7 @@ fn test_504_bad_exact_good_superset_and_unattributable_alternates() {
         if sidecars {
             fs::remove_file(sidecar_path(&superset_path)).unwrap();
         }
-        let err = load_grep_index(&dir, &Some("rs".into()), true, false, &cache).unwrap_err().to_string();
+        let err = load_grep_index(&dir, &Some(vec!["rs".into()]), true, false, &cache).unwrap_err().to_string();
         assert!(err.contains(&exact_path.display().to_string()), "{err}");
         let no_ext = load_grep_index(&dir, &None, true, false, &cache).unwrap_err();
         if sidecars {
@@ -414,7 +522,7 @@ fn test_504_bad_exact_good_superset_and_unattributable_alternates() {
         assert_eq!(exact.extensions, ["rs"]);
         fs::write(&exact_path, bincode::serialize(&("a different root", code_xray::CONTENT_INDEX_VERSION)).unwrap()).unwrap();
         let wrong_root = fs::read(&exact_path).unwrap();
-        let err = load_grep_index(&dir, &Some("rs".into()), true, false, &cache).unwrap_err().to_string();
+        let err = load_grep_index(&dir, &Some(vec!["rs".into()]), true, false, &cache).unwrap_err().to_string();
         assert!(err.contains("exact cache key has a different root"), "{err}");
         assert_eq!(fs::read(&exact_path).unwrap(), wrong_root);
 
@@ -430,7 +538,7 @@ fn test_504_bad_exact_good_superset_and_unattributable_alternates() {
         let foreign_path = content_index_path_for(&foreign.to_string_lossy(), "rs", &cache);
         fs::write(&foreign_path, bincode::serialize(&(foreign.to_string_lossy().to_string(), 4u32)).unwrap()).unwrap();
         assert!(find_content_index_for_dir(&dir, &cache, &[]).unwrap().is_none());
-        let (fresh, _) = load_grep_index(&dir, &Some("rs".into()), true, false, &cache).unwrap();
+        let (fresh, _) = load_grep_index(&dir, &Some(vec!["rs".into()]), true, false, &cache).unwrap();
         assert!(!fresh.files.is_empty());
     }
 }
@@ -442,11 +550,11 @@ fn test_load_grep_index_builds_only_with_explicit_valid_extensions() {
     let dir = root.path().to_string_lossy().to_string();
     fs::write(root.path().join("probe.rs"), "scope_not_found\n").unwrap();
     for ext in ["", " ", ",", "rs,", ",rs", "rs, ,cs"] {
-        let err = load_grep_index(&dir, &Some(ext.into()), true, false, cache.path()).unwrap_err();
+        let err = load_grep_index(&dir, &normalize_grep_extensions(&Some(ext.into())), true, false, cache.path()).unwrap_err();
         assert!(matches!(err, SearchError::InvalidArgs(_)), "{ext:?}: {err}");
     }
     assert_eq!(fs::read_dir(cache.path()).unwrap().count(), 0);
-    let (index, _) = load_grep_index(&dir, &Some("rs".into()), true, false, cache.path()).unwrap();
+    let (index, _) = load_grep_index(&dir, &Some(vec!["rs".into()]), true, false, cache.path()).unwrap();
     assert_eq!(index.files.len(), 1);
     assert_eq!(load_content_index(&dir, "rs", cache.path()).unwrap().files, index.files);
 }
@@ -457,7 +565,7 @@ fn test_load_grep_index_does_not_use_unrelated_extensions() {
     let cache = tempfile::tempdir().unwrap();
     fs::write(root.path().join("probe.cs"), "scope_not_found\n").unwrap();
     let original = save_grep_test_index(root.path(), cache.path(), "cs");
-    let ext = Some("rs".into());
+    let ext = Some(vec!["rs".into()]);
     assert!(load_grep_index(&original.root, &ext, false, false, cache.path()).is_err());
     let (empty, _) = load_grep_index(&original.root, &ext, true, false, cache.path()).unwrap();
     assert_eq!(empty.extensions, ["rs"]);
@@ -513,19 +621,19 @@ fn test_file_matches_filters_no_filters() {
 
 #[test]
 fn test_file_matches_filters_ext_match() {
-    let ext = Some("cs".to_string());
+    let ext = Some(vec!["cs".to_string()]);
     assert!(file_matches_filters("src/Service.cs", &ext, &[], &[]));
 }
 
 #[test]
 fn test_file_matches_filters_ext_no_match() {
-    let ext = Some("cs".to_string());
+    let ext = Some(vec!["cs".to_string()]);
     assert!(!file_matches_filters("src/main.rs", &ext, &[], &[]));
 }
 
 #[test]
 fn test_file_matches_filters_ext_case_insensitive() {
-    let ext = Some("cs".to_string());
+    let ext = Some(vec!["cs".to_string()]);
     assert!(file_matches_filters("src/Service.CS", &ext, &[], &[]));
     assert!(file_matches_filters("src/Service.Cs", &ext, &[], &[]));
 }
@@ -571,7 +679,7 @@ fn test_file_matches_filters_multiple_excludes() {
 
 #[test]
 fn test_file_matches_filters_combined_ext_and_exclude() {
-    let ext = Some("cs".to_string());
+    let ext = Some(vec!["cs".to_string()]);
     let exclude_dir = vec!["tests".to_string()];
     // Wrong extension
     assert!(!file_matches_filters("src/main.rs", &ext, &exclude_dir, &[]));
@@ -583,7 +691,7 @@ fn test_file_matches_filters_combined_ext_and_exclude() {
 
 #[test]
 fn test_file_matches_filters_no_extension_file() {
-    let ext = Some("cs".to_string());
+    let ext = Some(vec!["cs".to_string()]);
     // File with no extension should not match ext filter
     assert!(!file_matches_filters("Makefile", &ext, &[], &[]));
 }
@@ -949,7 +1057,7 @@ fn test_find_phrase_candidates_with_ext_filter() {
         vec![10, 10],
     );
     // Filter to .cs only
-    let ext = Some("cs".to_string());
+    let ext = Some(vec!["cs".to_string()]);
     let tokens = vec!["httpclient".to_string()];
     let result = find_phrase_candidates(&index, &tokens, &ext, &[], &[]);
     assert_eq!(result.len(), 1);
@@ -1092,7 +1200,7 @@ fn test_score_grep_results_with_ext_filter() {
         ],
         vec![10, 10],
     );
-    let ext = Some("cs".to_string());
+    let ext = Some(vec!["cs".to_string()]);
     let terms = vec!["httpclient".to_string()];
     let results = score_grep_results(&index, &terms, &ext, &[], &[], grep_score_options(false, 1, false));
     assert_eq!(results.len(), 1);

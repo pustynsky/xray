@@ -120,6 +120,8 @@ Searches the inverted index for tokens. Results use TF-IDF ranking; a single `--
 
 Without `--ext`, grep reuses an existing content index for the directory and searches all its indexed extensions. If no usable index exists, it reports an error with an indexing command instead of building an empty index. With `--ext`, grep first tries the exact cache, then an existing index covering all requested extensions, before building one. A stale index is rebuilt with its original extensions, not just the query filter.
 
+The grep query filter accepts comma-separated extensions, trims surrounding whitespace, and matches case-insensitively in exact, substring, regex, and phrase modes. For example, `-e " RS, cs "` includes both Rust and C# files; duplicate entries do not duplicate results or counts. Blank values and empty entries such as `rs,`, `,rs`, or `rs, ,cs` are rejected before loading or building an index. The query filter does not change the selected index's persisted extensions or traversal settings.
+
 Content indexing requires non-empty extensions. Blank values and empty comma-separated entries such as `rs,,cs` are rejected. Old caches with empty extension configurations are ignored during index discovery; valid indexes with no matching files remain usable.
 
 ```bash
@@ -192,7 +194,7 @@ xray grep "HttpClient" -d C:\Projects -e cs
 | `--show-lines`      | Display actual line content from files                                                                                                                                                                                     |
 | `--auto-reindex`    | Enabled by default. Rebuild stale indexes with their original extensions and traversal settings; build missing indexes only when `--ext` supplies an extension configuration |
 | `--respect-git-exclude` | Respect `.git/info/exclude` during auto-rebuild (default: false)                                                                                                                                                        |
-| `-e, --ext <EXT>`   | Filter results by extension                                                                                                                                                                                                |
+| `-e, --ext <EXTS>`  | Filter results by comma-separated extensions (trimmed, case-insensitive; empty entries invalid)                                                                                                                              |
 | `--max-results <N>` | Limit number of results (0 = unlimited)                                                                                                                                                                                    |
 | `--all`             | AND mode: file must contain ALL terms (default: OR)                                                                                                                                                                        |
 | `-r, --regex`       | Treat pattern as regex, match against indexed tokens                                                                                                                                                                       |
