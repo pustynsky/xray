@@ -15,6 +15,195 @@ fn save_grep_test_index(root: &Path, cache: &Path, ext: &str) -> ContentIndex {
 }
 
 #[test]
+fn test_508_phrase_deleted_candidate_is_error() {
+    use clap::Parser;
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("systemtemp");
+    fs::create_dir_all(&base).unwrap();
+    let fixture = tempfile::Builder::new().prefix("grep508-").tempdir_in(&base).unwrap();
+    let path = fixture.path().join("probe.rs");
+    fs::write(&path, "alpha beta\n").unwrap();
+    let index = build_content_index(&ContentIndexArgs {
+        dir: fixture.path().to_string_lossy().into_owned(),
+        ext: "rs".into(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    fs::remove_file(&path).unwrap();
+    let args = GrepArgs::try_parse_from(["xray", "alpha beta", "--phrase", "--count"]).unwrap();
+    assert!(matches!(
+        cmd_grep_phrase(&index, &args, &None, Duration::ZERO),
+        Err(SearchError::Io(_))
+    ), "a deleted candidate must not become a successful zero-match response");
+}
+
+fn phrase_read_fixture(files: &[(&str, &str)]) -> (tempfile::TempDir, ContentIndex) {
+    let files: Vec<_> = files.iter().map(|(name, content)| (*name, content.as_bytes())).collect();
+    phrase_read_bytes_fixture(&files)
+}
+
+fn phrase_read_bytes_fixture(files: &[(&str, &[u8])]) -> (tempfile::TempDir, ContentIndex) {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("systemtemp");
+    fs::create_dir_all(&base).unwrap();
+    let fixture = tempfile::Builder::new().prefix("grep508-").tempdir_in(&base).unwrap();
+    for (name, content) in files {
+        let path = fixture.path().join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    let index = build_content_index(&ContentIndexArgs {
+        dir: fixture.path().to_string_lossy().into_owned(),
+        ext: "rs,txt".into(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    (fixture, index)
+}
+
+fn phrase_read_args(flags: &[&str]) -> GrepArgs {
+    use clap::Parser;
+    GrepArgs::try_parse_from(["xray", "alpha beta", "--phrase"].into_iter().chain(flags.iter().copied())).unwrap()
+}
+
+fn assert_phrase_read_error<T>(result: Result<T, SearchError>, path: &str, original: &std::io::Error) {
+    match result {
+        Err(SearchError::Io(error)) => {
+            assert_eq!(error.kind(), original.kind());
+            let message = error.to_string();
+            assert!(message.contains(path), "{message}");
+            assert!(message.contains(&original.to_string()), "{message}");
+        }
+        _ => panic!("expected contextual file-read error for {path}"),
+    }
+}
+
+#[test]
+fn test_508_phrase_readable_and_genuine_zero_matches() {
+    let (_fixture, index) = phrase_read_fixture(&[("probe.rs", "alpha beta\nalpha   beta\n")]);
+    let candidates = find_phrase_candidates(&index, &["alpha".into(), "beta".into()], &None, &[], &[]);
+    let (matches, reads) = verify_phrase_matches(&index, &candidates, &Regex::new(r"alpha\s+beta").unwrap()).unwrap();
+    assert_eq!(reads, 1);
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].lines, [1, 2]);
+    let (matches, reads) = verify_phrase_matches(&index, &candidates, &Regex::new(r"beta\s+alpha").unwrap()).unwrap();
+    assert!(matches.is_empty());
+    assert_eq!(reads, 1);
+    let (matches, reads) = verify_phrase_matches(&index, &Default::default(), &Regex::new("absent").unwrap()).unwrap();
+    assert!(matches.is_empty());
+    assert_eq!(reads, 0);
+    for pattern in ["alpha beta", "beta alpha", "absent beta"] {
+        let mut args = phrase_read_args(&["--count", "--show-lines"]);
+        args.pattern = pattern.into();
+        cmd_grep_phrase(&index, &args, &None, Duration::ZERO).unwrap();
+    }
+}
+
+#[test]
+fn test_508_phrase_verifies_all_candidates_in_every_output_mode() {
+    let (fixture, index) = phrase_read_fixture(&[
+        ("good.rs", "alpha beta\n"), ("bad.rs", "alpha beta\n"),
+    ]);
+    let path = fixture.path().join("bad.rs");
+    fs::remove_file(&path).unwrap();
+    let original = fs::read(&path).unwrap_err();
+    let indexed_path = index.files.iter().find(|p| p.ends_with("bad.rs")).unwrap();
+    for flags in [
+        vec![], vec!["--count"], vec!["--show-lines"], vec!["--count", "--show-lines"],
+    ] {
+        let mut args = phrase_read_args(&flags);
+        args.max_results = 1;
+        assert_phrase_read_error(cmd_grep_phrase(&index, &args, &None, Duration::ZERO), indexed_path, &original);
+    }
+}
+
+#[test]
+fn test_508_phrase_filters_unreadable_candidates_before_verification() {
+    let excluded = Path::new("excluded").join("bad.rs");
+    let excluded_name = excluded.to_str().unwrap();
+    let (fixture, index) = phrase_read_fixture(&[
+        ("good.rs", "alpha beta\n"), ("bad.txt", "alpha beta\n"), (excluded_name, "alpha beta\n"),
+    ]);
+    fs::remove_file(fixture.path().join("bad.txt")).unwrap();
+    fs::remove_file(fixture.path().join(excluded)).unwrap();
+    let args = phrase_read_args(&["--count", "--exclude", "bad"]);
+    cmd_grep_phrase(&index, &args, &None, Duration::ZERO).unwrap();
+    let args = phrase_read_args(&["--show-lines", "--exclude-dir", "excluded"]);
+    cmd_grep_phrase(&index, &args, &Some(vec!["rs".into()]), Duration::ZERO).unwrap();
+}
+
+#[test]
+fn test_508_phrase_renderer_reports_deleted_after_verification() {
+    let regex = Regex::new(r"alpha\s+beta").unwrap();
+    let (fixture, index) = phrase_read_fixture(&[("probe.rs", "alpha beta\n")]);
+    let (matches, _) = verify_phrase_matches(&index, &[0].into(), &regex).unwrap();
+    let path = fixture.path().join("probe.rs");
+    fs::remove_file(&path).unwrap();
+    let original = fs::read(&path).unwrap_err();
+    assert_phrase_read_error(display_lines_with_context(&matches[0].file_path, &matches[0].lines, 1, 1), &matches[0].file_path, &original);
+}
+
+fn assert_supported_phrase_encoding(bytes: &[u8]) {
+    let (_fixture, index) = phrase_read_bytes_fixture(&[("probe.rs", bytes)]);
+    let candidates = find_phrase_candidates(&index, &["alpha".into(), "beta".into()], &None, &[], &[]);
+    assert_eq!(candidates.len(), 1, "the real indexer must produce a candidate");
+    let (matches, reads) = verify_phrase_matches(&index, &candidates, &Regex::new(r"alpha\s+beta").unwrap()).unwrap();
+    assert_eq!(reads, 1);
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].lines, [2, 3]);
+    display_lines_with_context(&matches[0].file_path, &matches[0].lines, 1, 1).unwrap();
+}
+
+#[test]
+fn test_508_phrase_supported_encoding_utf16le() {
+    let bytes: Vec<_> = [0xff, 0xfe].into_iter()
+        .chain("before café\nalpha beta café\nalpha   beta café\nafter café\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+    assert_supported_phrase_encoding(&bytes);
+}
+
+#[test]
+fn test_508_phrase_supported_encoding_utf16be() {
+    let bytes: Vec<_> = [0xfe, 0xff].into_iter()
+        .chain("before café\nalpha beta café\nalpha   beta café\nafter café\n".encode_utf16().flat_map(u16::to_be_bytes)).collect();
+    assert_supported_phrase_encoding(&bytes);
+}
+
+#[test]
+fn test_508_phrase_supported_encoding_lossy_windows1252() {
+    assert_supported_phrase_encoding(b"before caf\xe9\nalpha beta caf\xe9\nalpha   beta caf\xe9\nafter caf\xe9\n");
+}
+
+#[test]
+fn test_508_phrase_read_limit_is_contextual_error() {
+    let (fixture, index) = phrase_read_fixture(&[("probe.rs", "alpha beta\n")]);
+    let path = fixture.path().join("probe.rs");
+    let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.set_len(code_xray::MAX_INDEX_FILE_BYTES + 1).unwrap();
+    drop(file);
+    let original = code_xray::read_file_lossy(Path::new(&index.files[0])).unwrap_err();
+    assert!(original.to_string().contains("MAX_INDEX_FILE_BYTES"));
+    let regex = Regex::new(r"alpha\s+beta").unwrap();
+    assert_phrase_read_error(verify_phrase_matches(&index, &[0].into(), &regex), &index.files[0], &original);
+    assert_phrase_read_error(display_lines_with_context(&index.files[0], &[1], 0, 0), &index.files[0], &original);
+}
+
+#[cfg(windows)]
+#[test]
+fn test_508_phrase_windows_sharing_violation_and_renderer_recovery() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (fixture, index) = phrase_read_fixture(&[("probe.rs", "alpha beta\n")]);
+    let regex = Regex::new(r"alpha\s+beta").unwrap();
+    let (matches, _) = verify_phrase_matches(&index, &[0].into(), &regex).unwrap();
+    let lock = fs::OpenOptions::new().read(true).share_mode(0).open(fixture.path().join("probe.rs")).unwrap();
+    let original = fs::read_to_string(&index.files[0]).unwrap_err();
+    assert_eq!(original.raw_os_error(), Some(32));
+    assert_phrase_read_error(verify_phrase_matches(&index, &[0].into(), &regex), &index.files[0], &original);
+    assert_phrase_read_error(cmd_grep_phrase(&index, &phrase_read_args(&["--count"]), &None, Duration::ZERO), &index.files[0], &original);
+    assert_phrase_read_error(display_lines_with_context(&matches[0].file_path, &matches[0].lines, 0, 0), &index.files[0], &original);
+    drop(lock);
+    assert_eq!(verify_phrase_matches(&index, &[0].into(), &regex).unwrap().1, 1);
+    cmd_grep_phrase(&index, &phrase_read_args(&["--show-lines"]), &None, Duration::ZERO).unwrap();
+}
+
+#[test]
 fn test_502_normalize_query_extensions_preserves_invalid_entries() {
     assert_eq!(normalize_grep_extensions(&None), None);
     assert_eq!(normalize_grep_extensions(&Some(" RS, cs ,RS ".into())),
@@ -78,14 +267,14 @@ fn test_502_normalized_extensions_across_search_modes_preserve_cache() {
             }
             let candidates = find_phrase_candidates(&index, &["scope_not_found".into(), "alpha".into()], &ext, &[], &[]);
             assert_eq!(candidates.len(), expected_names.len());
-            let (results, _) = verify_phrase_matches(&index, &candidates, &phrase_re);
+            let (results, _) = verify_phrase_matches(&index, &candidates, &phrase_re).unwrap();
             assert_eq!(results.len(), expected_names.len());
             assert!(results.iter().all(|r| r.lines == [1, 2]));
             assert!(find_phrase_candidates(&index, &["genuinely_absent".into(), "alpha".into()], &ext, &[], &[]).is_empty());
             for (tokens, regex) in &nonmatching_phrases {
                 let candidates = find_phrase_candidates(&index, tokens, &ext, &[], &[]);
                 assert_eq!(candidates.len(), expected_names.len());
-                assert!(verify_phrase_matches(&index, &candidates, regex).0.is_empty());
+                assert!(verify_phrase_matches(&index, &candidates, regex).unwrap().0.is_empty());
             }
         }
     }

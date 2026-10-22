@@ -406,30 +406,32 @@ fn display_lines_with_context(
     match_line_numbers: &[u32],
     ctx_before: usize,
     ctx_after: usize,
-) {
-    if let Ok(content) = fs::read_to_string(file_path) {
-        let lines_vec: Vec<&str> = content.lines().collect();
-        let total_lines = lines_vec.len();
-        let mut lines_to_show: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
-        let mut match_lines_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        for &ln in match_line_numbers {
-            let idx = (ln as usize).saturating_sub(1);
-            if idx < total_lines {
-                match_lines_set.insert(idx);
-                let s = idx.saturating_sub(ctx_before);
-                let e = (idx + ctx_after).min(total_lines - 1);
-                for i in s..=e { lines_to_show.insert(i); }
-            }
+) -> Result<(), SearchError> {
+    let (content, _) = code_xray::read_file_lossy(Path::new(file_path)).map_err(|error| {
+        std::io::Error::new(error.kind(), format!("Cannot read source lines from '{file_path}': {error}"))
+    })?;
+    let lines_vec: Vec<&str> = content.lines().collect();
+    let total_lines = lines_vec.len();
+    let mut lines_to_show: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    let mut match_lines_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for &ln in match_line_numbers {
+        let idx = (ln as usize).saturating_sub(1);
+        if idx < total_lines {
+            match_lines_set.insert(idx);
+            let s = idx.saturating_sub(ctx_before);
+            let e = (idx + ctx_after).min(total_lines - 1);
+            for i in s..=e { lines_to_show.insert(i); }
         }
-        let mut prev: Option<usize> = None;
-        for &idx in &lines_to_show {
-            if let Some(p) = prev && idx > p + 1 { println!("--"); }
-            let marker = if match_lines_set.contains(&idx) { ">" } else { " " };
-            println!("{}{}:{}: {}", marker, file_path, idx + 1, lines_vec[idx]);
-            prev = Some(idx);
-        }
-        if !lines_to_show.is_empty() { println!(); }
     }
+    let mut prev: Option<usize> = None;
+    for &idx in &lines_to_show {
+        if let Some(p) = prev && idx > p + 1 { println!("--"); }
+        let marker = if match_lines_set.contains(&idx) { ">" } else { " " };
+        println!("{}{}:{}: {}", marker, file_path, idx + 1, lines_vec[idx]);
+        prev = Some(idx);
+    }
+    if !lines_to_show.is_empty() { println!(); }
+    Ok(())
 }
 
 /// Resolve the effective `respect_git_exclude` value for an auto-rebuild path.
@@ -560,7 +562,7 @@ fn verify_phrase_matches(
     index: &ContentIndex,
     candidates: &std::collections::HashSet<u32>,
     phrase_re: &Regex,
-) -> (Vec<PhraseMatch>, usize) {
+) -> Result<(Vec<PhraseMatch>, usize), SearchError> {
     let mut results: Vec<PhraseMatch> = Vec::new();
     let mut files_read = 0;
     for &file_id in candidates {
@@ -568,20 +570,21 @@ fn verify_phrase_matches(
             Some(p) => p,
             None => continue,
         };
-        if let Ok(content) = fs::read_to_string(file_path) {
-            files_read += 1;
-            if phrase_re.is_match(&content) {
-                let mut matching_lines = Vec::new();
-                for (line_num, line) in content.lines().enumerate() {
-                    if phrase_re.is_match(line) { matching_lines.push((line_num + 1) as u32); }
-                }
-                if !matching_lines.is_empty() {
-                    results.push(PhraseMatch { file_path: file_path.clone(), lines: matching_lines });
-                }
+        let (content, _) = code_xray::read_file_lossy(Path::new(file_path)).map_err(|error| {
+            std::io::Error::new(error.kind(), format!("Cannot verify phrase in '{file_path}': {error}"))
+        })?;
+        files_read += 1;
+        if phrase_re.is_match(&content) {
+            let mut matching_lines = Vec::new();
+            for (line_num, line) in content.lines().enumerate() {
+                if phrase_re.is_match(line) { matching_lines.push((line_num + 1) as u32); }
+            }
+            if !matching_lines.is_empty() {
+                results.push(PhraseMatch { file_path: file_path.clone(), lines: matching_lines });
             }
         }
     }
-    (results, files_read)
+    Ok((results, files_read))
 }
 
 /// Handle the entire phrase search branch (early return path).
@@ -626,7 +629,7 @@ fn cmd_grep_phrase(
     eprintln!("Found {} candidate files containing all tokens", candidates.len());
 
     let file_verify_start = Instant::now();
-    let (results, files_read) = verify_phrase_matches(index, &candidates, &phrase_re);
+    let (results, files_read) = verify_phrase_matches(index, &candidates, &phrase_re)?;
     let file_verify_ms = file_verify_start.elapsed().as_secs_f64() * 1000.0;
     eprintln!(
         "Phrase detail: postingScanMs={:.3} intersectionMs={:.3} filesRead={} fileVerifyMs={:.3}",
@@ -648,7 +651,7 @@ fn cmd_grep_phrase(
     if !args.count {
         for result in display_results {
             if args.show_lines {
-                display_lines_with_context(&result.file_path, &result.lines, ctx_before, ctx_after);
+                display_lines_with_context(&result.file_path, &result.lines, ctx_before, ctx_after)?;
             } else {
                 println!("{} ({} matches, lines: {})", result.file_path, result.lines.len(),
                     result.lines.iter().take(10).map(|n| n.to_string()).collect::<Vec<_>>().join(", "));
@@ -856,7 +859,8 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     if !args.count {
         for result in display_results {
             if args.show_lines {
-                display_lines_with_context(&result.file_path, &result.lines, ctx_before, ctx_after);
+                // Indexed token results remain valid when a best-effort source preview is unavailable.
+                let _ = display_lines_with_context(&result.file_path, &result.lines, ctx_before, ctx_after);
             } else {
                 println!("[{:.4}] {} ({} occurrences, {}/{} terms, lines: {})",
                     result.tf_idf, result.file_path, result.occurrences,

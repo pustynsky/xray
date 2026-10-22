@@ -203,8 +203,35 @@ xray grep "HttpClient" -d C:\Projects -e cs
 | `-C, --context <N>` | Show N context lines around matches (with --show-lines)                                                                                                                                                                    |
 | `-B, --before <N>`  | Show N lines before each match (with --show-lines)                                                                                                                                                                         |
 | `-A, --after <N>`   | Show N lines after each match (with --show-lines)                                                                                                                                                                          |
-| `--phrase`          | Phrase search: find exact phrase via index + verification. When the phrase contains punctuation (e.g., `</Property>`), a post-filter verifies matching lines against the raw untokenized text to eliminate false positives |
+| `--phrase`          | Phrase search: find a token sequence separated by whitespace via index candidates + file verification. All filtered candidates must be readable with the indexer's common decoder; read failures are errors, not zero matches |
 | `--exact`           | Exact token matching only (disables default substring search); a single term can receive the normalized file-stem ranking signal                                                                                                                                                              |
+
+Phrase searches verify every candidate remaining after extension/path filters before
+writing any result records, even with `--count` or `--max-results`. A read failure
+(including a deleted file, sharing violation, or exceeded read-size limit) reports
+`Error: I/O error: Cannot verify phrase in 'PATH': ORIGINAL_ERROR` on stderr and
+exits with code 1, without result records on stdout or a final success summary.
+Initial search diagnostics may already have been written to stderr. A genuine
+zero-match search still exits 0 with the existing zero-file/zero-line summary.
+
+Verification and source display use the same decoding as content indexing:
+UTF-8 (with an optional BOM), BOM-marked UTF-16LE/BE, and lossy UTF-8 decoding
+for other byte sequences. Invalid UTF-8 bytes become replacement characters
+(`�`), not read errors; legacy Windows-1252 text is not transcoded as Windows-1252.
+The shared `MAX_INDEX_FILE_BYTES` read-size limit also applies.
+
+Result records (including `--show-lines` source text) go to stdout; diagnostics,
+counts, timing, and errors go to stderr. `--count` suppresses result records, even
+when combined with `--show-lines`. If a file becomes unreadable between verification
+and `--show-lines` rendering, the command reports
+`Error: I/O error: Cannot read source lines from 'PATH': ORIGINAL_ERROR` and exits 1
+without a final success summary. Source records already printed for earlier files
+may remain on stdout; output is not an atomic snapshot of the filesystem.
+
+Ordinary indexed-token results/counts are unchanged and come from the index.
+Its `--show-lines` previews use the common decoder, and unavailable previews
+are still skipped on a best-effort basis. It does not verify all indexed files
+against the filesystem.
 
 `--exclude` and `--exclude-dir` match literal, case-insensitive path substrings.
 Both `\` and `/` are accepted, including mixed separators in relative or absolute
