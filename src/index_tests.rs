@@ -3,6 +3,170 @@ use std::collections::HashMap;
 use code_xray::Posting;
 use crate::index::build_trigram_index;
 
+fn cache_467_content_fixture(root: &str, generation: char, count: u32) -> code_xray::ContentIndex {
+    let mut index = code_xray::ContentIndex {
+        root: root.to_string(),
+        format_version: code_xray::CONTENT_INDEX_VERSION,
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    for i in 0..count {
+        index.files.push(format!("{generation}{i:03}.cs"));
+        index.index.insert(format!("{generation}{i:03}"), vec![Posting { file_id: i, lines: vec![i + 1] }]);
+        index.file_token_counts.push(1);
+    }
+    index.total_tokens = u64::from(count);
+    index
+}
+
+fn cache_467_save_content(path: &std::path::Path, index: &code_xray::ContentIndex) {
+    let mut entries: Vec<_> = index.index.iter().collect();
+    entries.sort_by_key(|(token, _)| *token);
+    crate::index::save_sharded(path, &index.build_head(), entries, "content-index").unwrap();
+}
+
+fn cache_467_assert_content(index: &code_xray::ContentIndex, generation: char, count: u32) {
+    assert_eq!(index.format_version, code_xray::CONTENT_INDEX_VERSION);
+    assert_eq!(index.files.len(), count as usize);
+    assert_eq!(index.index.len(), count as usize);
+    for i in 0..count {
+        let token = format!("{generation}{i:03}");
+        let postings = index.index.get(&token).unwrap_or_else(|| panic!("missing {token}; loaded tokens: {:?}", index.index.keys()));
+        assert_eq!(postings.len(), 1);
+        assert_eq!(postings[0].file_id, i);
+        assert_eq!(postings[0].lines, vec![i + 1]);
+        assert_eq!(index.files[postings[0].file_id as usize], format!("{generation}{i:03}.cs"));
+    }
+}
+
+fn cache_467_content_replacement(stage: crate::index::cache_load_test_hooks::Stage) {
+    use crate::index::{cache_load_test_hooks as hooks, content_index_path_for, load_content_index};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_str().unwrap();
+    let path = content_index_path_for(root, "cs", tmp.path());
+    let replacement = tmp.path().join("replacement");
+    let a = cache_467_content_fixture(root, 'a', 12);
+    let mut b = cache_467_content_fixture(root, 'b', 12);
+    if stage == hooks::Stage::Version {
+        b.format_version += 1;
+    }
+    cache_467_save_content(&path, &a);
+    cache_467_save_content(&replacement, &b);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), std::fs::metadata(&replacement).unwrap().len());
+    let target = path.clone();
+    let swapped = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = swapped.clone();
+    let _guard = hooks::on(&path, stage, move || {
+        hooks::replace(&target, &replacement).unwrap();
+        observed.set(true);
+    });
+    let loaded = load_content_index(root, "cs", tmp.path()).unwrap();
+    assert!(swapped.get(), "replacement hook did not run");
+    cache_467_assert_content(&loaded, 'a', 12);
+    let fresh = load_content_index(root, "cs", tmp.path());
+    if stage == hooks::Stage::Version {
+        assert!(matches!(fresh, Err(crate::SearchError::IndexLoad { message, .. }) if message.contains("format version mismatch")));
+    } else {
+        cache_467_assert_content(&fresh.unwrap(), 'b', 12);
+    }
+}
+
+#[test]
+fn cache_467_content_header_replacement() {
+    cache_467_content_replacement(crate::index::cache_load_test_hooks::Stage::Header);
+}
+
+#[test]
+fn cache_467_content_version_replacement() {
+    cache_467_content_replacement(crate::index::cache_load_test_hooks::Stage::Version);
+}
+
+#[test]
+fn cache_467_content_magic_replacement() {
+    cache_467_content_replacement(crate::index::cache_load_test_hooks::Stage::Magic);
+}
+
+#[test]
+fn cache_467_content_unchanged_multishard() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_str().unwrap();
+    for count in [0, 1, 3, 12, 4096] {
+        let index = cache_467_content_fixture(root, 'a', count);
+        let path = crate::index::content_index_path_for(root, "cs", tmp.path());
+        cache_467_save_content(&path, &index);
+        cache_467_assert_content(&crate::index::load_content_index(root, "cs", tmp.path()).unwrap(), 'a', count);
+    }
+}
+
+#[test]
+fn cache_467_content_legacy_replacement_and_controls() {
+    use crate::index::{cache_load_test_hooks as hooks, content_index_path_for, load_content_index, save_compressed};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_str().unwrap();
+    let path = content_index_path_for(root, "cs", tmp.path());
+    for compressed in [false, true] {
+        for stage in [hooks::Stage::Version, hooks::Stage::Magic] {
+            let a = cache_467_content_fixture(root, 'a', 12);
+            let b = cache_467_content_fixture(root, 'b', 12);
+            if compressed {
+                save_compressed(&path, &a, "content-index").unwrap();
+            } else {
+                std::fs::write(&path, bincode::serialize(&a).unwrap()).unwrap();
+            }
+            cache_467_assert_content(&load_content_index(root, "cs", tmp.path()).unwrap(), 'a', 12);
+            let replacement = tmp.path().join("replacement");
+            cache_467_save_content(&replacement, &b);
+            let target = path.clone();
+            let swapped = std::rc::Rc::new(std::cell::Cell::new(false));
+            let observed = swapped.clone();
+            let _guard = hooks::on(&path, stage, move || {
+                hooks::replace(&target, &replacement).unwrap();
+                observed.set(true);
+            });
+            cache_467_assert_content(&load_content_index(root, "cs", tmp.path()).unwrap(), 'a', 12);
+            assert!(swapped.get());
+            cache_467_assert_content(&load_content_index(root, "cs", tmp.path()).unwrap(), 'b', 12);
+        }
+    }
+}
+
+#[test]
+fn cache_467_content_corruption_is_explicit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_str().unwrap();
+    let path = crate::index::content_index_path_for(root, "cs", tmp.path());
+    cache_467_save_content(&path, &cache_467_content_fixture(root, 'a', 12));
+    let bytes = std::fs::read(&path).unwrap();
+    for (case, corrupt) in crate::index::cache_load_test_hooks::corrupt_sharded(&bytes) {
+        std::fs::write(&path, corrupt).unwrap();
+        let result = crate::index::load_content_index(root, "cs", tmp.path());
+        assert!(matches!(result, Err(crate::SearchError::IndexLoad { .. })), "{case}: {result:?}");
+    }
+}
+
+#[test]
+fn cache_467_positioned_readers_are_independent_and_bounded() {
+    use crate::index::PositionedShardReader;
+    use std::io::Read;
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("shards");
+    std::fs::write(&path, b"abcdefghijkl").unwrap();
+    let file = std::fs::File::open(path).unwrap();
+    let mut a = PositionedShardReader { file: &file, offset: 1, remaining: 3 };
+    let mut b = PositionedShardReader { file: &file, offset: 6, remaining: 4 };
+    let mut buf = [0u8; 8];
+    assert_eq!(a.read(&mut buf[..1]).unwrap(), 1);
+    assert_eq!(&buf[..1], b"b");
+    assert_eq!(b.read(&mut buf[..2]).unwrap(), 2);
+    assert_eq!(&buf[..2], b"gh");
+    assert_eq!(a.read(&mut buf).unwrap(), 2);
+    assert_eq!(&buf[..2], b"cd");
+    assert_eq!(a.read(&mut buf).unwrap(), 0);
+    assert_eq!(b.read(&mut buf).unwrap(), 2);
+    assert_eq!(&buf[..2], b"ij");
+    assert_eq!(b.read(&mut buf).unwrap(), 0);
+}
+
 #[test]
 fn test_build_trigram_index_basic() {
     let mut inverted: HashMap<String, Vec<Posting>> = HashMap::new();

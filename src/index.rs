@@ -905,15 +905,33 @@ pub fn save_compressed<T: serde::Serialize>(path: &std::path::Path, data: &T, la
     Ok(())
 }
 
+pub(crate) fn open_index_file(path: &std::path::Path) -> Result<std::fs::File, SearchError> {
+    std::fs::File::open(path).map_err(|e| SearchError::IndexLoad {
+        path: path.display().to_string(),
+        message: format!("cannot open file: {}", e),
+    })
+}
+
 /// Load a deserializable value from a file, supporting both LZ4-compressed
 /// and legacy uncompressed formats (backward compatibility).
 /// Returns `Err(SearchError::IndexLoad)` with a descriptive message on failure.
 pub fn load_compressed<T: serde::de::DeserializeOwned>(path: &std::path::Path, label: &str) -> Result<T, SearchError> {
+    let open_start = Instant::now();
+    let file = open_index_file(path)?;
+    load_compressed_from_file(file, path, label, open_start.elapsed())
+}
+
+pub(crate) fn load_compressed_from_file<T: serde::de::DeserializeOwned>(
+    file: std::fs::File,
+    path: &std::path::Path,
+    label: &str,
+    open_elapsed: Duration,
+) -> Result<T, SearchError> {
     let path_str = path.display().to_string();
     let start = Instant::now();
 
     let metadata_start = Instant::now();
-    let compressed_size = std::fs::metadata(path)
+    let compressed_size = file.metadata()
         .map_err(|e| SearchError::IndexLoad {
             path: path_str.clone(),
             message: format!("file not found or inaccessible: {}", e),
@@ -921,13 +939,7 @@ pub fn load_compressed<T: serde::de::DeserializeOwned>(path: &std::path::Path, l
         .len();
     let metadata_elapsed = metadata_start.elapsed();
 
-    let open_start = Instant::now();
-    let file = std::fs::File::open(path).map_err(|e| SearchError::IndexLoad {
-        path: path_str.clone(),
-        message: format!("cannot open file: {}", e),
-    })?;
     let mut reader = BufReader::new(file);
-    let open_elapsed = open_start.elapsed();
 
     let magic_start = Instant::now();
     let mut magic = [0u8; 4];
@@ -983,7 +995,7 @@ pub fn load_compressed<T: serde::de::DeserializeOwned>(path: &std::path::Path, l
     };
     let decode_elapsed = decode_start.elapsed();
 
-    let elapsed = start.elapsed();
+    let elapsed = start.elapsed() + open_elapsed;
     log_phase("indexLoad", &[
         ("indexLabel", label.to_string()),
         ("indexLoadMs", format_duration_ms(elapsed)),
@@ -1016,6 +1028,104 @@ pub const SHARD_MAGIC: &[u8; 4] = b"XRYS";
 /// on a typical dev machine (4-8 P-cores) while keeping the per-shard merge
 /// cost low and the on-disk header tiny (4 + 8*4 = 36 bytes).
 pub const SHARD_COUNT: usize = 4;
+
+#[cfg(test)]
+pub(crate) mod cache_load_test_hooks {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Stage { Version, Magic, Header }
+
+    struct Hook {
+        path: PathBuf,
+        stage: Stage,
+        action: Box<dyn FnOnce()>,
+    }
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            HOOK.with(|slot| { slot.borrow_mut().take(); });
+        }
+    }
+
+    pub fn on(path: &Path, stage: Stage, action: impl FnOnce() + 'static) -> Guard {
+        HOOK.with(|slot| {
+            assert!(slot.borrow().is_none(), "cache load hook already installed");
+            *slot.borrow_mut() = Some(Hook { path: path.to_path_buf(), stage, action: Box::new(action) });
+        });
+        Guard
+    }
+
+    pub fn run(path: &Path, stage: Stage) {
+        let hook = HOOK.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|hook| hook.path == path && hook.stage == stage) {
+                slot.take()
+            } else {
+                None
+            }
+        });
+        if let Some(hook) = hook {
+            (hook.action)();
+        }
+    }
+
+    pub fn replace(target: &Path, replacement: &Path) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+            let replacement: Vec<u16> = replacement.as_os_str().encode_wide().chain(Some(0)).collect();
+            // SAFETY: Both NUL-terminated path buffers outlive the call; optional pointers are null.
+            let ok = unsafe {
+                windows_sys::Win32::Storage::FileSystem::ReplaceFileW(
+                    target.as_ptr(), replacement.as_ptr(), std::ptr::null(), 0,
+                    std::ptr::null(), std::ptr::null(),
+                )
+            };
+            if ok == 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::rename(replacement, target)
+        }
+    }
+
+    pub fn corrupt_sharded(bytes: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
+        let head_size = u64::from_le_bytes(bytes[4..12].try_into().unwrap()) as usize;
+        let table = 12 + head_size;
+        let count = u32::from_le_bytes(bytes[table..table + 4].try_into().unwrap()) as usize;
+        let payload = table + 4 + 8 * count;
+        let mut cases = Vec::new();
+        for (name, end) in [
+            ("short magic", 3), ("short head size", 10),
+            ("short head", table - 1), ("short table", payload - 1),
+            ("missing payload", payload),
+        ] {
+            cases.push((name, bytes[..end].to_vec()));
+        }
+        let mut change = |name, offset: usize, value: &[u8]| {
+            let mut changed = bytes.to_vec();
+            changed[offset..offset + value.len()].copy_from_slice(value);
+            cases.push((name, changed));
+        };
+        change("bad magic", 0, b"NOPE");
+        change("oversized head", 4, &2_000_000_001u64.to_le_bytes());
+        change("oversized root", 12, &4097u64.to_le_bytes());
+        change("zero shards", table, &0u32.to_le_bytes());
+        change("too many shards", table, &1025u32.to_le_bytes());
+        change("oversized shard", table + 4, &2_000_000_001u64.to_le_bytes());
+        change("empty first shard", table + 4, &0u64.to_le_bytes());
+        cases
+    }
+}
 
 /// On-disk file layout written by `save_sharded`:
 ///
@@ -1218,19 +1328,45 @@ where
     Ok(())
 }
 
-/// Load a value saved by `save_sharded`. Decodes shards in parallel via
-/// `std::thread::scope` (one OS thread per shard). Each thread opens its
-/// own File handle, seeks to its shard offset, LZ4-decompresses, then
-/// bincode-deserializes its shard into a local `Vec<T>`. The main thread
-/// merges shards in order by extending a single pre-sized `Vec<T>`.
-///
-/// Returns `(head, merged_entries)` — the caller is responsible for assembling
-/// these into the final domain struct (e.g. `ContentIndex::from_head_and_entries`).
-///
-/// Errors out with a clear `SearchError::IndexLoad` if magic doesn't match
-/// `SHARD_MAGIC`. Callers that must tolerate legacy `LZ4_MAGIC` files should
-/// dispatch by magic themselves and fall back to `load_compressed`.
+struct PositionedShardReader<'a> {
+    file: &'a std::fs::File,
+    offset: u64,
+    remaining: u64,
+}
+
+impl Read for PositionedShardReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let len = self.remaining.min(buf.len() as u64) as usize;
+        if len == 0 { return Ok(0); }
+        #[cfg(unix)]
+        let read = std::os::unix::fs::FileExt::read_at(self.file, &mut buf[..len], self.offset)?;
+        #[cfg(windows)]
+        let read = std::os::windows::fs::FileExt::seek_read(self.file, &mut buf[..len], self.offset)?;
+        self.offset += read as u64;
+        self.remaining -= read as u64;
+        Ok(read)
+    }
+}
+
+/// Load a value saved by `save_sharded` from one opened snapshot. Bounded
+/// positioned reads decode shards in parallel, then merge in shard order.
+/// Returns `(head, merged_entries)` for the caller to reconstruct its index.
+/// Non-sharded magic is an explicit `SearchError::IndexLoad`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn load_sharded<H, T>(
+    path: &std::path::Path,
+    label: &str,
+) -> Result<(H, Vec<T>), SearchError>
+where
+    H: serde::de::DeserializeOwned,
+    T: serde::de::DeserializeOwned + Send,
+{
+    let file = open_index_file(path)?;
+    load_sharded_from_file(file, path, label)
+}
+
+pub(crate) fn load_sharded_from_file<H, T>(
+    mut file: std::fs::File,
     path: &std::path::Path,
     label: &str,
 ) -> Result<(H, Vec<T>), SearchError>
@@ -1249,7 +1385,7 @@ where
         .with_limit(2_000_000_000);
 
     let metadata_start = Instant::now();
-    let compressed_size = std::fs::metadata(path)
+    let compressed_size = file.metadata()
         .map_err(|e| SearchError::IndexLoad {
             path: path_str.clone(),
             message: format!("file not found or inaccessible: {}", e),
@@ -1258,10 +1394,6 @@ where
     let metadata_elapsed = metadata_start.elapsed();
 
     let header_start = Instant::now();
-    let mut file = std::fs::File::open(path).map_err(|e| SearchError::IndexLoad {
-        path: path_str.clone(),
-        message: format!("cannot open file: {}", e),
-    })?;
 
     let mut magic = [0u8; 4];
     file.read_exact(&mut magic).map_err(|e| SearchError::IndexLoad {
@@ -1311,6 +1443,9 @@ where
     let head_decode_elapsed = head_decode_start.elapsed();
     drop(head_bytes); // Release the head buffer before reading shard table.
 
+    #[cfg(test)]
+    cache_load_test_hooks::run(path, cache_load_test_hooks::Stage::Header);
+
     let mut count_buf = [0u8; 4];
     file.read_exact(&mut count_buf).map_err(|e| SearchError::IndexLoad {
         path: path_str.clone(),
@@ -1345,7 +1480,6 @@ where
         path: path_str.clone(),
         message: format!("stream_position error: {}", e),
     })?;
-    drop(file);
     let header_elapsed = header_start.elapsed();
 
     // Compute byte offset of each shard's LZ4 frame.
@@ -1356,28 +1490,24 @@ where
         cursor += *sz;
     }
 
-    // Parallel decode. Each thread owns an independent File handle so seeks
-    // don't race; the kernel page cache amortizes the overlapping reads.
+    // Every worker retains the same opened snapshot and its own logical offset.
+    // Windows seek_read changes the file cursor, so no cursor-based reads may
+    // overlap this phase.
     let decode_start = Instant::now();
-    let path_owned = path.to_path_buf();
     let opts = bincode_opts; // Copy — DefaultOptions and its with_* wrappers are Copy.
 
     type ShardOk<T> = (usize, Vec<T>, Duration, u64);
     let shard_results: Vec<Result<ShardOk<T>, String>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..shard_count)
             .map(|i| {
-                let p = path_owned.clone();
+                let file = &file;
                 let off = shard_offsets[i];
                 let sz = shard_sizes[i];
                 s.spawn(move || -> Result<ShardOk<T>, String> {
                     let t0 = Instant::now();
-                    let mut f = std::fs::File::open(&p)
-                        .map_err(|e| format!("shard {} open failed: {}", i, e))?;
-                    f.seek(SeekFrom::Start(off))
-                        .map_err(|e| format!("shard {} seek failed: {}", i, e))?;
                     // Bound the reader so a corrupted size cannot bleed into
                     // the next shard's bytes.
-                    let bounded = (&f).take(sz);
+                    let bounded = PositionedShardReader { file, offset: off, remaining: sz };
                     let buf_reader = BufReader::new(bounded);
                     let decoder = lz4_flex::frame::FrameDecoder::new(buf_reader);
                     let entries: Vec<T> = opts.deserialize_from(decoder)
@@ -1528,11 +1658,14 @@ pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -
 /// load. Legacy fallback exists only for tests that still write via raw
 /// `save_compressed`; production saves always use the sharded path.
 pub fn load_content_index_at_path(path: &std::path::Path) -> Result<ContentIndex, SearchError> {
+    let open_start = Instant::now();
+    let mut file = open_index_file(path)?;
+    let open_elapsed = open_start.elapsed();
     // Fast version check BEFORE full deserialization — reads ~100 bytes via LZ4
     // streaming decompression (legacy) or 12 bytes of plain header (sharded).
     // Prevents OOM/abort from deserializing old indexes whose shifted binary
     // layout causes garbled Vec lengths.
-    match read_format_version_from_index_file(path) {
+    match read_format_version_from_file(&mut file) {
         Some(v) if v != CONTENT_INDEX_VERSION => {
             eprintln!(
                 "[content-index] Format version mismatch (found {}, expected {}), index outdated",
@@ -1553,27 +1686,32 @@ pub fn load_content_index_at_path(path: &std::path::Path) -> Result<ContentIndex
         Some(_) => {} // version matches, proceed to full load
     }
 
+    #[cfg(test)]
+    cache_load_test_hooks::run(path, cache_load_test_hooks::Stage::Version);
+
     // Dispatch by magic so test harnesses that still use raw `save_compressed`
     // (LZ4_MAGIC, single frame) keep loading. Production save path emits
     // SHARD_MAGIC.
     let mut magic = [0u8; 4];
-    {
-        let mut f = std::fs::File::open(path).map_err(|e| SearchError::IndexLoad {
-            path: path.display().to_string(),
-            message: format!("cannot open file: {}", e),
-        })?;
-        f.read_exact(&mut magic).map_err(|e| SearchError::IndexLoad {
-            path: path.display().to_string(),
-            message: format!("read error (magic): {}", e),
-        })?;
-    }
+    file.rewind().map_err(|e| SearchError::IndexLoad {
+        path: path.display().to_string(), message: format!("seek error: {}", e),
+    })?;
+    file.read_exact(&mut magic).map_err(|e| SearchError::IndexLoad {
+        path: path.display().to_string(), message: format!("read error (magic): {}", e),
+    })?;
+    file.rewind().map_err(|e| SearchError::IndexLoad {
+        path: path.display().to_string(), message: format!("seek error: {}", e),
+    })?;
+
+    #[cfg(test)]
+    cache_load_test_hooks::run(path, cache_load_test_hooks::Stage::Magic);
 
     let mut index: ContentIndex = if &magic == SHARD_MAGIC {
-        let (head, entries) = load_sharded::<ContentIndexHead, (String, Vec<Posting>)>(path, "content-index")?;
+        let (head, entries) = load_sharded_from_file::<ContentIndexHead, (String, Vec<Posting>)>(file, path, "content-index")?;
         ContentIndex::from_head_and_entries(head, entries)
     } else {
         // Legacy LZ4_MAGIC or pre-LZ4 plain bincode — keep working for tests.
-        load_compressed(path, "content-index")?
+        load_compressed_from_file(file, path, "content-index", open_elapsed)?
     };
     index.normalize_loaded_path_to_id();
     Ok(index)
@@ -1718,10 +1856,15 @@ pub fn read_root_from_index_file_pub(path: &std::path::Path) -> Option<String> {
 /// Returns `None` if the file is too short or unreadable (legacy index without version).
 pub fn read_format_version_from_index_file(path: &std::path::Path) -> Option<u32> {
     let mut file = std::fs::File::open(path).ok()?;
+    read_format_version_from_file(&mut file)
+}
+
+pub(crate) fn read_format_version_from_file(file: &mut std::fs::File) -> Option<u32> {
+    file.rewind().ok()?;
     let mut magic = [0u8; 4];
     file.read_exact(&mut magic).ok()?;
 
-    let reader: Box<dyn Read> = if &magic == SHARD_MAGIC {
+    let reader: Box<dyn Read + '_> = if &magic == SHARD_MAGIC {
         // Sharded layout: skip the 8-byte head_size prefix, then the head
         // starts with `root: String` followed by `format_version: u32` — the
         // same logical layout the legacy single-frame format used inside LZ4,
