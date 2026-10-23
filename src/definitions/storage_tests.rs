@@ -2,6 +2,156 @@
 use super::*;
 use crate::definitions::DefinitionIndex;
 
+fn cache_467_definition_fixture(root: &str, generation: char, count: u32) -> DefinitionIndex {
+    use crate::definitions::{DefinitionEntry, DefinitionKind, DEFINITION_INDEX_VERSION};
+    let mut index = DefinitionIndex {
+        root: root.to_string(),
+        format_version: DEFINITION_INDEX_VERSION,
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    for i in 0..count {
+        let name = format!("{generation}{i:03}");
+        let path = format!("{generation}{i:03}.cs");
+        index.files.push(path.clone());
+        index.path_to_id.insert(std::path::PathBuf::from(path), i);
+        index.definitions.push(DefinitionEntry {
+            file_id: i, name: name.clone(), kind: DefinitionKind::Class,
+            line_start: i + 1, line_end: i + 2, parent: None, signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        });
+        index.name_index.insert(name, vec![i]);
+        index.kind_index.entry(DefinitionKind::Class).or_default().push(i);
+        index.file_index.insert(i, vec![i]);
+    }
+    index
+}
+
+fn cache_467_assert_definitions(index: &DefinitionIndex, generation: char, count: u32) {
+    assert_eq!(index.format_version, crate::definitions::DEFINITION_INDEX_VERSION);
+    assert_eq!(index.files.len(), count as usize);
+    assert_eq!(index.definitions.len(), count as usize);
+    for i in 0..count {
+        let name = format!("{generation}{i:03}");
+        let entry = &index.definitions[i as usize];
+        assert_eq!(entry.name, name);
+        assert_eq!(entry.file_id, i);
+        assert_eq!(entry.line_start, i + 1);
+        assert_eq!(index.files[entry.file_id as usize], format!("{generation}{i:03}.cs"));
+        assert_eq!(index.name_index.get(&name), Some(&vec![i]));
+        assert_eq!(index.file_index.get(&i), Some(&vec![i]));
+        assert_eq!(index.path_to_id.get(&std::path::PathBuf::from(&index.files[i as usize])), Some(&i));
+    }
+    if count > 0 {
+        assert_eq!(index.kind_index[&crate::definitions::DefinitionKind::Class], (0..count).collect::<Vec<_>>());
+    }
+}
+
+fn cache_467_definition_replacement(stage: crate::index::cache_load_test_hooks::Stage) {
+    use crate::index::cache_load_test_hooks as hooks;
+    let tmp = tempfile::tempdir().unwrap();
+    let replacement_dir = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_str().unwrap();
+    let a = cache_467_definition_fixture(root, 'a', 12);
+    let mut b = cache_467_definition_fixture(root, 'b', 12);
+    if stage == hooks::Stage::Version {
+        b.format_version += 1;
+    }
+    save_definition_index(&a, tmp.path()).unwrap();
+    save_definition_index(&b, replacement_dir.path()).unwrap();
+    let path = definition_index_path_for(root, "cs", tmp.path());
+    let replacement = definition_index_path_for(root, "cs", replacement_dir.path());
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), std::fs::metadata(&replacement).unwrap().len());
+    let target = path.clone();
+    let swapped = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = swapped.clone();
+    let _guard = hooks::on(&path, stage, move || {
+        hooks::replace(&target, &replacement).unwrap();
+        observed.set(true);
+    });
+    let loaded = load_definition_index(root, "cs", tmp.path()).unwrap();
+    assert!(swapped.get(), "replacement hook did not run");
+    cache_467_assert_definitions(&loaded, 'a', 12);
+    let fresh = load_definition_index(root, "cs", tmp.path());
+    if stage == hooks::Stage::Version {
+        assert!(matches!(fresh, Err(crate::SearchError::IndexLoad { message, .. }) if message.contains("format version mismatch")));
+    } else {
+        cache_467_assert_definitions(&fresh.unwrap(), 'b', 12);
+    }
+}
+
+#[test]
+fn cache_467_definition_header_replacement() {
+    cache_467_definition_replacement(crate::index::cache_load_test_hooks::Stage::Header);
+}
+
+#[test]
+fn cache_467_definition_version_replacement() {
+    cache_467_definition_replacement(crate::index::cache_load_test_hooks::Stage::Version);
+}
+
+#[test]
+fn cache_467_definition_magic_replacement() {
+    cache_467_definition_replacement(crate::index::cache_load_test_hooks::Stage::Magic);
+}
+
+#[test]
+fn cache_467_definition_unchanged_multishard() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_str().unwrap();
+    for count in [0, 1, 3, 12, 4096] {
+        let index = cache_467_definition_fixture(root, 'a', count);
+        save_definition_index(&index, tmp.path()).unwrap();
+        cache_467_assert_definitions(&load_definition_index(root, "cs", tmp.path()).unwrap(), 'a', count);
+    }
+}
+
+#[test]
+fn cache_467_definition_legacy_replacement_and_controls() {
+    use crate::index::{cache_load_test_hooks as hooks, save_compressed};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_str().unwrap();
+    let path = definition_index_path_for(root, "cs", tmp.path());
+    for compressed in [false, true] {
+        for stage in [hooks::Stage::Version, hooks::Stage::Magic] {
+            let a = cache_467_definition_fixture(root, 'a', 12);
+            let b = cache_467_definition_fixture(root, 'b', 12);
+            if compressed {
+                save_compressed(&path, &a, "definition-index").unwrap();
+            } else {
+                std::fs::write(&path, bincode::serialize(&a).unwrap()).unwrap();
+            }
+            cache_467_assert_definitions(&load_definition_index(root, "cs", tmp.path()).unwrap(), 'a', 12);
+            let replacement = tmp.path().join("replacement");
+            crate::index::save_sharded(&replacement, &b.build_head(), b.definitions.iter().collect(), "definition-index").unwrap();
+            let target = path.clone();
+            let swapped = std::rc::Rc::new(std::cell::Cell::new(false));
+            let observed = swapped.clone();
+            let _guard = hooks::on(&path, stage, move || {
+                hooks::replace(&target, &replacement).unwrap();
+                observed.set(true);
+            });
+            cache_467_assert_definitions(&load_definition_index(root, "cs", tmp.path()).unwrap(), 'a', 12);
+            assert!(swapped.get());
+            cache_467_assert_definitions(&load_definition_index(root, "cs", tmp.path()).unwrap(), 'b', 12);
+        }
+    }
+}
+
+#[test]
+fn cache_467_definition_corruption_is_explicit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_str().unwrap();
+    let path = definition_index_path_for(root, "cs", tmp.path());
+    save_definition_index(&cache_467_definition_fixture(root, 'a', 12), tmp.path()).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    for (case, corrupt) in crate::index::cache_load_test_hooks::corrupt_sharded(&bytes) {
+        std::fs::write(&path, corrupt).unwrap();
+        let result = load_definition_index(root, "cs", tmp.path());
+        assert!(matches!(result, Err(crate::SearchError::IndexLoad { .. })), "{case}: {result:?}");
+    }
+}
+
 /// Create a minimal DefinitionIndex with given root and extensions, save to disk.
 fn save_test_def_index(root: &str, exts: &[&str], index_base: &std::path::Path) {
     let idx = DefinitionIndex {
@@ -660,4 +810,3 @@ fn test_csharp_semantics_rejects_symbol_hash_mismatch() {
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("semantic index inconsistent"));
 }
-

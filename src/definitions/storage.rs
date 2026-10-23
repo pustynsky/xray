@@ -68,12 +68,16 @@ fn validate_loaded_definition_index(
 
 
 pub fn load_definition_index_at_path(path: &std::path::Path) -> Result<DefinitionIndex, crate::SearchError> {
-    use std::io::Read;
+    use std::io::{Read, Seek};
+
+    let open_start = std::time::Instant::now();
+    let mut file = crate::index::open_index_file(path)?;
+    let open_elapsed = open_start.elapsed();
 
     // Fast version check BEFORE full deserialization — reads ~100 bytes via LZ4
     // streaming decompression (legacy) or 12 bytes of plain header (sharded).
     // Prevents OOM/abort from old indexes with shifted layout.
-    match crate::index::read_format_version_from_index_file(path) {
+    match crate::index::read_format_version_from_file(&mut file) {
         Some(v) if v != super::types::DEFINITION_INDEX_VERSION => {
             eprintln!(
                 "[definition-index] Format version mismatch (found {}, expected {}), index outdated",
@@ -94,33 +98,38 @@ pub fn load_definition_index_at_path(path: &std::path::Path) -> Result<Definitio
         Some(_) => {} // version matches, proceed to full load
     }
 
+    #[cfg(test)]
+    crate::index::cache_load_test_hooks::run(path, crate::index::cache_load_test_hooks::Stage::Version);
+
     // Dispatch by magic so test harnesses that still use raw `save_compressed`
     // (LZ4_MAGIC, single frame) keep loading. Production save path emits
     // SHARD_MAGIC.
     let mut magic = [0u8; 4];
-    {
-        let mut f = std::fs::File::open(path).map_err(|e| crate::SearchError::IndexLoad {
-            path: path.display().to_string(),
-            message: format!("cannot open file: {}", e),
-        })?;
-        f.read_exact(&mut magic).map_err(|e| crate::SearchError::IndexLoad {
-            path: path.display().to_string(),
-            message: format!("read error (magic): {}", e),
-        })?;
-    }
+    file.rewind().map_err(|e| crate::SearchError::IndexLoad {
+        path: path.display().to_string(), message: format!("seek error: {}", e),
+    })?;
+    file.read_exact(&mut magic).map_err(|e| crate::SearchError::IndexLoad {
+        path: path.display().to_string(), message: format!("read error (magic): {}", e),
+    })?;
+    file.rewind().map_err(|e| crate::SearchError::IndexLoad {
+        path: path.display().to_string(), message: format!("seek error: {}", e),
+    })?;
+
+    #[cfg(test)]
+    crate::index::cache_load_test_hooks::run(path, crate::index::cache_load_test_hooks::Stage::Magic);
 
     if &magic == crate::index::SHARD_MAGIC {
-        let (head, definitions) = crate::index::load_sharded::<
+        let (head, definitions) = crate::index::load_sharded_from_file::<
             super::types::DefinitionIndexHead,
             super::types::DefinitionEntry,
-        >(path, "definition-index")?;
+        >(file, path, "definition-index")?;
         validate_loaded_definition_index(
             DefinitionIndex::from_head_and_entries(head, definitions),
             path,
         )
     } else {
         // Legacy LZ4_MAGIC or pre-LZ4 plain bincode — keep working for tests.
-        let index = crate::index::load_compressed(path, "definition-index")?;
+        let index = crate::index::load_compressed_from_file(file, path, "definition-index", open_elapsed)?;
         validate_loaded_definition_index(index, path)
     }
 }

@@ -119,9 +119,10 @@ Load goes through `load_compressed::<T>(&path, label)` which streams
 Large indexes carry a heavy entries payload (the `index: HashMap` of
 `ContentIndex`, the `definitions: Vec` of `DefinitionIndex`) that dominates
 bincode decode wall time. The sharded layout splits that payload into N
-independent LZ4 frames whose byte offsets are recorded up front, so
-`load_sharded` can `seek` directly to each shard and decode it on its own
-OS thread.
+independent LZ4 frames whose byte offsets are recorded up front. The loader
+retains one opened file and uses bounded positioned reads (`read_at` on Unix,
+`seek_read` on Windows) to decode each shard on its own OS thread with an
+independent logical offset.
 
 Byte layout written by `save_sharded`:
 
@@ -150,12 +151,23 @@ Byte layout written by `save_sharded`:
 
 Load path:
 
-1. `load_content_index_at_path` / `load_definition_index_at_path` peek the
-   first 4 bytes.
-2. `LZ4_MAGIC` -> `load_compressed` (legacy / test fixtures still allowed).
-3. `SHARD_MAGIC` -> `load_sharded::<H, T>` -> `(head, Vec<T>)` ->
+1. `load_content_index_at_path` / `load_definition_index_at_path` open the
+   file once, check its format version before full deserialization, and rewind
+   the same file to inspect its magic.
+2. `LZ4_MAGIC` -> single-frame decoding from that opened file; legacy plain
+   bincode remains supported.
+3. `SHARD_MAGIC` -> parallel sharded decoding from that opened file ->
+   `(head, Vec<T>)` ->
    `ContentIndex::from_head_and_entries` /
    `DefinitionIndex::from_head_and_entries`.
+
+Version checks, magic dispatch, header/table reads, and payload decoding all use
+the same opened snapshot, including legacy loads. An atomic pathname replacement
+during loading does not mix the old file table with new shards: the in-flight
+load can return the complete older snapshot, and a later load opens the
+replacement. This does not guarantee the newest snapshot or repair caches
+already corrupted before loading. Corrupt or incompatible snapshots remain
+explicit load errors. Cache formats and version numbers are unchanged.
 
 Per-shard decode is timed and reported in the debug log via
 `indexShardCount`, `indexShardDecodeMaxMs`, `indexMergeMs`, `indexHeaderMs`,
