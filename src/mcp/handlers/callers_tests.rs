@@ -569,6 +569,7 @@ fn test_prefilter_does_not_expand_by_base_types() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let callers = builder.build(
         "Dispose",
@@ -688,6 +689,7 @@ fn test_callee_tree_depth2_no_cross_class_pollution() {
         root_page_size: 0,
         root_total_candidates: 0,
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let callees = callee_builder.build("process", Some("ClassA"), 0);
 
@@ -2529,6 +2531,7 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let callers = builder.build(
         "Process",
@@ -2938,6 +2941,7 @@ fn test_sql_callee_tree_exec_dependencies() {
         root_page_size: 0,
         root_total_candidates: 0,
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let callees = callee_builder.build("usp_ProcessBatch", Some("dbo"), 0);
 
@@ -3063,6 +3067,7 @@ fn test_sql_caller_tree_who_calls_sp() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let callers = builder.build(
         "usp_ValidateOrder",
@@ -3163,6 +3168,7 @@ fn test_sql_function_definition_is_not_reported_as_unscoped_self_caller() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
 
     let callers = builder.build("ufn_WR_Value", None, 0, &[]);
@@ -3485,6 +3491,7 @@ END
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let callers = caller_builder.build("ufn_WR_Value", None, 0, &[]);
     assert_eq!(callers.len(), 1, "expected only the real caller: {callers:?}");
@@ -3505,6 +3512,7 @@ END
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let target_callers = masked_exec_builder.build("TargetProc", Some("dbo"), 0, &[]);
     assert_eq!(
@@ -3538,6 +3546,7 @@ END
             root_total_candidates: 0,
             interface_lookup_cache: HashMap::new(),
             unresolved_call_reasons: std::collections::BTreeMap::new(),
+            unverified_member_sites: HashSet::new(),
         };
         let quoted_callers = quoted_caller_builder.build(target, Some(parent), 0, &[]);
         assert_eq!(
@@ -3569,6 +3578,7 @@ END
             root_page_size: 0,
             root_total_candidates: 0,
             unresolved_call_reasons: std::collections::BTreeMap::new(),
+            unverified_member_sites: HashSet::new(),
         };
         let quoted_callees = quoted_callee_builder.build(caller, Some(parent), 0);
         assert_eq!(
@@ -3594,6 +3604,7 @@ END
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let recursive_callers =
         recursive_caller_builder.build("ufn_WR_Recurse", None, 0, &[]);
@@ -3619,6 +3630,7 @@ END
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let collision_callers = collision_builder.build("value", None, 0, &[]);
     assert_eq!(
@@ -3643,6 +3655,7 @@ END
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let spatial_collision_callers =
         spatial_collision_builder.build("STDistance", None, 0, &[]);
@@ -3663,6 +3676,7 @@ END
         root_page_size: 0,
         root_total_candidates: 0,
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let callees = callee_builder.build("usp_WR_Root", Some("dbo"), 0);
     let callee_names: HashSet<_> = callees
@@ -4452,6 +4466,7 @@ fn test_impact_analysis_finds_test_methods() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let callers = builder.build(
         "process", Some("OrderService"), 0, &initial_chain,
@@ -4506,6 +4521,7 @@ fn test_impact_analysis_finds_test_methods() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let production_callers = production_builder.build(
         "process", Some("OrderService"), 0, &initial_chain,
@@ -4632,6 +4648,7 @@ fn test_impact_analysis_non_test_method_recurses_normally() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let callers = builder.build(
         "process", Some("OrderService"), 0, &initial_chain,
@@ -5901,6 +5918,7 @@ fn test_per_level_truncation_reports_dropped_count() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let callers = builder.build("Process", None, 0, &[]);
 
@@ -5997,6 +6015,7 @@ fn test_per_level_truncation_not_set_when_under_limit() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let _ = builder.build("Process", Some("ClassA"), 0, &[]);
     assert_eq!(builder.per_level_dropped, 0, "Nothing should be dropped under the limit");
@@ -7010,6 +7029,7 @@ fn test_impact_analysis_cap_sets_truncation_flag_when_collection_capped() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let _ = builder.build("Process", None, 0, &[]);
 
@@ -7059,6 +7079,7 @@ fn test_impact_analysis_bounded_collection_starves_late_test_callers() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let _ = builder.build("Process", None, 0, &[]);
 
@@ -7118,6 +7139,7 @@ fn test_impact_analysis_with_class_filter_avoids_starvation() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let _ = builder.build("Process", Some("ClassA"), 0, &[]);
 
@@ -7299,6 +7321,7 @@ fn test_mid_tree_iface_expansion_finds_caller_through_sibling_impl() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let tree = builder.build("Foo", Some("Worker"), 0, &[]);
 
@@ -7343,6 +7366,7 @@ fn test_mid_tree_iface_expansion_finds_caller_through_sibling_impl() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let tree_off = builder_off.build("Foo", Some("Worker"), 0, &[]);
     let consumer_run_off = tree_off.first()
@@ -7381,6 +7405,7 @@ fn test_mid_tree_iface_expansion_finds_caller_through_sibling_impl() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let tree_d1 = builder_d1.build("Foo", Some("Worker"), 0, &[]);
     let depth1_d1 = &tree_d1[0];
@@ -7543,6 +7568,7 @@ fn test_root_iface_expansion_honors_visible_depth_budget() {
         root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
         unresolved_call_reasons: std::collections::BTreeMap::new(),
+        unverified_member_sites: HashSet::new(),
     };
     let tree = builder.build("Method", Some("ConcreteImpl1"), 0, &[]);
 
