@@ -11,6 +11,295 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+const CALLERS_394_REASON: &str = "unverified_typescript_member_target";
+
+struct Callers394Fixture {
+    _temporary: tempfile::TempDir,
+    ctx: HandlerContext,
+}
+
+impl Callers394Fixture {
+    fn new(files: &[(&str, &str)]) -> Self {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("systemtemp");
+        std::fs::create_dir_all(&base).unwrap();
+        let temporary = tempfile::Builder::new().prefix("callers394-").tempdir_in(base).unwrap();
+        let root = crate::canonicalize_test_root(temporary.path());
+        let mut definitions = DefinitionIndex {
+            root: root.to_string_lossy().to_string(),
+            extensions: vec!["ts".into(), "tsx".into(), "rs".into()],
+            ..Default::default()
+        };
+        for (name, source) in files {
+            let path = root.join(name);
+            std::fs::write(&path, source).unwrap();
+            let path = PathBuf::from(crate::clean_path(&path.to_string_lossy()));
+            crate::definitions::update_file_definitions(&mut definitions, &path);
+        }
+        let content = crate::build_content_index(&crate::ContentIndexArgs {
+            dir: root.to_string_lossy().to_string(),
+            ext: "ts,tsx,rs".into(),
+            threads: 1,
+            no_ignore: true,
+            ..Default::default()
+        }).unwrap();
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(content)),
+            def_index: Some(Arc::new(RwLock::new(definitions))),
+            workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(root.to_string_lossy().to_string()))),
+            server_ext: "ts,tsx,rs".into(),
+            ..Default::default()
+        };
+        Self { _temporary: temporary, ctx }
+    }
+
+    fn query(&self, args: Value) -> Value {
+        let result = dispatch_tool(&self.ctx, "xray_callers", &args);
+        assert!(!result.is_error, "{}", result.content[0].text);
+        serde_json::from_str(&result.content[0].text).unwrap()
+    }
+}
+
+fn callers_394_assert_partial(output: &Value, count: usize) {
+    assert_eq!(output["resultStatus"]["status"], "partial", "{output}");
+    for field in ["complete", "safeForExhaustiveClaims", "totalKnown"] {
+        assert_eq!(output["resultStatus"][field], false, "{field}: {output}");
+    }
+    assert_eq!(output["summary"]["unresolvedCallSites"], count, "{output}");
+    assert_eq!(output["summary"]["unresolvedCallReasons"][CALLERS_394_REASON], count, "{output}");
+    assert_eq!(output["summary"]["unresolvedCallSitesScope"], "traversedGraph");
+    assert!(output["resultStatus"]["reasons"].as_array().unwrap().iter()
+        .any(|reason| reason == CALLERS_394_REASON), "{output}");
+}
+
+fn callers_394_assert_clean(output: &Value) {
+    assert_eq!(output["resultStatus"]["complete"], true, "{output}");
+    assert_eq!(output["resultStatus"]["safeForExhaustiveClaims"], true, "{output}");
+    assert!(output["summary"]["unresolvedCallReasons"][CALLERS_394_REASON].is_null(), "{output}");
+}
+
+const CALLERS_394_TARGETS: &str = "export class Target {\n run(): void {}\n touch(): void {}\n}\nexport class Other {\n run(): void {}\n}\n";
+
+#[test]
+fn callers_394_unknown_member_up_zero_edges() {
+    let source = format!("{CALLERS_394_TARGETS}\nexport function invoke(receiver: unknown): void {{\n (receiver as any).run();\n}}\n");
+    let fixture = Callers394Fixture::new(&[("graph.ts", &source)]);
+    let output = fixture.query(json!({"method":["run"],"class":"Target","depth":1}));
+    assert!(output["callTree"].as_array().unwrap().is_empty(), "{output}");
+    callers_394_assert_partial(&output, 1);
+}
+
+#[test]
+fn callers_394_unknown_member_down_zero_edges() {
+    let source = format!("{CALLERS_394_TARGETS}\nexport function invoke(receiver: unknown): void {{\n (receiver as any).run();\n}}\n");
+    let fixture = Callers394Fixture::new(&[("graph.ts", &source)]);
+    let output = fixture.query(json!({"method":["invoke"],"direction":"down","depth":1}));
+    assert!(output["callTree"].as_array().unwrap().is_empty(), "{output}");
+    callers_394_assert_partial(&output, 1);
+}
+
+#[test]
+fn callers_394_split_file_unknown_bypasses_only_lexical_pruning() {
+    let fixture = Callers394Fixture::new(&[
+        ("target.ts", CALLERS_394_TARGETS),
+        ("invoke.ts", "export function invoke(receiver: unknown): void {\n (receiver as any).run();\n}\n"),
+    ]);
+    let output = fixture.query(json!({"method":["run"],"class":"Target","depth":1}));
+    assert!(output["callTree"].as_array().unwrap().is_empty(), "{output}");
+    callers_394_assert_partial(&output, 1);
+}
+
+#[test]
+fn callers_394_exact_and_unknown_preserve_edge_and_same_line_evidence() {
+    for separator in [" ", "\n"] {
+        let source = format!("{CALLERS_394_TARGETS}\nexport function invoke(known: Target, receiver: unknown): void {{\n known.run();{separator}(receiver as any).run();\n}}\n");
+        let fixture = Callers394Fixture::new(&[("graph.ts", &source)]);
+        for args in [
+            json!({"method":["run"],"class":"Target","depth":1}),
+            json!({"method":["invoke"],"direction":"down","depth":1}),
+        ] {
+            let output = fixture.query(args);
+            let tree = output["callTree"].as_array().unwrap();
+            assert_eq!(tree.len(), 1, "{output}");
+            assert!(tree[0]["method"] == "invoke" || tree[0]["method"] == "run", "{output}");
+            callers_394_assert_partial(&output, 1);
+        }
+    }
+}
+
+#[test]
+fn callers_394_distinct_unknown_ordinals_on_one_line_count_twice() {
+    let source = format!("{CALLERS_394_TARGETS}\nexport function invoke(first: MissingA, second: MissingB): void {{\n first.run(); second.run();\n}}\n");
+    let fixture = Callers394Fixture::new(&[("graph.ts", &source)]);
+    {
+        let index = fixture.ctx.def_index.as_ref().unwrap().read().unwrap();
+        let invoke = index.definitions.iter().position(|definition| definition.name == "invoke").unwrap();
+        let calls = index.method_calls.get(&(invoke as u32)).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].line, calls[1].line);
+        assert!(calls.iter().all(|call| call.call_kind == crate::definitions::CallSiteKind::TypeScriptMember));
+        assert_ne!(calls[0].receiver_type, calls[1].receiver_type);
+    }
+    for args in [
+        json!({"method":["run"],"class":"Target","depth":1}),
+        json!({"method":["invoke"],"direction":"down","depth":1}),
+    ] {
+        let output = fixture.query(args);
+        assert!(output["callTree"].as_array().unwrap().is_empty(), "{output}");
+        callers_394_assert_partial(&output, 2);
+    }
+}
+
+#[test]
+fn callers_394_missing_owner_identity_is_not_a_proven_mismatch() {
+    let source = format!("{CALLERS_394_TARGETS}\nexport function invoke(receiver: ExternalReceiver): void {{\n receiver.run();\n}}\n");
+    let fixture = Callers394Fixture::new(&[("graph.ts", &source)]);
+    for args in [
+        json!({"method":["run"],"class":"Target","depth":1}),
+        json!({"method":["invoke"],"direction":"down","depth":1}),
+    ] {
+        let output = fixture.query(args);
+        assert!(output["callTree"].as_array().unwrap().is_empty(), "{output}");
+        callers_394_assert_partial(&output, 1);
+    }
+}
+
+#[test]
+fn callers_394_indexed_receiver_mismatch_is_clean() {
+    let source = format!("{CALLERS_394_TARGETS}\nexport function invoke(receiver: Other): void {{\n receiver.run();\n}}\n");
+    let fixture = Callers394Fixture::new(&[("graph.ts", &source)]);
+    let output = fixture.query(json!({"method":["run"],"class":"Target","depth":1}));
+    assert!(output["callTree"].as_array().unwrap().is_empty(), "{output}");
+    callers_394_assert_clean(&output);
+    let output = fixture.query(json!({"method":["invoke"],"direction":"down","depth":1}));
+    assert_eq!(output["callTree"].as_array().unwrap().len(), 1, "{output}");
+    assert_eq!(output["callTree"][0]["class"], "Other", "{output}");
+    callers_394_assert_clean(&output);
+}
+
+#[test]
+fn callers_394_typed_this_and_constructed_receivers_remain_exact() {
+    for (source, down_class) in [
+        (format!("{CALLERS_394_TARGETS}\nexport function invoke(known: Target): void {{\n known.run();\n}}\n"), None),
+        (format!("{CALLERS_394_TARGETS}\nexport function invoke(): void {{\n new Target().run();\n}}\n"), None),
+        ("export class Target {\n run(): void {}\n invoke(): void {\n this.run();\n }\n}\n".to_string(), Some("Target")),
+    ] {
+        let fixture = Callers394Fixture::new(&[("graph.ts", &source)]);
+        let up = fixture.query(json!({"method":["run"],"class":"Target","depth":1}));
+        assert_eq!(up["callTree"].as_array().unwrap().len(), 1, "{up}");
+        callers_394_assert_clean(&up);
+        let mut args = json!({"method":["invoke"],"direction":"down","depth":1});
+        if let Some(class) = down_class { args["class"] = json!(class); }
+        let down = fixture.query(args);
+        assert_eq!(down["callTree"].as_array().unwrap().len(), 1, "{down}");
+        assert_eq!(down["callTree"][0]["class"], "Target", "{down}");
+        callers_394_assert_clean(&down);
+    }
+}
+
+#[test]
+fn callers_394_builtin_and_absent_candidates_do_not_manufacture_uncertainty() {
+    for source in [
+        format!("{CALLERS_394_TARGETS}\nexport function invoke(): void {{\n Array.run();\n}}\n"),
+        "export function invoke(receiver: unknown): void {\n (receiver as any).absent();\n}\n".to_string(),
+    ] {
+        let fixture = Callers394Fixture::new(&[("graph.ts", &source)]);
+        let output = fixture.query(json!({"method":["invoke"],"direction":"down","depth":1}));
+        assert!(output["callTree"].as_array().unwrap().is_empty(), "{output}");
+        callers_394_assert_clean(&output);
+    }
+}
+
+#[test]
+fn callers_394_up_evidence_obeys_explicit_scope_not_lexical_class_tokens() {
+    let fixture = Callers394Fixture::new(&[
+        ("target.ts", CALLERS_394_TARGETS),
+        ("worker.spec.ts", "export function check(receiver: unknown): void {\n (receiver as any).run();\n}\n"),
+        ("outside.tsx", "export function outside(receiver: unknown): void {\n (receiver as any).run();\n}\n"),
+        ("ordinary.ts", "export function ordinary(receiver: unknown): void {\n (receiver as any).touch();\n}\n"),
+    ]);
+    let output = fixture.query(json!({"method":["run"],"class":"Target","ext":["ts"],"productionOnly":true}));
+    callers_394_assert_clean(&output);
+    let output = fixture.query(json!({"method":["run"],"class":"Target","ext":["ts"]}));
+    callers_394_assert_partial(&output, 1);
+    let output = fixture.query(json!({"method":["run"],"class":"Target","ext":["ts"],"excludeFile":["worker.spec.ts"]}));
+    callers_394_assert_clean(&output);
+    let output = fixture.query(json!({"method":["run"],"class":"Target","ext":["ts","tsx"],"productionOnly":true}));
+    callers_394_assert_partial(&output, 1);
+}
+
+#[test]
+fn callers_394_down_rejected_candidate_scope_is_respected() {
+    for (target, excluded) in [
+        ("target.tsx", json!({"ext":["ts"]})),
+        ("target.spec.ts", json!({"productionOnly":true})),
+        ("target.ts", json!({"excludeFile":["target.ts"]})),
+    ] {
+        let fixture = Callers394Fixture::new(&[
+            (target, CALLERS_394_TARGETS),
+            ("invoke.ts", "export function invoke(receiver: unknown): void {\n (receiver as any).run();\n}\n"),
+        ]);
+        let mut args = json!({"method":["invoke"],"direction":"down","depth":1});
+        for (key, value) in excluded.as_object().unwrap() { args[key] = value.clone(); }
+        callers_394_assert_clean(&fixture.query(args));
+        let output = fixture.query(json!({"method":["invoke"],"direction":"down","depth":1}));
+        assert!(output["callTree"].as_array().unwrap().is_empty(), "{output}");
+        callers_394_assert_partial(&output, 1);
+    }
+}
+
+#[test]
+fn callers_394_recursive_up_propagates_descendant_evidence() {
+    let source = format!("{CALLERS_394_TARGETS}\nexport class Bridge {{\n hop(target: Target): void {{ target.run(); }}\n}}\nexport function invoke(known: Bridge, target: Target, receiver: unknown): void {{\n known.hop(target); (receiver as any).hop(target);\n}}\n");
+    let fixture = Callers394Fixture::new(&[("graph.ts", &source)]);
+    let output = fixture.query(json!({"method":["run"],"class":"Target","depth":2}));
+    assert_eq!(output["callTree"][0]["method"], "hop", "{output}");
+    assert_eq!(output["callTree"][0]["callers"][0]["method"], "invoke", "{output}");
+    callers_394_assert_partial(&output, 1);
+}
+
+#[test]
+fn callers_394_recursive_down_propagates_descendant_evidence() {
+    let source = format!("{CALLERS_394_TARGETS}\nexport class Bridge {{\n hop(target: Target, receiver: unknown): void {{\n target.run(); (receiver as any).run();\n }}\n}}\nexport function invoke(known: Bridge, target: Target, receiver: unknown): void {{\n known.hop(target, receiver);\n}}\n");
+    let fixture = Callers394Fixture::new(&[("graph.ts", &source)]);
+    let output = fixture.query(json!({"method":["invoke"],"direction":"down","depth":2}));
+    assert_eq!(output["callTree"][0]["method"], "hop", "{output}");
+    assert_eq!(output["callTree"][0]["callees"][0]["method"], "run", "{output}");
+    callers_394_assert_partial(&output, 1);
+}
+
+#[test]
+fn callers_394_recursive_down_counts_revisited_root_ordinal_once() {
+    let source = format!("{CALLERS_394_TARGETS}\nexport class Bridge {{\n hop(receiver: unknown): void {{\n this.hop(receiver); (receiver as any).run();\n }}\n}}\n");
+    let fixture = Callers394Fixture::new(&[("graph.ts", &source)]);
+    for (class, depth) in [(None, 1), (None, 3), (Some("Bridge"), 3)] {
+        let output = fixture.query(json!({
+            "method":["hop"],"class":class,"direction":"down","depth":depth,
+        }));
+        assert_eq!(output["callTree"][0]["method"], "hop", "{output}");
+        callers_394_assert_partial(&output, 1);
+    }
+}
+
+#[test]
+fn callers_394_batch_counts_per_graph_and_aggregates_reasons() {
+    let source = format!("{CALLERS_394_TARGETS}\nexport function first(receiver: unknown): void {{\n (receiver as any).run();\n}}\nexport function second(receiver: unknown): void {{\n (receiver as any).touch();\n}}\n");
+    let fixture = Callers394Fixture::new(&[("graph.ts", &source)]);
+    for args in [
+        json!({"method":["run","touch"],"class":"Target","depth":1}),
+        json!({"method":["first","second"],"direction":"down","depth":1}),
+    ] {
+        let output = fixture.query(args);
+        callers_394_assert_partial(&output, 2);
+        let results = output["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2, "{output}");
+        for result in results {
+            assert!(result["callTree"].as_array().unwrap().is_empty(), "{output}");
+            assert_eq!(result["unresolvedCallSites"], 1, "{output}");
+            assert_eq!(result["unresolvedCallReasons"][CALLERS_394_REASON], 1, "{output}");
+        }
+    }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 /// Helper: create a context with both content + definition indexes (TypeScript classes/methods/functions/etc).

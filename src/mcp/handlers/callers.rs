@@ -1626,6 +1626,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             root_total_candidates: 0,
             interface_lookup_cache: HashMap::new(),
             unresolved_call_reasons: std::collections::BTreeMap::new(),
+            unverified_member_sites: HashSet::new(),
         };
         let tree = if let Some(root_definition) = traversal_root_definition {
             builder.build_exact_root(
@@ -1869,6 +1870,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             root_page_size: max_results,
             root_total_candidates: 0,
             unresolved_call_reasons: std::collections::BTreeMap::new(),
+            unverified_member_sites: HashSet::new(),
         };
         let tree = if let Some(root_definition) = traversal_root_definition {
             builder.build_exact_root(
@@ -2249,6 +2251,7 @@ fn handle_multi_method_callers(
                 root_total_candidates: 0,
                 interface_lookup_cache: HashMap::new(),
                 unresolved_call_reasons: std::collections::BTreeMap::new(),
+                unverified_member_sites: HashSet::new(),
             };
             let tree = if selected_typescript_roots.len() > 1
                 && !legacy_typescript_ambiguous_root
@@ -2377,6 +2380,7 @@ fn handle_multi_method_callers(
                 root_page_size: 0,
                 root_total_candidates: 0,
                 unresolved_call_reasons: std::collections::BTreeMap::new(),
+                unverified_member_sites: HashSet::new(),
             };
             let tree = if selected_typescript_roots.len() > 1
                 && !legacy_typescript_ambiguous_root
@@ -3174,6 +3178,7 @@ struct CallerTreeBuilder<'a> {
     /// cache keeps cost O(unique pairs) instead of O(nodes).
     interface_lookup_cache: HashMap<(String, String), Vec<String>>,
     unresolved_call_reasons: std::collections::BTreeMap<String, usize>,
+    unverified_member_sites: HashSet<(u32, usize)>,
 }
 
 impl CallerTreeBuilder<'_> {
@@ -4135,6 +4140,43 @@ impl CallerTreeBuilder<'_> {
         )
     }
 
+    fn record_unverified_member_targets(
+        &mut self,
+        caller_di: u32,
+        call_line: u32,
+        method_name_lower: &str,
+        parent_class: Option<&str>,
+        root_definition: Option<u32>,
+    ) {
+        let def_idx = self.ctx.def_idx;
+        let Some(call_sites) = def_idx.method_calls.get(&caller_di) else { return };
+        let caller_parent = def_idx.definitions.get(caller_di as usize)
+            .and_then(|definition| definition.parent.as_deref());
+        for (ordinal, call) in call_sites.iter().enumerate().filter(|(_, call)| {
+            call.line == call_line && call.method_name.to_lowercase() == method_name_lower
+        }) {
+            if self.unverified_member_sites.contains(&(caller_di, ordinal))
+                || !has_unverified_typescript_receiver(call, def_idx)
+            {
+                continue;
+            }
+            let resolution = resolve_call_site_with_evidence(
+                call, def_idx, Some(caller_di), caller_parent, self.ctx.resolution_policy,
+            );
+            let relevant = resolution.unverified_member_targets.iter().any(|&candidate| {
+                if root_definition.is_some_and(|root| root != candidate) { return false; }
+                def_idx.definitions.get(candidate as usize).is_some_and(|definition| {
+                    parent_class.is_none_or(|class| definition.parent.as_deref()
+                        .is_some_and(|parent| parent.eq_ignore_ascii_case(class)))
+                })
+            });
+            if relevant && self.unverified_member_sites.insert((caller_di, ordinal)) {
+                *self.unresolved_call_reasons
+                    .entry(UNVERIFIED_TYPESCRIPT_MEMBER_TARGET.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+
     fn record_unresolved_call_reasons(
         &mut self,
         caller_di: u32,
@@ -4240,14 +4282,19 @@ impl CallerTreeBuilder<'_> {
         for posting in postings {
             if caller_map.len() >= collection_limit { collection_capped = true; break; }
 
-            // If we have a parent class context, skip files that don't reference that class
-            if let Some(ref pids) = parent_file_ids
-                && !pids.contains(&posting.file_id) { continue; }
+            let parent_file_matches = parent_file_ids.as_ref()
+                .is_none_or(|ids| ids.contains(&posting.file_id));
 
             let file_path = match self.ctx.content_index.files.get(posting.file_id as usize) {
                 Some(p) => p,
                 None => continue,
             };
+            let extension = std::path::Path::new(file_path)
+                .extension().and_then(|extension| extension.to_str());
+            let is_typescript = extension.is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("ts") || extension.eq_ignore_ascii_case("tsx")
+            });
+            if !parent_file_matches && !is_typescript { continue; }
 
             if !self.ctx.passes_file_filters(file_path) {
                 continue;
@@ -4276,16 +4323,16 @@ impl CallerTreeBuilder<'_> {
                 // SQL caller queries always require parser-emitted call-site evidence,
                 // including unscoped queries where textual definition hits would
                 // otherwise be mistaken for self-callers.
-                let extension = std::path::Path::new(file_path)
-                    .extension()
-                    .and_then(|extension| extension.to_str());
                 let is_sql = extension.is_some_and(|extension| {
                     extension.eq_ignore_ascii_case("sql")
                 });
-                let is_typescript = extension.is_some_and(|extension| {
-                    extension.eq_ignore_ascii_case("ts")
-                        || extension.eq_ignore_ascii_case("tsx")
-                });
+                if is_typescript {
+                    self.record_unverified_member_targets(
+                        caller_di, line, &method_lower, parent_class, root_definition,
+                    );
+                }
+                // Lexical class references gate exact edges, not missing-receiver evidence.
+                if !parent_file_matches { continue; }
                 let requires_call_site_validation = root_definition.is_some()
                     || parent_class.is_some()
                     || is_sql
@@ -4977,6 +5024,7 @@ struct CalleeTreeBuilder<'a> {
     root_page_size: usize,
     root_total_candidates: usize,
     unresolved_call_reasons: std::collections::BTreeMap<String, usize>,
+    unverified_member_sites: HashSet<(u32, usize)>,
 }
 
 impl CalleeTreeBuilder<'_> {
@@ -5118,7 +5166,7 @@ impl CalleeTreeBuilder<'_> {
                 }
                 let caller_parent = def_idx.definitions.get(method_di as usize)
                     .and_then(|d| d.parent.as_deref());
-                let resolved = match resolve_call_site_for_graph(
+                let (resolution, unverified_member_targets) = resolve_call_site_for_graph_with_evidence(
                     call,
                     def_idx,
                     method_di,
@@ -5126,7 +5174,17 @@ impl CalleeTreeBuilder<'_> {
                     caller_parent,
                     self.ctx.resolution_policy,
                     self.ctx.production_only,
-                ) {
+                );
+                if unverified_member_targets.iter().any(|&candidate| {
+                    let Some(definition) = def_idx.definitions.get(candidate as usize) else { return false };
+                    let Some(file) = def_idx.files.get(definition.file_id as usize) else { return false };
+                    self.ctx.passes_file_filters(file)
+                        && (!self.ctx.production_only || !excluded_from_production(definition, file))
+                }) && self.unverified_member_sites.insert((method_di, call_ordinal)) {
+                    *self.unresolved_call_reasons
+                        .entry(UNVERIFIED_TYPESCRIPT_MEMBER_TARGET.to_string()).or_insert(0) += 1;
+                }
+                let resolved = match resolution {
                     CSharpCallResolution::Resolved(candidates) => candidates,
                     CSharpCallResolution::Ambiguous(candidates) => {
                         let shape = def_idx.csharp_semantics.call_shape(method_di, call_ordinal);
@@ -5483,13 +5541,29 @@ fn resolve_call_site_for_graph(
     policy: ResolutionPolicy,
     production_only: bool,
 ) -> CSharpCallResolution {
-    let legacy: Vec<_> = resolve_call_site_with_policy(
+    resolve_call_site_for_graph_with_evidence(
+        call, def_idx, caller_def_idx, call_ordinal, caller_parent, policy, production_only,
+    ).0
+}
+
+fn resolve_call_site_for_graph_with_evidence(
+    call: &CallSite,
+    def_idx: &DefinitionIndex,
+    caller_def_idx: u32,
+    call_ordinal: usize,
+    caller_parent: Option<&str>,
+    policy: ResolutionPolicy,
+    production_only: bool,
+) -> (CSharpCallResolution, Vec<u32>) {
+    let outcome = resolve_call_site_with_evidence(
         call,
         def_idx,
         Some(caller_def_idx),
         caller_parent,
         policy,
-    )
+    );
+    let with_evidence = |resolution| (resolution, outcome.unverified_member_targets);
+    let legacy: Vec<_> = outcome.targets
         .into_iter()
         .filter(|&candidate| {
             if !production_only {
@@ -5505,7 +5579,7 @@ fn resolve_call_site_for_graph(
         })
         .collect();
     let Some(shape) = def_idx.csharp_semantics.call_shape(caller_def_idx, call_ordinal) else {
-        return CSharpCallResolution::Resolved(legacy);
+        return with_evidence(CSharpCallResolution::Resolved(legacy));
     };
     let structured: Vec<_> = def_idx.name_index
         .get(&call.method_name.to_lowercase())
@@ -5531,7 +5605,7 @@ fn resolve_call_site_for_graph(
         })
         .collect();
     if structured.is_empty() {
-        return CSharpCallResolution::Resolved(legacy);
+        return with_evidence(CSharpCallResolution::Resolved(legacy));
     }
 
     let applicable: Vec<_> = structured.into_iter()
@@ -5555,11 +5629,11 @@ fn resolve_call_site_for_graph(
         let candidates: Vec<_> = applicable.iter()
             .map(|(candidate, _)| *candidate)
             .collect();
-        return if candidates.is_empty() {
+        return with_evidence(if candidates.is_empty() {
             CSharpCallResolution::Resolved(candidates)
         } else {
             CSharpCallResolution::Ambiguous(candidates)
-        };
+        });
     }
     if owner_matches.len() == 1 {
         let selected = owner_matches[0];
@@ -5577,12 +5651,12 @@ fn resolve_call_site_for_graph(
                 }
             }
         }
-        return CSharpCallResolution::Resolved(resolved);
+        return with_evidence(CSharpCallResolution::Resolved(resolved));
     }
     if csharp_candidates_share_shape(def_idx, &owner_matches) {
-        CSharpCallResolution::Resolved(owner_matches)
+        with_evidence(CSharpCallResolution::Resolved(owner_matches))
     } else {
-        CSharpCallResolution::Ambiguous(owner_matches)
+        with_evidence(CSharpCallResolution::Ambiguous(owner_matches))
     }
 }
 
@@ -5905,6 +5979,30 @@ pub(crate) fn resolve_call_site(
     )
 }
 
+const UNVERIFIED_TYPESCRIPT_MEMBER_TARGET: &str = "unverified_typescript_member_target";
+
+#[derive(Default)]
+struct CallSiteResolution {
+    targets: Vec<u32>,
+    unverified_member_targets: Vec<u32>,
+}
+
+fn has_unverified_typescript_receiver(call: &CallSite, def_idx: &DefinitionIndex) -> bool {
+    if call.call_kind != CallSiteKind::TypeScriptMember { return false; }
+    let Some(receiver) = call.receiver_type.as_deref() else { return true };
+    let (owner, _) = csharp_type_owner_name(receiver);
+    let short = owner.rsplit('.').next().unwrap_or(&owner);
+    if BUILTIN_RECEIVER_TYPES.iter().any(|builtin| builtin.eq_ignore_ascii_case(short)) {
+        return false;
+    }
+    !def_idx.name_index.get(&short.to_lowercase()).is_some_and(|owners| {
+        owners.iter().any(|&owner| def_idx.definitions.get(owner as usize).is_some_and(|definition| {
+            matches!(definition.kind, DefinitionKind::Class | DefinitionKind::Interface
+                | DefinitionKind::Struct | DefinitionKind::Record)
+        }))
+    })
+}
+
 fn resolve_call_site_with_policy(
     call: &CallSite,
     def_idx: &DefinitionIndex,
@@ -5912,13 +6010,25 @@ fn resolve_call_site_with_policy(
     caller_parent: Option<&str>,
     policy: ResolutionPolicy,
 ) -> Vec<u32> {
+    resolve_call_site_with_evidence(call, def_idx, caller_def_idx, caller_parent, policy).targets
+}
+
+fn resolve_call_site_with_evidence(
+    call: &CallSite,
+    def_idx: &DefinitionIndex,
+    caller_def_idx: Option<u32>,
+    caller_parent: Option<&str>,
+    policy: ResolutionPolicy,
+) -> CallSiteResolution {
     let name_lower = call.method_name.to_lowercase();
     let candidates = match def_idx.name_index.get(&name_lower) {
         Some(c) => c,
-        None => return Vec::new(),
+        None => return CallSiteResolution::default(),
     };
 
     let mut resolved: Vec<u32> = Vec::new();
+    let mut unverified_member_targets = Vec::new();
+    let unverified_receiver = has_unverified_typescript_receiver(call, def_idx);
 
     match call.call_kind {
         CallSiteKind::TypeScriptSameFile { definition_line }
@@ -5927,7 +6037,7 @@ fn resolve_call_site_with_policy(
                 .and_then(|caller| def_idx.definitions.get(caller as usize))
                 .map(|caller| caller.file_id)
             else {
-                return Vec::new();
+                return CallSiteResolution::default();
             };
             for &candidate in candidates {
                 let Some(definition) = def_idx.definitions.get(candidate as usize) else {
@@ -5944,13 +6054,13 @@ fn resolve_call_site_with_policy(
                 }
                 resolved.push(candidate);
             }
-            return resolved;
+            return CallSiteResolution { targets: resolved, ..Default::default() };
         }
         CallSiteKind::TypeScriptDynamicCallableParameter
         | CallSiteKind::TypeScriptUnresolvedLocal
         | CallSiteKind::TypeScriptImported
-        | CallSiteKind::TypeScriptUnknownGlobal => return Vec::new(),
-        CallSiteKind::TypeScriptAnalysisIncomplete => return Vec::new(),
+        | CallSiteKind::TypeScriptUnknownGlobal => return CallSiteResolution::default(),
+        CallSiteKind::TypeScriptAnalysisIncomplete => return CallSiteResolution::default(),
         _ => {}
     }
 
@@ -5965,7 +6075,7 @@ fn resolve_call_site_with_policy(
             .iter()
             .any(|builtin| builtin.eq_ignore_ascii_case(receiver_short))
         {
-            return Vec::new();
+            return CallSiteResolution::default();
         }
     }
 
@@ -5978,6 +6088,7 @@ fn resolve_call_site_with_policy(
         if !call_site_kind_matches(call.call_kind, def) {
             continue;
         }
+        let resolved_before = resolved.len();
 
         if let Some(ref recv_type) = call.receiver_type {
             // We have receiver type info -- use it to disambiguate
@@ -6038,9 +6149,12 @@ fn resolve_call_site_with_policy(
                 resolved.push(di);
             }
         }
+        if unverified_receiver && resolved.len() == resolved_before {
+            unverified_member_targets.push(di);
+        }
     }
 
-    resolved
+    CallSiteResolution { targets: resolved, unverified_member_targets }
 }
 
 // ─── Unit tests for verify_call_site_target ─────────────────────────
