@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.4 (2026-10-23)
+
 - **Mark unverified TypeScript member targets non-exhaustive (#394).** MCP caller graphs retain query-time evidence for eligible targets rejected because receiver or indexed-owner identity is unavailable. Relevant UP/DOWN, recursive, batch, and zero-node results report `unverified_typescript_member_target` with partial/non-exhaustive status instead of silently claiming completeness. Evidence follows explicit query scope, survives upward lexical class pruning, and counts indexed call ordinals once per graph without inventing edges. Known-owner mismatches, built-ins, absent candidates, existing exact-edge resolution, parser normalization, and persisted cache formats remain unchanged.
 
 - **Load coherent cache snapshots during replacement (#467).** Content and definition loaders now retain one opened file across version checks, format dispatch, and all header/shard reads. Parallel shard decoding uses bounded, independent positioned reads on Windows and Unix, preventing a successful mixture of one generation's file table and another's entries. An in-flight load may return the complete older snapshot; subsequent loads see the replacement. Existing errors, version checks, legacy LZ4/plain bincode support, cache formats, and shard ordering are preserved. This does not repair caches already corrupted before loading.
