@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Resolve PowerShell filesystem drives during setup.** Repository and installation paths now use their backing filesystem paths before config reads, Git calls, and MCP registration. Session-only drive aliases no longer cause setup to fail when PowerShell can see a config but .NET cannot open its alias path.
+
 ## 0.9.4 (2026-10-23)
 
 - **Mark unverified TypeScript member targets non-exhaustive (#394).** MCP caller graphs retain query-time evidence for eligible targets rejected because receiver or indexed-owner identity is unavailable. Relevant UP/DOWN, recursive, batch, and zero-node results report `unverified_typescript_member_target` with partial/non-exhaustive status instead of silently claiming completeness. Evidence follows explicit query scope, survives upward lexical class pruning, and counts indexed call ordinals once per graph without inventing edges. Known-owner mismatches, built-ins, absent candidates, existing exact-edge resolution, parser normalization, and persisted cache formats remain unchanged.
