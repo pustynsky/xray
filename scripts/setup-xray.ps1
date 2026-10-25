@@ -650,7 +650,7 @@ function Get-GitWorkTreeRoot {
     $ErrorActionPreference = 'Continue'
     $top = & git -C $RepoRoot rev-parse --show-toplevel 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $top) { return $null }
-    return (Resolve-Path -LiteralPath ($top | Select-Object -First 1)).Path
+    return (Resolve-Path -LiteralPath ($top | Select-Object -First 1)).ProviderPath
 }
 
 function Find-GitMetadataRoot {
@@ -1683,8 +1683,8 @@ if (-not $RepoPath) {
     $RepoPath = Read-Host 'Enter the path to the target repository (e.g. C:\Repos\MyProject)'
 }
 try {
-    $RepoPath = (Resolve-Path -LiteralPath $RepoPath -ErrorAction Stop).Path
-    if (-not [IO.Path]::IsPathRooted($InstallDir)) { $InstallDir = Join-Path (Get-Location).ProviderPath $InstallDir }
+    $RepoPath = (Resolve-Path -LiteralPath $RepoPath -ErrorAction Stop).ProviderPath
+    $InstallDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir)
     $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 }
 catch {

@@ -62,19 +62,22 @@ function New-Fixture {
 }
 
 function Invoke-FixtureSetup {
-    param($Fixture, [hashtable]$Parameters = @{}, [switch]$Inline, [string]$Location, [string]$BackupReplacement)
+    param($Fixture, [hashtable]$Parameters = @{}, [switch]$Inline, [string]$Location, [string]$BackupReplacement, [string]$DriveRoot)
     $arguments = @{
         RepoPath = $Fixture.Repo; InstallDir = $Fixture.Install
         SkipDownload = $true; Extensions = ' .CS, md,cs '; Force = $true
     }
     foreach ($key in $Parameters.Keys) { $arguments[$key] = $Parameters[$key] }
-    $payload = @{ Path = $scriptPath; Arguments = $arguments; Inline = [bool]$Inline; Location = $Location; BackupReplacement = $BackupReplacement } | ConvertTo-Json -Depth 10 -Compress
+    $payload = @{ Path = $scriptPath; Arguments = $arguments; Inline = [bool]$Inline; Location = $Location; BackupReplacement = $BackupReplacement; DriveRoot = $DriveRoot } | ConvertTo-Json -Depth 10 -Compress
     $encodedPayload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
     $code = @'
 $ErrorActionPreference = 'Stop'
 $payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__PAYLOAD__')) | ConvertFrom-Json
 $parameters = @{}
 foreach ($property in $payload.Arguments.PSObject.Properties) { $parameters[$property.Name] = $property.Value }
+if ($payload.DriveRoot) {
+    New-PSDrive -Name XrayFixtureDrive -PSProvider FileSystem -Root $payload.DriveRoot | Out-Null
+}
 if ($payload.Location) { Set-Location -LiteralPath $payload.Location }
 if ($payload.BackupReplacement) {
     function Copy-Item {
@@ -1419,6 +1422,51 @@ try {
     }
 
     if (-not $UserMcpOnly) {
+    Test-Case 'PowerShell filesystem drives resolve for workspace setup' {
+        foreach ($inline in @($false, $true)) {
+            foreach ($gitRepo in @($false, $true)) {
+                $f = New-Fixture
+                $driveRoot = Split-Path -Parent $f.Repo
+                if (-not $gitRepo) {
+                    $f.Repo = Join-Path $driveRoot 'plain repo'
+                    Write-FixtureFile (Join-Path $f.Repo 'source.ts') 'export const value = 1;'
+                }
+                $vscode = Join-Path $f.Repo '.vscode\mcp.json'
+                Write-FixtureFile $vscode '{"servers":{"other":{"command":"other.exe"}}}'
+                $options = @{
+                    RepoPath = 'XrayFixtureDrive:\' + (Split-Path -Leaf $f.Repo)
+                    InstallDir = 'XrayFixtureDrive:\install with spaces'
+                }
+                Assert-Success (Invoke-FixtureSetup $f $options -Inline:$inline -DriveRoot $driveRoot)
+                $config = Get-FixtureJson $vscode
+                Assert-True ($config.servers.other.command -ceq 'other.exe') 'Existing server preserved through drive alias'
+                Assert-True ($config.servers.xray.command -ceq (Join-Path $f.Install 'xray.exe')) 'Binary path uses backing filesystem'
+                $args = @($config.servers.xray.args)
+                Assert-True ($args[$args.IndexOf('--dir') + 1] -ceq $f.Repo) 'Repository path uses backing filesystem'
+            }
+        }
+    }
+
+    Test-Case 'PowerShell filesystem drives resolve for personal preflight' {
+        foreach ($inline in @($false, $true)) {
+            $f = New-Fixture
+            $vscode = Join-Path $f.Repo '.vscode\mcp.json'
+            $text = '{"servers":{"other":{"command":"other.exe"}}}'
+            Write-FixtureFile $vscode $text
+            $options = @{
+                RepoPath = 'XrayFixtureDrive:\repo with spaces'
+                InstallDir = 'XrayFixtureDrive:\install with spaces'
+                UserMcp = $true
+                PlanOnly = $true
+                VSCodeMcpPath = Join-Path $f.Home 'vscode\mcp.json'
+            }
+            Assert-Success (Invoke-FixtureSetup $f $options -Inline:$inline -DriveRoot (Split-Path -Parent $f.Repo))
+            Assert-True ([IO.File]::ReadAllText($vscode) -ceq $text) 'Personal preflight leaves workspace config unchanged'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.Home 'mcp-config.json'))) 'Plan does not write personal config'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.Install 'workspaces'))) 'Plan does not write workspace profile'
+        }
+    }
+
     Test-Case 'fresh setup, exact client formats, absolute paths, flags and exclusions' {
         $f = New-Fixture
         $result = Invoke-FixtureSetup $f

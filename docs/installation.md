@@ -85,6 +85,8 @@ cd xray
 >
 > **Target a specific repo non-interactively.** Pass `-RepoPath <path>` to skip the path prompt.
 >
+> **PowerShell drive aliases.** Setup resolves filesystem PSDrives in `-RepoPath` and `-InstallDir` to their backing paths before reading configs or invoking Git. Generated MCP commands use those backing paths, so they do not depend on a drive created only in the setup shell.
+>
 > **Select clients.** Personal mode configures both by default and always includes CLI/SDK for Agent Host. Add `-EnableCopilotCli` for CLI/SDK-only setup; `-EnableVSCode` still includes CLI/SDK. In workspace mode, either switch selects only that client.
 >
 > **`-UseBasicParsing`.** Required on Windows PowerShell 5.1 (the default `powershell.exe` on Windows) — without it, `Invoke-WebRequest` uses the IE rendering engine which blocks with a security prompt and can dump the script's `.SYNOPSIS` block to the console. It's a no-op on PowerShell 7+.
