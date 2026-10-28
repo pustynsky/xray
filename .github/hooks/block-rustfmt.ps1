@@ -201,7 +201,7 @@ if ([string]::IsNullOrWhiteSpace($payload)) {
 }
 
 try {
-    $hookEvent = $payload | ConvertFrom-Json -Depth 100
+    $hookEvent = $payload | ConvertFrom-Json
 } catch {
     exit 0
 }
