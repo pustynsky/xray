@@ -3610,14 +3610,14 @@ fn test_reindex_stats_subtimings_are_non_negative() {
     );
 }
 
-// ── Regression: `wait_for_indexes_ready` (MAJOR-8) ──────────────────────
+// ── Regression: initial build completion barrier ──────────────────────
 //
 // Tiny sub-millisecond poll / cap values so these tests run in well
 // under 100 ms each. We verify the three branches of the wait-loop:
 //   1. Fast path: both ready flags already true → Ready immediately.
 //   2. Ready arrives asynchronously from a helper thread.
 //   3. Generation change aborts the wait.
-//   4. Hard cap elapses with ready flags still false → TimedOut.
+//   4. Warning intervals never admit reconciliation against pending builds.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -3631,9 +3631,10 @@ fn wait_for_ready_returns_immediately_when_both_flags_already_true() {
     let generation = AtomicU64::new(0);
 
     let t0 = Instant::now();
-    let outcome = super::wait_for_indexes_ready(
+    let outcome = super::wait_for_initial_builds(
         &content_ready,
         &def_ready,
+        [&AtomicBool::new(false), &AtomicBool::new(false)],
         &generation,
         0,
         Duration::from_millis(50),
@@ -3665,9 +3666,10 @@ fn wait_for_ready_observes_async_flag_flip() {
         dr.store(true, Ordering::Release);
     });
 
-    let outcome = super::wait_for_indexes_ready(
+    let outcome = super::wait_for_initial_builds(
         &content_ready,
         &def_ready,
+        [&AtomicBool::new(false), &AtomicBool::new(false)],
         &generation,
         0,
         Duration::from_millis(5),
@@ -3692,9 +3694,10 @@ fn wait_for_ready_aborts_on_generation_change() {
         g.store(1, Ordering::Release);
     });
 
-    let outcome = super::wait_for_indexes_ready(
+    let outcome = super::wait_for_initial_builds(
         &content_ready,
         &def_ready,
+        [&AtomicBool::new(false), &AtomicBool::new(false)],
         &generation,
         0, // my_generation = 0, flipped to 1 by bumper
         Duration::from_millis(5),
@@ -3706,33 +3709,397 @@ fn wait_for_ready_aborts_on_generation_change() {
 }
 
 #[test]
-fn wait_for_ready_times_out_when_flags_never_flip() {
-    let content_ready = AtomicBool::new(false);
-    let def_ready = AtomicBool::new(true); // one true, one false — still incomplete
-    let generation = AtomicU64::new(0);
-
-    let t0 = Instant::now();
-    let outcome = super::wait_for_indexes_ready(
-        &content_ready,
-        &def_ready,
-        &generation,
+fn initial_build_wait_prioritizes_generation_change_over_completion() {
+    let outcome = super::wait_for_initial_builds(
+        &AtomicBool::new(true),
+        &AtomicBool::new(true),
+        [&AtomicBool::new(false), &AtomicBool::new(false)],
+        &AtomicU64::new(1),
         0,
         Duration::from_millis(5),
         Duration::from_millis(40),
     );
-    let elapsed = t0.elapsed();
+    assert_eq!(outcome, super::WaitOutcome::GenerationChanged);
+}
 
-    assert_eq!(outcome, super::WaitOutcome::TimedOut);
+#[test]
+fn initial_build_wait_does_not_admit_reconciliation_after_warning_interval() {
+    let content_terminal = Arc::new(AtomicBool::new(false));
+    let def_terminal = Arc::new(AtomicBool::new(true));
+    let generation = Arc::new(AtomicU64::new(0));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let content_for_wait = Arc::clone(&content_terminal);
+    let def_for_wait = Arc::clone(&def_terminal);
+    let generation_for_wait = Arc::clone(&generation);
+    let worker = std::thread::spawn(move || {
+        let outcome = super::wait_for_initial_builds(
+            &content_for_wait,
+            &def_for_wait,
+            [&AtomicBool::new(false), &AtomicBool::new(false)],
+            &generation_for_wait,
+            0,
+            Duration::from_millis(5),
+            Duration::from_millis(20),
+        );
+        tx.send(outcome).unwrap();
+    });
+
+    let premature = rx.recv_timeout(Duration::from_millis(100));
+    content_terminal.store(true, Ordering::Release);
+    worker.join().unwrap();
     assert!(
-        elapsed >= Duration::from_millis(40),
-        "should wait at least the cap before timing out, got {:?}",
-        elapsed
+        matches!(premature, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+        "a slow initial build must not admit reconciliation: {premature:?}",
     );
-    assert!(
-        elapsed < Duration::from_millis(200),
-        "should not wait much longer than the cap, got {:?}",
-        elapsed
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        super::WaitOutcome::Ready,
     );
+}
+
+#[test]
+fn initial_build_wait_blocks_companion_builds_after_startup() {
+    for pending in 0..2 {
+        let building = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
+        building[pending].store(true, Ordering::Release);
+        let worker_building = building.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let outcome = super::wait_for_initial_builds(
+                &AtomicBool::new(true),
+                &AtomicBool::new(true),
+                [worker_building[0].as_ref(), worker_building[1].as_ref()],
+                &AtomicU64::new(0),
+                0,
+                Duration::from_millis(5),
+                Duration::from_millis(20),
+            );
+            tx.send(outcome).unwrap();
+        });
+        let premature = rx.recv_timeout(Duration::from_millis(100));
+        building[pending].store(false, Ordering::Release);
+        worker.join().unwrap();
+        assert!(
+            matches!(premature, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "companion build {pending} must block reconciliation: {premature:?}",
+        );
+        assert_eq!(rx.recv().unwrap(), super::WaitOutcome::Ready);
+    }
+}
+
+#[test]
+fn initial_build_wait_completes_after_failed_build() {
+    let ctx = crate::mcp::handlers::HandlerContext {
+        content_ready: Arc::new(AtomicBool::new(false)),
+        def_ready: Arc::new(AtomicBool::new(false)),
+        ..Default::default()
+    };
+    assert_eq!(
+        super::wait_for_initial_builds(
+            &ctx.content_build_terminal,
+            &ctx.def_build_terminal,
+            [ctx.content_building.as_ref(), ctx.def_building.as_ref()],
+            &ctx.watcher_generation,
+            0,
+            Duration::from_millis(5),
+            Duration::from_secs(1),
+        ),
+        super::WaitOutcome::Ready,
+    );
+    assert!(!ctx.content_ready.load(Ordering::Acquire));
+    assert!(!ctx.def_ready.load(Ordering::Acquire));
+}
+
+#[test]
+fn initial_build_watcher_buffers_changes_until_completion() {
+    let (_tmp, root, index) = make_batch_test_setup();
+    let generation = Arc::new(AtomicU64::new(0));
+    let content_terminal = Arc::new(AtomicBool::new(false));
+    let original_files = index.read().unwrap().live_file_count();
+    let index_base = tempfile::tempdir().unwrap();
+    super::start_watcher(
+        Arc::clone(&index),
+        None,
+        root.clone(),
+        vec!["cs".to_string()],
+        vec![],
+        20,
+        index_base.path().to_path_buf(),
+        Arc::clone(&content_terminal),
+        Arc::new(AtomicBool::new(true)),
+        Arc::new(AtomicBool::new(false)),
+        Arc::clone(&generation),
+        0,
+        Arc::new(AtomicU64::new(1)),
+        Arc::new(super::WatcherStats::new()),
+        false,
+        Arc::new(AtomicBool::new(false)),
+        test_trigram_build_gate(),
+        [Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false))],
+    ).unwrap();
+    let new_file = root.join("buffered.cs");
+    std::fs::write(&new_file, "class BufferedDuringBuild {}").unwrap();
+    thread::sleep(Duration::from_millis(100));
+    let pending_files = index.read().unwrap().live_file_count();
+    content_terminal.store(true, Ordering::Release);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut found = false;
+    while Instant::now() < deadline {
+        found = index.read().unwrap().files.iter().any(|path| {
+            crate::path_eq(path, &new_file.to_string_lossy())
+        });
+        if found { break; }
+        thread::sleep(Duration::from_millis(20));
+    }
+    generation.fetch_add(1, Ordering::Release);
+    assert_eq!(pending_files, original_files, "pending build must not be mutated");
+    assert!(found, "files changed during the initial build must be reconciled");
+}
+
+struct InitialBuildQaWorkers {
+    generation: Arc<AtomicU64>,
+    replay_probe: Option<PathBuf>,
+    stopped: bool,
+}
+
+impl InitialBuildQaWorkers {
+    fn new() -> Self {
+        Self {
+            generation: Arc::new(AtomicU64::new(0)),
+            replay_probe: None,
+            stopped: false,
+        }
+    }
+
+    fn stop(&mut self) {
+        if self.stopped { return; }
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        // Production launchers return no JoinHandle. Their last generation
+        // reference disappearing proves both closures (and their scopes) exited.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Arc::strong_count(&self.generation) > 1 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        self.stopped = Arc::strong_count(&self.generation) == 1;
+        if let Some(path) = self.replay_probe.take() {
+            remove_definition_update_before_write_hook(&path);
+        }
+        if !thread::panicking() {
+            assert!(self.stopped, "QA workers did not release their generation references");
+        }
+    }
+}
+
+impl Drop for InitialBuildQaWorkers {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn initial_build_qa_fixture() -> (tempfile::TempDir, PathBuf, Arc<RwLock<ContentIndex>>) {
+    let fixture = tempfile::Builder::new()
+        .prefix("initial-build-qa-").tempdir_in("target").unwrap();
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let root = crate::canonicalize_test_root(&workspace);
+    for (name, source) in [
+        ("untouched.cs", "class UntouchedBaseline {}"),
+        ("buffered.cs", "class BeforeBufferedEdit {}"),
+        ("removed.cs", "class RemovedDuringBuild {}"),
+    ] {
+        let path = root.join(name);
+        std::fs::write(&path, source).unwrap();
+        let old_mtime = SystemTime::now() - Duration::from_secs(30);
+        std::fs::File::options().write(true).open(path).unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old_mtime)).unwrap();
+    }
+    let content = crate::index::build_content_index(&crate::ContentIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "cs".into(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    (fixture, root, Arc::new(RwLock::new(build_watch_index_from(content))))
+}
+
+#[test]
+#[ignore = "real 305-second production startup barrier; run explicitly"]
+fn initial_build_production_workers_hold_past_300_seconds() {
+    let (fixture, root, index) = initial_build_qa_fixture();
+    let mut workers = InitialBuildQaWorkers::new();
+    let stats = Arc::new(WatcherStats::new());
+    let epoch = Arc::new(AtomicU64::new(0));
+    let file_dirty = Arc::new(AtomicBool::new(false));
+    let content_terminal = Arc::new(AtomicBool::new(false));
+    let def_terminal = Arc::new(AtomicBool::new(false));
+    let building = [Arc::new(AtomicBool::new(true)), Arc::new(AtomicBool::new(true))];
+    let unexpected_replays = Arc::new(AtomicU64::new(0));
+    let replay_count = Arc::clone(&unexpected_replays);
+    let untouched = root.join("untouched.cs");
+    install_definition_update_before_write_hook(Arc::new(
+        DefinitionUpdateBeforeWriteHook::with_action(
+            &untouched, vec![1], Arc::new(move |_| {
+                replay_count.fetch_add(1, Ordering::Relaxed);
+            }),
+        ),
+    ));
+    workers.replay_probe = Some(untouched.clone());
+    let untouched_id = index.read().unwrap().path_to_id.as_ref().unwrap()
+        [&crate::path_identity_key(&untouched)];
+    let gate = test_trigram_build_gate();
+    super::start_watcher(
+        Arc::clone(&index), None, root.clone(), vec!["cs".into()], vec![], 20,
+        fixture.path().join("cache"), Arc::clone(&content_terminal),
+        Arc::clone(&def_terminal), Arc::clone(&file_dirty),
+        Arc::clone(&workers.generation), 0, Arc::clone(&epoch), Arc::clone(&stats),
+        false, Arc::new(AtomicBool::new(false)), Arc::clone(&gate), building.clone(),
+    ).unwrap();
+    super::start_periodic_rescan(
+        Arc::clone(&index), None, Arc::new(RwLock::new(None)),
+        Arc::clone(&file_dirty), root.clone(), vec!["cs".into()], vec![], 300,
+        Arc::clone(&workers.generation), 0, Arc::clone(&epoch), Arc::clone(&stats),
+        false, Arc::new(AtomicBool::new(false)), gate,
+        Arc::clone(&content_terminal), Arc::clone(&def_terminal), building.clone(),
+    );
+    let started = Instant::now();
+    let edited = root.join("buffered.cs");
+    let old_mtime = std::fs::metadata(&edited).unwrap().modified().unwrap();
+    std::fs::write(&edited, "class BufferedAfterLongBuild {}").unwrap();
+    // Reconciliation skips this preserved-mtime edit. Only the buffered native
+    // notification can replace its stale postings after the barrier opens.
+    std::fs::File::options().write(true).open(&edited).unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(old_mtime)).unwrap();
+    std::fs::write(root.join("created.cs"), "class CreatedDuringLongBuild {}").unwrap();
+    std::fs::remove_file(root.join("removed.cs")).unwrap();
+
+    let assert_blocked = || {
+        assert_eq!(stats.events_total.load(Ordering::Relaxed), 0, "notify queue drained early");
+        assert_eq!(stats.periodic_rescan_total.load(Ordering::Relaxed), 0, "periodic scan ran early");
+        assert_eq!(epoch.load(Ordering::Acquire), 0, "startup reconciliation ran early");
+        assert!(!file_dirty.load(Ordering::Relaxed));
+        let current = index.read().unwrap();
+        assert!(!current.index.contains_key("bufferedafterlongbuild"));
+        assert!(!current.index.contains_key("createdduringlongbuild"));
+        assert!(current.index.contains_key("removedduringbuild"));
+    };
+    while started.elapsed() < Duration::from_secs(305) {
+        assert_blocked();
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert_blocked();
+    let held = started.elapsed();
+    content_terminal.store(true, Ordering::Release);
+    def_terminal.store(true, Ordering::Release);
+    thread::sleep(Duration::from_secs(1));
+    assert_blocked();
+    building[0].store(false, Ordering::Release);
+    thread::sleep(Duration::from_millis(200));
+    assert_blocked();
+    let released = Instant::now();
+    building[1].store(false, Ordering::Release);
+    let deadline = released + Duration::from_secs(5);
+    loop {
+        let found = {
+            let current = index.read().unwrap();
+            current.index.contains_key("bufferedafterlongbuild")
+                && current.index.contains_key("createdduringlongbuild")
+                && !current.index.contains_key("beforebufferededit")
+                && !current.index.contains_key("removedduringbuild")
+        };
+        if found && stats.events_total.load(Ordering::Relaxed) > 0 { break; }
+        assert!(Instant::now() < deadline, "buffered edits did not become searchable");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let resumed = released.elapsed();
+    workers.stop();
+    assert_eq!(stats.periodic_rescan_total.load(Ordering::Relaxed), 0,
+        "production periodic interval must restart at completion, not fire immediately");
+    assert!(file_dirty.load(Ordering::Relaxed));
+    assert_eq!(unexpected_replays.load(Ordering::Relaxed), 0, "untouched file was replayed");
+    let current = index.read().unwrap();
+    assert_eq!(current.live_file_count(), 3);
+    assert_eq!(current.path_to_id.as_ref().unwrap()[&crate::path_identity_key(&untouched)], untouched_id);
+    assert!(epoch.load(Ordering::Acquire) <= 3, "unexpected repeated reconciliation");
+    eprintln!(
+        "QA production barrier: held={held:?}, resume={resumed:?}, notify_events={}, scans={}, epochs={}, untouched_replays=0, workers_exited=true",
+        stats.events_total.load(Ordering::Relaxed),
+        stats.periodic_rescan_total.load(Ordering::Relaxed),
+        epoch.load(Ordering::Acquire),
+    );
+}
+
+#[test]
+fn initial_build_production_workers_cancel_while_flags_pending() {
+    let (fixture, root, index) = initial_build_qa_fixture();
+    let mut workers = InitialBuildQaWorkers::new();
+    let stats = Arc::new(WatcherStats::new());
+    let epoch = Arc::new(AtomicU64::new(0));
+    let terminal = Arc::new(AtomicBool::new(false));
+    let building = [Arc::new(AtomicBool::new(true)), Arc::new(AtomicBool::new(true))];
+    super::start_watcher(
+        Arc::clone(&index), None, root.clone(), vec!["cs".into()], vec![], 20,
+        fixture.path().join("cache"), Arc::clone(&terminal), Arc::clone(&terminal),
+        Arc::new(AtomicBool::new(false)), Arc::clone(&workers.generation), 0,
+        Arc::clone(&epoch), Arc::clone(&stats), false, Arc::new(AtomicBool::new(false)),
+        test_trigram_build_gate(), building.clone(),
+    ).unwrap();
+    super::start_periodic_rescan(
+        Arc::clone(&index), None, Arc::new(RwLock::new(None)),
+        Arc::new(AtomicBool::new(false)), root.clone(), vec!["cs".into()], vec![],
+        super::MIN_RESCAN_INTERVAL_SEC, Arc::clone(&workers.generation), 0,
+        Arc::clone(&epoch), Arc::clone(&stats), false, Arc::new(AtomicBool::new(false)),
+        test_trigram_build_gate(), Arc::clone(&terminal), Arc::clone(&terminal), building.clone(),
+    );
+    std::fs::write(root.join("cancelled.cs"), "class CancelledBuildEvent {}").unwrap();
+    thread::sleep(Duration::from_millis(100));
+    workers.stop();
+    terminal.store(true, Ordering::Release);
+    for flag in building { flag.store(false, Ordering::Release); }
+    assert_eq!(stats.events_total.load(Ordering::Relaxed), 0);
+    assert_eq!(stats.periodic_rescan_total.load(Ordering::Relaxed), 0);
+    assert_eq!(epoch.load(Ordering::Acquire), 0);
+    assert!(!index.read().unwrap().index.contains_key("cancelledbuildevent"));
+}
+
+#[test]
+fn initial_build_watcher_resumes_failed_or_disabled_initial_states() {
+    for failed_content in [true, false] {
+        let (fixture, root, index) = initial_build_qa_fixture();
+        if failed_content {
+            *index.write().unwrap() = build_watch_index_from(ContentIndex {
+                root: root.to_string_lossy().to_string(),
+                extensions: vec!["cs".into()],
+                ..Default::default()
+            });
+        }
+        let mut workers = InitialBuildQaWorkers::new();
+        let stats = Arc::new(WatcherStats::new());
+        // Terminal does not mean ready: model a failed content build and a
+        // disabled definitions build without manufacturing successful readiness.
+        super::start_watcher(
+            Arc::clone(&index), None, root.clone(), vec!["cs".into()], vec![], 20,
+            fixture.path().join("cache"), Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(true)), Arc::new(AtomicBool::new(false)),
+            Arc::clone(&workers.generation), 0, Arc::new(AtomicU64::new(0)),
+            Arc::clone(&stats), false, Arc::new(AtomicBool::new(false)),
+            test_trigram_build_gate(),
+            [Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false))],
+        ).unwrap();
+        std::fs::write(root.join("recovery.cs"), "class RecoveredAfterTerminal {}").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if index.read().unwrap().index.contains_key("recoveredafterterminal")
+                && stats.events_total.load(Ordering::Relaxed) > 0
+            { break; }
+            assert!(Instant::now() < deadline, "terminal state stuck: failed_content={failed_content}");
+            thread::sleep(Duration::from_millis(20));
+        }
+        workers.stop();
+    }
 }
 
 // ─── scan_dir_state ─────────────────────────────────────────────────
@@ -5138,6 +5505,9 @@ fn start_periodic_rescan_runs_at_least_one_tick_and_exits_on_generation_change()
         false,
         autosave_dirty,
         test_trigram_build_gate(),
+        Arc::new(AtomicBool::new(true)),
+        Arc::new(AtomicBool::new(true)),
+        [Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false))],
     );
 
     // Wait for the first tick (interval + small slack for thread scheduling).
@@ -5189,6 +5559,75 @@ fn start_periodic_rescan_runs_at_least_one_tick_and_exits_on_generation_change()
 // `cargo test`.
 
 #[test]
+fn periodic_rescan_thread_waits_for_initial_build_completion() {
+    let (_tmp, root, index) = make_batch_test_setup();
+    let stats = Arc::new(super::WatcherStats::new());
+    let generation = Arc::new(AtomicU64::new(0));
+    let content_terminal = Arc::new(AtomicBool::new(false));
+    let def_terminal = Arc::new(AtomicBool::new(true));
+    super::start_periodic_rescan(
+        Arc::clone(&index),
+        None,
+        Arc::new(RwLock::new(None)),
+        Arc::new(AtomicBool::new(false)),
+        root.clone(),
+        vec!["cs".to_string()],
+        vec!["cs".to_string()],
+        super::MIN_RESCAN_INTERVAL_SEC,
+        Arc::clone(&generation),
+        0,
+        Arc::new(AtomicU64::new(1)),
+        Arc::clone(&stats),
+        false,
+        Arc::new(AtomicBool::new(false)),
+        test_trigram_build_gate(),
+        Arc::clone(&content_terminal),
+        Arc::clone(&def_terminal),
+        [Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false))],
+    );
+    let new_file = root.join("during_build.cs");
+    std::fs::write(&new_file, "class DuringBuild {}").unwrap();
+
+    let deadline = Instant::now()
+        + Duration::from_secs(super::MIN_RESCAN_INTERVAL_SEC + 2);
+    while Instant::now() < deadline
+        && stats.periodic_rescan_total.load(Ordering::Relaxed) == 0
+    {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let premature_ticks = stats.periodic_rescan_total.load(Ordering::Relaxed);
+    let premature_file = index.read().unwrap().files.iter().any(|path| {
+        crate::path_eq(path, &new_file.to_string_lossy())
+    });
+    let completed_at = Instant::now();
+    content_terminal.store(true, Ordering::Release);
+    def_terminal.store(true, Ordering::Release);
+    let deadline = Instant::now()
+        + Duration::from_secs(super::MIN_RESCAN_INTERVAL_SEC + 5);
+    while Instant::now() < deadline
+        && stats.periodic_rescan_drift_events.load(Ordering::Relaxed) == 0
+    {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let resumed_after = completed_at.elapsed();
+    generation.fetch_add(1, Ordering::Release);
+
+    assert_eq!(premature_ticks, 0, "rescan must not race the initial build");
+    assert!(!premature_file, "pending initial builds must not be mutated");
+    assert!(
+        resumed_after >= Duration::from_secs(super::MIN_RESCAN_INTERVAL_SEC),
+        "first rescan interval must start after build completion",
+    );
+    assert!(
+        stats.periodic_rescan_drift_events.load(Ordering::Relaxed) > 0,
+        "rescan must resume after initial builds finish",
+    );
+    assert!(index.read().unwrap().files.iter().any(|path| {
+        crate::path_eq(path, &new_file.to_string_lossy())
+    }));
+}
+
+#[test]
 fn periodic_rescan_thread_recovers_lost_create_event() {
     // Acceptance #4 of docs/todo_approved_2026-04-21_watcher-periodic-rescan.md:
     // simulate a fully-lost notify event by spawning ONLY the periodic
@@ -5218,6 +5657,9 @@ fn periodic_rescan_thread_recovers_lost_create_event() {
         false,
         autosave_dirty,
         test_trigram_build_gate(),
+        Arc::new(AtomicBool::new(true)),
+        Arc::new(AtomicBool::new(true)),
+        [Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false))],
     );
 
     // Drop a new .cs file directly on disk *without* notifying any

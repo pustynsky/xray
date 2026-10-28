@@ -368,7 +368,15 @@ fn update_definition_index(def_index, removed_clean, dirty_clean) -> bool {
 
 The `notify` crate is **best-effort**: on every platform, the OS may drop file events under load. On Windows, `ReadDirectoryChangesW` has a finite buffer that overflows during event floods (e.g., immediately after `git checkout && git pull`). When this happens silently, the in-memory indexes drift from the on-disk state until the server is restarted or `xray_reindex` is called manually.
 
-To bound that drift, `start_periodic_rescan` (spawned from `cmd_serve` alongside `start_watcher`) runs a dedicated thread that ticks every `--rescan-interval-sec` seconds (default 300 s, minimum 10 s). Each tick:
+Both the event watcher and periodic rescan wait until the initial content and definition builds are terminal and neither build owner is active before reconciling. Terminal includes failed builds and disabled definitions; query readiness remains a separate signal. Active owner flags also protect watcher restarts while companion indexes rebuild after a workspace switch. The definition companion builder uses the existing building-flag guard to release its ownership even on panic. The event watcher subscribes before waiting, so notifications are buffered during the build. A slow build emits a warning every 300 seconds but never bypasses this barrier. Changing the watcher generation cancels the wait.
+
+The isolated regression below holds build-completion signals pending while the real watcher and rescan workers cross the production 300-second threshold. It is ignored by default because it takes over five minutes; it does not require slowing a real repository or constructing a large parser workload.
+
+```powershell
+cargo test --bin xray initial_build_production_workers_hold_past_300_seconds -- --ignored --nocapture
+```
+
+To bound that drift, `start_periodic_rescan` (spawned from `cmd_serve` alongside `start_watcher`) runs a dedicated thread that ticks every `--rescan-interval-sec` seconds (default 300 s, minimum 10 s). Its first interval starts after the initial builds finish, rather than at process startup. This prevents a slow cold build from triggering concurrent whole-repository reconciliation against empty indexes. Each tick:
 
 1. Walks the workspace once via `scan_dir_state` (the same walker the live event loop uses, so `.git/` and ignore-file rules match).
 2. Diffs the result against `ContentIndex` (added / removed / mtime-modified files) and against `FileIndex` (added / removed all-files entries).

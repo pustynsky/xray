@@ -173,45 +173,54 @@ where
     queued
 }
 
-/// Outcome of [`wait_for_indexes_ready`]. Public to the crate so watcher
+/// Outcome of [`wait_for_initial_builds`]. Public to the crate so watcher
 /// thread and tests can share the same decision tree.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum WaitOutcome {
-    /// Both `content_ready` and `def_ready` observed `true` within the cap.
+    /// Both initial builds completed, successfully or otherwise.
     Ready,
     /// `watcher_generation` changed away from `my_generation` — caller
     /// should exit without reconciling.
     GenerationChanged,
-    /// Hard cap reached before both flags flipped; caller should proceed
-    /// to reconciliation (partial index is safer than silently skipping).
-    TimedOut,
 }
 
 /// Wait for the initial index build to complete before reconciliation
-/// (MAJOR-8). Polls the two `AtomicBool` flags every `poll` until both
-/// are `true`, the generation counter changes, or `cap` elapses.
+/// Polls the two initial-build completion flags every `poll` until both
+/// are `true` or the generation counter changes.
 ///
 /// Extracted for testability — the watcher thread invokes it with a
-/// 50 ms poll / 300 s cap; tests drive it with sub-millisecond poll and
-/// cap values.
-pub(crate) fn wait_for_indexes_ready(
-    content_ready: &AtomicBool,
-    def_ready: &AtomicBool,
+/// 50 ms poll / 300 s warning interval. A slow builder must never allow
+/// reconciliation against an index that is still awaiting publication.
+/// Owner flags (content, definitions) also cover companion builds on workspace switches.
+pub(crate) fn wait_for_initial_builds(
+    content_terminal: &AtomicBool,
+    def_terminal: &AtomicBool,
+    build_in_progress: [&AtomicBool; 2],
     watcher_generation: &AtomicU64,
     my_generation: u64,
     poll: Duration,
-    cap: Duration,
+    warning_interval: Duration,
 ) -> WaitOutcome {
-    let start = Instant::now();
+    let mut last_warning = Instant::now();
     loop {
-        if content_ready.load(Ordering::Acquire) && def_ready.load(Ordering::Acquire) {
-            return WaitOutcome::Ready;
-        }
         if watcher_generation.load(Ordering::Acquire) != my_generation {
             return WaitOutcome::GenerationChanged;
         }
-        if start.elapsed() >= cap {
-            return WaitOutcome::TimedOut;
+        if content_terminal.load(Ordering::Acquire)
+            && def_terminal.load(Ordering::Acquire)
+            && build_in_progress.iter().all(|flag| !flag.load(Ordering::Acquire))
+        {
+            return WaitOutcome::Ready;
+        }
+        if last_warning.elapsed() >= warning_interval {
+            warn!(
+                content_terminal = content_terminal.load(Ordering::Acquire),
+                def_terminal = def_terminal.load(Ordering::Acquire),
+                content_building = build_in_progress[0].load(Ordering::Acquire),
+                def_building = build_in_progress[1].load(Ordering::Acquire),
+                "Index builds are still running; deferring filesystem reconciliation"
+            );
+            last_warning = Instant::now();
         }
         std::thread::sleep(poll);
     }
@@ -241,8 +250,8 @@ pub fn start_watcher(
     definition_extensions: Vec<String>,
     debounce_ms: u64,
     index_base: PathBuf,
-    content_ready: Arc<AtomicBool>,
-    def_ready: Arc<AtomicBool>,
+    content_terminal: Arc<AtomicBool>,
+    def_terminal: Arc<AtomicBool>,
     file_index_dirty: Arc<AtomicBool>,
     watcher_generation: Arc<AtomicU64>,
     my_generation: u64,
@@ -251,6 +260,7 @@ pub fn start_watcher(
     respect_git_exclude: bool,
     autosave_dirty: Arc<AtomicBool>,
     trigram_build_gate: Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
+    build_in_progress: [Arc<AtomicBool>; 2],
 ) -> notify::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
 
@@ -273,28 +283,19 @@ pub fn start_watcher(
             return;
         }
 
-        // ── Wait for the initial index build (MAJOR-8) ──────────────────
-        // `cmd_serve` spawns background threads that build the content and
-        // definition indexes in parallel with the watcher. If reconciliation
-        // starts before those threads finish their final swap, the watcher
-        // would either reconcile against an empty index (wasting work that
-        // the background swap then overwrites) or lose events that arrived
-        // during the build window. Wait for both ready flags with a small
-        // poll interval; respect generation changes and a hard cap so a
-        // stuck builder cannot keep the watcher hung forever.
+        // Keep notify events buffered until neither initial builder can
+        // replace the index. Failed/disabled builds are terminal too.
         const READY_POLL: Duration = Duration::from_millis(50);
-        // Hard cap well above a realistic cold-start build (~30s for
-        // large trees). After this, log and proceed: reconciliation on
-        // a partial index is still safer than silently skipping events.
-        const READY_WAIT_CAP: Duration = Duration::from_secs(300);
+        const READY_WARNING_INTERVAL: Duration = Duration::from_secs(300);
         let wait_start = Instant::now();
-        match wait_for_indexes_ready(
-            &content_ready,
-            &def_ready,
+        match wait_for_initial_builds(
+            &content_terminal,
+            &def_terminal,
+            [build_in_progress[0].as_ref(), build_in_progress[1].as_ref()],
             &watcher_generation,
             my_generation,
             READY_POLL,
-            READY_WAIT_CAP,
+            READY_WARNING_INTERVAL,
         ) {
             WaitOutcome::Ready => {
                 let waited = wait_start.elapsed();
@@ -308,14 +309,6 @@ pub fn start_watcher(
             WaitOutcome::GenerationChanged => {
                 info!(my_generation, "Watcher generation changed during startup wait, exiting");
                 return;
-            }
-            WaitOutcome::TimedOut => {
-                warn!(
-                    waited_s = wait_start.elapsed().as_secs(),
-                    content_ready = content_ready.load(Ordering::Acquire),
-                    def_ready = def_ready.load(Ordering::Acquire),
-                    "Watcher proceeded to reconciliation before initial index build completed (hard cap reached)"
-                );
             }
         }
 
@@ -3163,6 +3156,9 @@ pub fn start_periodic_rescan(
     respect_git_exclude: bool,
     autosave_dirty: Arc<AtomicBool>,
     trigram_build_gate: Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
+    content_terminal: Arc<AtomicBool>,
+    def_terminal: Arc<AtomicBool>,
+    build_in_progress: [Arc<AtomicBool>; 2],
 ) {
     let effective = interval_sec.max(MIN_RESCAN_INTERVAL_SEC);
     if effective != interval_sec {
@@ -3180,10 +3176,20 @@ pub fn start_periodic_rescan(
     info!(dir = %dir_str, interval_sec = effective, "periodic rescan thread starting");
 
     std::thread::spawn(move || {
+        if wait_for_initial_builds(
+            &content_terminal,
+            &def_terminal,
+            [build_in_progress[0].as_ref(), build_in_progress[1].as_ref()],
+            &watcher_generation,
+            my_generation,
+            RESCAN_SHUTDOWN_POLL,
+            Duration::from_secs(300),
+        ) == WaitOutcome::GenerationChanged {
+            info!(my_generation, "periodic rescan generation changed during startup wait, exiting");
+            return;
+        }
         let interval = Duration::from_secs(effective);
-        // Sleep first so the thread does not race the initial index
-        // build / startup reconciliation already triggered by the
-        // watcher event loop.
+        // Count the first interval from build completion, not process startup.
         loop {
             // Sleep in slices for prompt shutdown.
             let sleep_start = Instant::now();

@@ -299,8 +299,8 @@ fn build_context_with_index_dir(args: ServeArgs, idx_base: PathBuf) -> mcp::hand
             definition_reconcile_extensions.clone(),
             args.debounce_ms,
             idx_base.clone(),
-            Arc::clone(&content_ready),
-            Arc::clone(&def_ready),
+            Arc::clone(&content_build_terminal),
+            Arc::clone(&def_build_terminal),
             Arc::clone(&file_index_dirty),
             Arc::clone(&watcher_generation),
             0, // initial generation
@@ -309,6 +309,7 @@ fn build_context_with_index_dir(args: ServeArgs, idx_base: PathBuf) -> mcp::hand
             effective_respect_git_exclude,
             Arc::clone(&autosave_dirty),
             Arc::clone(&trigram_build_gate),
+            [Arc::clone(&content_building), Arc::clone(&def_building)],
         ) {
             warn!(error = %e, "Failed to start file watcher");
         }
@@ -334,6 +335,9 @@ fn build_context_with_index_dir(args: ServeArgs, idx_base: PathBuf) -> mcp::hand
                 effective_respect_git_exclude,
                 Arc::clone(&autosave_dirty),
                 Arc::clone(&trigram_build_gate),
+                Arc::clone(&content_build_terminal),
+                Arc::clone(&def_build_terminal),
+                [Arc::clone(&content_building), Arc::clone(&def_building)],
             );
         }
     }
@@ -379,6 +383,8 @@ fn build_context_with_index_dir(args: ServeArgs, idx_base: PathBuf) -> mcp::hand
         max_response_bytes,
         content_ready,
         def_ready,
+        content_build_terminal: Arc::clone(&content_build_terminal),
+        def_build_terminal,
         git_cache,
         git_cache_ready,
         current_branch,
