@@ -489,6 +489,25 @@ impl ContentBuildFixture {
         super::cross_load_content_index(&self.ctx, dir)
     }
 
+    fn pause_definitions(&mut self, dir: &str, panic_after_resume: bool) {
+        let (reached, paused) = std::sync::mpsc::channel();
+        let (resume, release) = std::sync::mpsc::channel();
+        let (completed, completion) = std::sync::mpsc::channel();
+        super::DEFINITION_CROSS_BUILD_BARRIERS.lock().unwrap().insert(
+            dir.to_string(), super::DefinitionCrossBuildBarrier {
+                reached, resume: release, completed, panic_after_resume,
+            },
+        );
+        self.barriers.push((dir.to_string(), paused, Some(resume)));
+        self.completion = Some(completion);
+    }
+
+    fn finish_definitions(&mut self) {
+        self.completion.as_ref().unwrap().recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        self.completion = None;
+        assert!(!self.ctx.def_building.load(Ordering::Acquire));
+    }
+
     fn cache(&self, dir: &str) {
         let index = crate::build_content_index(&crate::ContentIndexArgs {
             dir: dir.to_string(), ext: "rs".into(), threads: 1, ..Default::default()
@@ -514,6 +533,7 @@ impl Drop for ContentBuildFixture {
         for dir in &self.dirs {
             super::CONTENT_CROSS_BUILD_BARRIERS.lock().unwrap().remove(dir);
             super::CONTENT_PREPARATION_BARRIERS.lock().unwrap().remove(dir);
+            super::DEFINITION_CROSS_BUILD_BARRIERS.lock().unwrap().remove(dir);
         }
         for (_, _, resume) in &mut self.barriers {
             if let Some(resume) = resume.take() { let _ = resume.send(()); }
@@ -524,9 +544,132 @@ impl Drop for ContentBuildFixture {
         for dir in &self.dirs {
             super::CONTENT_CROSS_BUILD_BARRIERS.lock().unwrap().remove(dir);
             super::CONTENT_CROSS_BUILD_COMPLETED.lock().unwrap().remove(dir);
+            super::DEFINITION_CROSS_BUILD_BARRIERS.lock().unwrap().remove(dir);
         }
         super::CONTENT_BUILD_PROBES.lock().unwrap().remove(&self.ctx.index_base);
     }
+}
+
+#[cfg(feature = "lang-rust")]
+#[test]
+fn test_reindex_watcher_waits_for_definition_companion_after_startup() {
+    let mut fixture = ContentBuildFixture::new();
+    let target = fixture.dirs[0].clone();
+    let outgoing = fixture.dirs[1].clone();
+    fixture.ctx.def_index = make_ctx_with_defs().def_index;
+    fixture.ctx.def_extensions = vec!["rs".into()];
+    fixture.ctx.watch_enabled = true;
+    fixture.ctx.watch_debounce_ms = 20;
+    fixture.ctx.content_ready.store(true, Ordering::Release);
+    {
+        let mut ws = fixture.ctx.workspace.write().unwrap();
+        ws.set_dir(outgoing.clone());
+        ws.mode = WorkspaceBindingMode::ManualOverride;
+    }
+    *fixture.ctx.index.write().unwrap() = crate::mcp::watcher::build_watch_index_from(
+        crate::ContentIndex {
+            root: outgoing,
+            extensions: vec!["rs".into()],
+            ..Default::default()
+        },
+    );
+    let _stop = WatcherScopeStop(Arc::clone(&fixture.ctx.watcher_generation));
+    assert!(fixture.ctx.content_build_terminal.load(Ordering::Acquire));
+    assert!(fixture.ctx.def_build_terminal.load(Ordering::Acquire));
+    fixture.pause_definitions(&target, false);
+    let result = super::dispatch_tool(&fixture.ctx, "xray_reindex",
+        &json!({"dir": target, "ext": ["rs"]}));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    fixture.reached(0);
+    assert!(fixture.ctx.def_building.load(Ordering::Acquire));
+    assert!(!fixture.ctx.def_ready.load(Ordering::Acquire));
+    let pending = std::path::Path::new(&target).join("pending.rs");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    while std::time::Instant::now() < deadline {
+        std::fs::write(&pending, "pub fn buffered_definition() {}\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let premature_events = fixture.ctx.watcher_stats.events_total.load(Ordering::Relaxed);
+    fixture.release(0);
+    fixture.finish_definitions();
+    assert_eq!(premature_events, 0, "restart must buffer events while definitions build");
+    assert!(wait_until(|| fixture.ctx.index.read().unwrap().index.contains_key("buffered_definition")));
+    assert!(wait_until(|| fixture.ctx.watcher_stats.events_total.load(Ordering::Relaxed) > 0));
+    assert!(fixture.ctx.def_ready.load(Ordering::Acquire));
+    let defs = fixture.ctx.def_index.as_ref().unwrap().read().unwrap();
+    assert!(crate::path_eq(&defs.root, &target));
+    assert!(defs.definitions.iter().any(|definition| definition.name == "buffered_definition"));
+}
+
+#[cfg(feature = "lang-rust")]
+#[test]
+fn test_reindex_definition_companion_clears_building_on_panic() {
+    let mut fixture = ContentBuildFixture::new();
+    let target = fixture.dirs[1].clone();
+    fixture.ctx.def_index = make_ctx_with_defs().def_index;
+    fixture.ctx.def_extensions = vec!["rs".into()];
+    fixture.ctx.workspace.write().unwrap().mode = WorkspaceBindingMode::ManualOverride;
+    fixture.pause_definitions(&target, true);
+    let result = super::dispatch_tool(&fixture.ctx, "xray_reindex",
+        &json!({"dir": target, "ext": ["rs"]}));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    fixture.reached(0);
+    assert!(fixture.ctx.def_building.load(Ordering::Acquire));
+    fixture.release(0);
+    fixture.finish_definitions();
+    assert!(!fixture.ctx.def_ready.load(Ordering::Acquire));
+    let retry = super::dispatch_tool(&fixture.ctx, "xray_reindex_definitions",
+        &json!({"ext": ["rs"]}));
+    assert!(!retry.is_error, "{}", retry.content[0].text);
+    assert!(fixture.ctx.def_ready.load(Ordering::Acquire));
+    assert!(!fixture.ctx.def_building.load(Ordering::Acquire));
+}
+
+#[cfg(feature = "lang-rust")]
+#[test]
+fn test_reindex_watcher_waits_for_companion_build_after_startup() {
+    let mut fixture = ContentBuildFixture::new();
+    let target = fixture.dirs[0].clone();
+    let outgoing = fixture.dirs[1].clone();
+    fixture.ctx.def_index = make_ctx_with_defs().def_index;
+    fixture.ctx.watch_enabled = true;
+    fixture.ctx.watch_debounce_ms = 20;
+    fixture.ctx.content_ready.store(true, Ordering::Release);
+    {
+        let mut ws = fixture.ctx.workspace.write().unwrap();
+        ws.set_dir(outgoing.clone());
+        ws.mode = WorkspaceBindingMode::ManualOverride;
+    }
+    *fixture.ctx.index.write().unwrap() = crate::mcp::watcher::build_watch_index_from(
+        crate::ContentIndex {
+            root: outgoing,
+            extensions: vec!["rs".into()],
+            ..Default::default()
+        },
+    );
+    let _stop = WatcherScopeStop(Arc::clone(&fixture.ctx.watcher_generation));
+    fixture.pause(&target);
+    let (done, completion) = std::sync::mpsc::channel();
+    super::CONTENT_CROSS_BUILD_COMPLETED.lock().unwrap().insert(target.clone(), done);
+    fixture.completion = Some(completion);
+    let result = super::dispatch_tool(&fixture.ctx, "xray_reindex_definitions",
+        &json!({"dir": target, "ext": ["rs"]}));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    fixture.reached(0);
+    assert!(fixture.ctx.content_building.load(Ordering::Acquire));
+    let signal = std::path::Path::new(&target).join("watcher.signal");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    while std::time::Instant::now() < deadline {
+        std::fs::write(&signal, "pending").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let premature_events = fixture.ctx.watcher_stats.events_total.load(Ordering::Relaxed);
+    fixture.release(0);
+    fixture.finish();
+    assert!(wait_until(|| fixture.ctx.watcher_stats.events_total.load(Ordering::Relaxed) > 0));
+    assert_eq!(premature_events, 0, "restart must buffer events while companion build runs");
+    assert!(fixture.ctx.content_ready.load(Ordering::Acquire));
+    assert!(crate::path_eq(&fixture.ctx.index.read().unwrap().root, &target));
 }
 
 #[test]

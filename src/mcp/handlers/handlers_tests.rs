@@ -86,6 +86,8 @@ fn test_handler_context_field_count_guard() {
         max_response_bytes: 0,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+        content_build_terminal: Arc::new(AtomicBool::new(true)),
+        def_build_terminal: Arc::new(AtomicBool::new(true)),
         git_cache: Arc::new(RwLock::new(None)),
         git_cache_ready: Arc::new(AtomicBool::new(false)),
         current_branch: None,

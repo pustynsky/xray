@@ -934,6 +934,9 @@ pub struct HandlerContext {
     /// Whether the definition index has been fully built/loaded.
     /// Tools return a "building" message when false.
     pub def_ready: Arc<AtomicBool>,
+    /// Completion of initial builds, including failures; never reset by reindex.
+    pub content_build_terminal: Arc<AtomicBool>,
+    pub def_build_terminal: Arc<AtomicBool>,
     /// Git history cache — populated by background thread (PR 2c).
     /// `None` until cache is built; queries fall back to CLI.
     pub git_cache: Arc<RwLock<Option<GitHistoryCache>>>,
@@ -1124,6 +1127,8 @@ impl Default for HandlerContext {
             max_response_bytes: utils::DEFAULT_MAX_RESPONSE_BYTES,
             content_ready: Arc::new(AtomicBool::new(true)),
             def_ready: Arc::new(AtomicBool::new(true)),
+            content_build_terminal: Arc::new(AtomicBool::new(true)),
+            def_build_terminal: Arc::new(AtomicBool::new(true)),
             git_cache: Arc::new(RwLock::new(None)),
             git_cache_ready: Arc::new(AtomicBool::new(false)),
             current_branch: None,
@@ -2312,6 +2317,26 @@ fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'stat
     cross_load_definition_index_at_generation(ctx, dir, generation)
 }
 
+#[cfg(test)]
+struct DefinitionCrossBuildBarrier {
+    reached: std::sync::mpsc::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+    completed: std::sync::mpsc::Sender<()>,
+    panic_after_resume: bool,
+}
+
+#[cfg(test)]
+impl Drop for DefinitionCrossBuildBarrier {
+    fn drop(&mut self) {
+        let _ = self.completed.send(());
+    }
+}
+
+#[cfg(test)]
+static DEFINITION_CROSS_BUILD_BARRIERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, DefinitionCrossBuildBarrier>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 fn cross_load_definition_index_at_generation(ctx: &HandlerContext, dir: &str, expected_generation: u64) -> Option<&'static str> {
     let def_arc = ctx.def_index.as_ref()?;
     let def_ext_vec = effective_definition_build_extensions(ctx);
@@ -2354,7 +2379,17 @@ fn cross_load_definition_index_at_generation(ctx: &HandlerContext, dir: &str, ex
     let bg_workspace = Arc::clone(&ctx.workspace);
     let bg_respect = ctx.respect_git_exclude;
     let mut retry_cache: Option<crate::definitions::DefinitionIndex> = None;
-    std::thread::spawn(move || loop {
+    std::thread::spawn(move || {
+        #[cfg(test)]
+        let test_barrier = DEFINITION_CROSS_BUILD_BARRIERS.lock().unwrap().remove(&bg_dir);
+        let building_guard = BuildingFlagGuard::new(&bg_building);
+        #[cfg(test)]
+        if let Some(barrier) = &test_barrier {
+            barrier.reached.send(()).unwrap();
+            barrier.resume.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            assert!(!barrier.panic_after_resume, "simulated definition companion panic");
+        }
+        loop {
         info!(dir = %bg_dir, "Building definition index in background (workspace switch)");
         let cache_hit = retry_cache.is_some();
         let new_idx = retry_cache.take().unwrap_or_else(|| crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
@@ -2390,13 +2425,13 @@ fn cross_load_definition_index_at_generation(ctx: &HandlerContext, dir: &str, ex
         let ws = bg_workspace.read().unwrap_or_else(|e| e.into_inner());
         if bg_ready.load(Ordering::Acquire) {
             // A later switch loaded its cache while this build was running.
-            bg_building.store(false, Ordering::Release);
+            drop(building_guard);
             return;
         }
         if ws.generation == build_generation && code_xray::path_eq(&ws.dir, &bg_dir) {
             crate::definitions::replace_live_definition_index(&mut current, new_idx);
             bg_ready.store(true, Ordering::Release);
-            bg_building.store(false, Ordering::Release);
+            drop(building_guard);
             crate::index::log_memory("reindex: def cross-build complete");
             return;
         }
@@ -2411,6 +2446,7 @@ fn cross_load_definition_index_at_generation(ctx: &HandlerContext, dir: &str, ex
             let extensions: Vec<String> = bg_ext.split(',').map(str::to_string).collect();
             retry_cache = crate::definitions::load_definition_index(&bg_dir, &bg_ext, &bg_idx_base).ok()
                 .or_else(|| crate::definitions::find_definition_index_for_dir(&bg_dir, &bg_idx_base, &extensions));
+        }
         }
     });
     info!(dir = %dir, "Definition index background build started (no cache)");
@@ -2855,8 +2891,8 @@ fn restart_watcher_for_workspace_at_generation(ctx: &HandlerContext, dir: &str, 
         def_ext_vec.clone(),
         ctx.watch_debounce_ms,
         ctx.index_base.clone(),
-        Arc::clone(&ctx.content_ready),
-        Arc::clone(&ctx.def_ready),
+        Arc::clone(&ctx.content_build_terminal),
+        Arc::clone(&ctx.def_build_terminal),
         Arc::clone(&ctx.file_index_dirty),
         Arc::clone(&ctx.watcher_generation),
         new_gen,
@@ -2865,6 +2901,7 @@ fn restart_watcher_for_workspace_at_generation(ctx: &HandlerContext, dir: &str, 
         ctx.respect_git_exclude,
         Arc::clone(&ctx.autosave_dirty),
         Arc::clone(&ctx.trigram_build_gate),
+        [Arc::clone(&ctx.content_building), Arc::clone(&ctx.def_building)],
     ) {
         warn!(error = %e, "Failed to restart file watcher for new workspace");
     } else {
@@ -2894,6 +2931,9 @@ fn restart_watcher_for_workspace_at_generation(ctx: &HandlerContext, dir: &str, 
             ctx.respect_git_exclude,
             Arc::clone(&ctx.autosave_dirty),
             Arc::clone(&ctx.trigram_build_gate),
+            Arc::clone(&ctx.content_build_terminal),
+            Arc::clone(&ctx.def_build_terminal),
+            [Arc::clone(&ctx.content_building), Arc::clone(&ctx.def_building)],
         );
     }
 }

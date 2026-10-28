@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.9.5 (2026-10-28)
+
+- **Wait for index builds before filesystem reconciliation.** The event watcher and periodic rescan now wait for both initial builds to finish, including failure or disabled definitions, and for active companion builds on workspace switches. Slow builds warn after five minutes instead of bypassing the startup barrier and reprocessing the whole workspace. The first periodic interval starts after build completion, and workspace changes cancel pending waits. Definition companion builds release ownership even on panic. Query readiness and cache formats are unchanged.
+
 - **Resolve PowerShell filesystem drives during setup.** Repository and installation paths now use their backing filesystem paths before config reads, Git calls, and MCP registration. Session-only drive aliases no longer cause setup to fail when PowerShell can see a config but .NET cannot open its alias path.
 
 ## 0.9.4 (2026-10-23)
