@@ -23,7 +23,8 @@ $Script:Failed = 0
 function Assert-True {
     param(
         [Parameter(Mandatory)] [bool]$Condition,
-        [Parameter(Mandatory)] [string]$Label
+        [Parameter(Mandatory)] [string]$Label,
+        [string]$Details
     )
 
     if ($Condition) {
@@ -33,6 +34,7 @@ function Assert-True {
     else {
         $Script:Failed++
         Write-Host "FAIL  $Label" -ForegroundColor Red
+        if ($Details) { Write-Host $Details -ForegroundColor DarkGray }
     }
 }
 
@@ -155,6 +157,97 @@ function Invoke-SetupProcess {
     }
 }
 
+function Invoke-DownloadSetupProcess {
+    param(
+        [hashtable]$Parameters,
+        [ValidateSet('valid', 'invalid', 'throw')] [string]$DownloadMode = 'valid',
+        [switch]$Running,
+        [switch]$UnlockedRunning,
+        [switch]$DenyStop,
+        [switch]$Inline
+    )
+
+    $directory = Join-Path $root ('update-' + [Guid]::NewGuid().ToString('N'))
+    $tempDirectory = Join-Path $directory 'temp'
+    New-Item -ItemType Directory -Path $tempDirectory -Force | Out-Null
+    $asset = Join-Path $directory 'release.exe'
+    Write-FakeWindowsExecutable -Path $asset
+    $payload = @{
+        ScriptPath = $scriptPath; Parameters = $Parameters; Directory = $directory
+        Asset = [Convert]::ToBase64String([IO.File]::ReadAllBytes($asset))
+        DownloadMode = $DownloadMode; Running = [bool]$Running
+        UnlockedRunning = [bool]$UnlockedRunning
+        DenyStop = [bool]$DenyStop; Inline = [bool]$Inline
+    } | ConvertTo-Json -Depth 10 -Compress
+    $encodedPayload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
+    $code = @'
+$ErrorActionPreference = 'Stop'
+$payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__PAYLOAD__')) | ConvertFrom-Json
+$parameters = @{}
+foreach ($property in $payload.Parameters.PSObject.Properties) { $parameters[$property.Name] = $property.Value }
+if ($parameters.UpdateOnly) { $env:PATH = $PSHOME }
+$env:LOCALAPPDATA = Join-Path $payload.Directory 'local'
+$env:APPDATA = Join-Path $payload.Directory 'appdata'
+$env:COPILOT_HOME = Join-Path $payload.Directory 'copilot'
+$env:TEMP = Join-Path $payload.Directory 'temp'
+$env:TMP = $env:TEMP
+$target = if ($parameters.InstallDir) { Join-Path $parameters.InstallDir 'xray.exe' } else { Join-Path $env:LOCALAPPDATA 'xray\xray.exe' }
+$global:xrayTestRunningIds = @()
+if ($payload.Running) { $global:xrayTestRunningIds = @(11001, 11002) }
+function Read-Host { throw 'Unexpected interactive prompt' }
+function Invoke-WebRequest {
+    [CmdletBinding()]
+    param($Uri, [string]$OutFile, [switch]$UseBasicParsing)
+    [IO.File]::WriteAllText((Join-Path $payload.Directory 'download-uri'), "$Uri")
+    if ($payload.DownloadMode -eq 'throw') { throw 'simulated download failure' }
+    if ($payload.DownloadMode -eq 'invalid') { [IO.File]::WriteAllText($OutFile, '<html>invalid</html>'); return }
+    [IO.File]::WriteAllBytes($OutFile, [Convert]::FromBase64String($payload.Asset))
+}
+function Get-Process {
+    [CmdletBinding()]
+    param([string]$Name, [int]$Id)
+    foreach ($processId in $global:xrayTestRunningIds) {
+        if ($Name -eq 'xray' -or $Id -eq $processId) {
+            [PSCustomObject]@{ Id = $processId; Path = $target }
+        }
+    }
+    if ($Name -eq 'xray') { [PSCustomObject]@{ Id = 11003; Path = (Join-Path $payload.Directory 'unrelated\xray.exe') } }
+}
+function Stop-Process {
+    [CmdletBinding()]
+    param([int]$Id, [switch]$Force)
+    if ($payload.DenyStop) { throw 'simulated access denied' }
+    [IO.File]::AppendAllText((Join-Path $payload.Directory 'stopped'), "$Id`n")
+    $global:xrayTestRunningIds = @($global:xrayTestRunningIds | Where-Object { $_ -ne $Id })
+}
+function Wait-Process {
+    [CmdletBinding()]
+    param([Parameter(ValueFromPipeline)]$InputObject, [int]$Timeout)
+    process {}
+}
+function Move-Item {
+    [CmdletBinding()]
+    param([string]$LiteralPath, [string]$Destination, [switch]$Force)
+    if ($Destination -eq $target -and $global:xrayTestRunningIds.Count -gt 0 -and -not $payload.UnlockedRunning) { throw [IO.IOException]::new('simulated executable lock') }
+    $moveItem = $ExecutionContext.InvokeCommand.GetCommand('Move-Item', [Management.Automation.CommandTypes]::Cmdlet)
+    & $moveItem @PSBoundParameters
+}
+try {
+    if ($payload.Inline) { & ([scriptblock]::Create([IO.File]::ReadAllText($payload.ScriptPath))) @parameters }
+    else { & $payload.ScriptPath @parameters }
+    exit $LASTEXITCODE
+}
+catch {
+    Write-Output ("Setup failed: " + $_.Exception.Message)
+    exit 1
+}
+'@.Replace('__PAYLOAD__', $encodedPayload)
+    $command = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
+    $ErrorActionPreference = 'Continue'
+    $output = @(& $Script:PowerShellExe -NoLogo -NoProfile -NonInteractive -OutputFormat Text -ExecutionPolicy Bypass -EncodedCommand $command 2>&1)
+    return [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = ($output -join "`n"); Directory = $directory }
+}
+
 $scriptPath = Join-Path $PSScriptRoot 'setup-xray.ps1'
 if (-not (Test-Path $scriptPath)) { throw "setup-xray.ps1 not found: $scriptPath" }
 $Script:GitExe = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
@@ -163,12 +256,18 @@ $minimalPath = $PSHOME
 $root = New-TempDirectory
 $oldGlobalConfig = $env:GIT_CONFIG_GLOBAL
 $oldNoSystemConfig = $env:GIT_CONFIG_NOSYSTEM
+$oldCopilotHome = $env:COPILOT_HOME
+$oldAppData = $env:APPDATA
+$oldVSCodePortable = $env:VSCODE_PORTABLE
 
 try {
     $isolatedGlobalConfig = Join-Path $root 'global.gitconfig'
     New-Item -ItemType File -Path $isolatedGlobalConfig -Force | Out-Null
     $env:GIT_CONFIG_GLOBAL = $isolatedGlobalConfig
     $env:GIT_CONFIG_NOSYSTEM = '1'
+    $env:COPILOT_HOME = Join-Path $root 'copilot'
+    $env:APPDATA = Join-Path $root 'appdata'
+    $env:VSCODE_PORTABLE = $null
 
     Assert-True -Condition ($Script:GitExe -is [string] -and (Test-Path -LiteralPath $Script:GitExe -PathType Leaf)) -Label 'T0 Git resolves to one executable when multiple PATH entries match'
 
@@ -272,7 +371,7 @@ exit /b 0
     $plainResult = Invoke-SetupProcess -ScriptPath $scriptPath -RepoPath $plainRepo -InstallDir $plainInstall `
         -Arguments @('-SkipDownload', '-Extensions', 'ts', '-EnableVSCode', '-GitVisibility', 'Visible', '-Force') `
         -PathOverride $minimalPath
-    Assert-Equal -Actual $plainResult.ExitCode -Expected 0 -Label 'T5 non-Git setup succeeds without git'
+    Assert-Equal -Actual $plainResult.ExitCode -Expected 0 -Label "T5 non-Git setup succeeds without git: $($plainResult.Output -join "`n")"
     Assert-True -Condition (Test-Path (Join-Path $plainRepo '.vscode/mcp.json')) -Label 'T5 non-Git setup writes config'
 
     $hiddenRepo = Join-Path $root 'plain-hidden'
@@ -281,7 +380,7 @@ exit /b 0
     $hiddenResult = Invoke-SetupProcess -ScriptPath $scriptPath -RepoPath $hiddenRepo -InstallDir $hiddenInstall `
         -Arguments @('-SkipDownload', '-Extensions', 'ts', '-EnableVSCode', '-GitVisibility', 'Hidden', '-Force') `
         -PathOverride $minimalPath
-    Assert-Equal -Actual $hiddenResult.ExitCode -Expected 0 -Label 'T6 deprecated Hidden uses the same local setup'
+    Assert-Equal -Actual $hiddenResult.ExitCode -Expected 0 -Label "T6 deprecated Hidden uses the same local setup: $($hiddenResult.Output -join "`n")"
     Assert-True -Condition (Test-Path (Join-Path $hiddenRepo '.vscode/mcp.json')) -Label 'T6 deprecated Hidden does not require filter runtime'
 
     $managedRepo = New-GitFixture -Root $root -Name 'managed-no-git'
@@ -312,16 +411,80 @@ exit /b 0
     Assert-BytesEqual -Actual ([IO.File]::ReadAllBytes($restoreConfig)) -Expected $restoreExpected -Label 'T8b unsafe restore preserves current bytes'
     Assert-True -Condition (Test-Path "$restoreConfig.bak") -Label 'T8b unsafe restore preserves backup'
 
+    $updateInstall = Join-Path $root 'update install with spaces'
+    $profilePath = Join-Path $updateInstall 'workspaces\existing\config.json'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $profilePath) -Force | Out-Null
+    [IO.File]::WriteAllText($profilePath, 'existing workspace profile')
+    $updateBinary = Join-Path $updateInstall 'xray.exe'
+    [IO.File]::WriteAllText($updateBinary, 'old binary')
+    $updateConfig = Join-Path $managedRepo '.vscode\mcp.json'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $updateConfig) -Force | Out-Null
+    [IO.File]::WriteAllText($updateConfig, 'invalid JSON must not be inspected')
+    $updateParameters = @{ UpdateOnly = $true; InstallDir = $updateInstall }
+    $update = Invoke-DownloadSetupProcess -Parameters $updateParameters -Running -UnlockedRunning
+    Assert-Equal $update.ExitCode 0 "T9 update-only succeeds without RepoPath, Force, prompts, or git: $($update.Output)"
+    Assert-True (Test-WindowsExecutable $updateBinary) 'T9 update-only replaces the existing binary'
+    Assert-Equal ([IO.File]::ReadAllText((Join-Path $update.Directory 'download-uri'))) 'https://github.com/pustynsky/xray/releases/latest/download/xray.exe' 'T9 update-only downloads the latest public release'
+    Assert-Equal (([IO.File]::ReadAllLines((Join-Path $update.Directory 'stopped'))) -join ',') '11001,11002' 'T9 update-only stops only matching installation processes even without a file lock'
+    Assert-Equal ([IO.File]::ReadAllText($profilePath)) 'existing workspace profile' 'T9 update-only preserves workspace profiles'
+    Assert-Equal (@(Get-ChildItem -LiteralPath (Join-Path $update.Directory 'temp')).Count) 0 'T9 update-only cleans up its download directory'
+    Assert-Equal (@(Get-ChildItem -LiteralPath $updateInstall -File -Recurse).Count) 2 'T9 update-only creates no MCP files or backups'
 
+    $inline = Invoke-DownloadSetupProcess -Parameters @{ UpdateOnly = $true; GithubRepo = 'owner/repo'; RepoPath = (Join-Path $root 'does-not-exist') } -Inline
+    $inlineBinary = Join-Path $inline.Directory 'local\xray\xray.exe'
+    Assert-Equal $inline.ExitCode 0 "T10 inline update-only ignores RepoPath and installs to the default location: $($inline.Output)"
+    Assert-True (Test-WindowsExecutable $inlineBinary) 'T10 update-only supports a first binary-only install'
+    Assert-Equal ([IO.File]::ReadAllText((Join-Path $inline.Directory 'download-uri'))) 'https://github.com/owner/repo/releases/latest/download/xray.exe' 'T10 update-only honors GithubRepo'
 
+    $repeat = Invoke-DownloadSetupProcess -Parameters @{ UpdateOnly = $true; InstallDir = $updateInstall; RepoPath = $managedRepo }
+    Assert-Equal $repeat.ExitCode 0 "T10b update-only ignores repository Git metadata and invalid MCP JSON: $($repeat.Output)"
+    Assert-Equal ([IO.File]::ReadAllText($updateConfig)) 'invalid JSON must not be inspected' 'T10b update-only preserves repository MCP settings'
+    Assert-Equal ([IO.File]::ReadAllText($profilePath)) 'existing workspace profile' 'T10b repeated update preserves existing profiles'
+    Assert-True (Test-Path -LiteralPath (Join-Path $repeat.Directory 'download-uri')) 'T10b update-only always downloads even when already installed'
+
+    foreach ($mode in @('invalid', 'throw')) {
+        [IO.File]::WriteAllText($updateBinary, 'old binary')
+        $failedDownload = Invoke-DownloadSetupProcess -Parameters $updateParameters -Running -DownloadMode $mode
+        Assert-True ($failedDownload.ExitCode -ne 0) "T11 update-only rejects $mode downloads"
+        Assert-True ($failedDownload.Output -match 'not a valid Windows executable|simulated download failure') "T11 $mode download failure is reported" -Details $failedDownload.Output
+        Assert-Equal ([IO.File]::ReadAllText($updateBinary)) 'old binary' "T11 $mode download preserves the old binary"
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $failedDownload.Directory 'stopped'))) "T11 $mode download leaves running processes alone"
+        Assert-Equal (@(Get-ChildItem -LiteralPath (Join-Path $failedDownload.Directory 'temp')).Count) 0 "T11 $mode download cleans up staging"
+    }
+
+    $denied = Invoke-DownloadSetupProcess -Parameters $updateParameters -Running -DenyStop
+    Assert-True ($denied.ExitCode -ne 0) 'T12 update-only fails if a process cannot be stopped'
+    Assert-True ($denied.Output -match 'Failed to stop PID 11001') 'T12 update-only reports process termination failure' -Details $denied.Output
+    Assert-Equal ([IO.File]::ReadAllText($updateBinary)) 'old binary' 'T12 termination failure preserves the old binary'
+    Assert-Equal (@(Get-ChildItem -LiteralPath (Join-Path $denied.Directory 'temp')).Count) 0 'T12 termination failure cleans up staging'
+
+    foreach ($conflict in @('SkipDownload', 'Restore', 'Uninstall', 'DryRun', 'PlanOnly', 'PreserveSettings')) {
+        $options = @{ UpdateOnly = $true; InstallDir = $updateInstall }
+        $options[$conflict] = $true
+        $rejected = Invoke-DownloadSetupProcess -Parameters $options
+        Assert-True ($rejected.ExitCode -ne 0 -and $rejected.Output -match 'UpdateOnly cannot be combined') "T13 update-only rejects $conflict before setup" -Details $rejected.Output
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $rejected.Directory 'download-uri'))) "T13 $conflict conflict does not download"
+    }
+
+    [IO.File]::WriteAllText($updateConfig, '{"servers":{}}')
+    $ordinary = Invoke-DownloadSetupProcess -Running -Parameters @{
+        RepoPath = $managedRepo; InstallDir = $updateInstall; Force = $true
+        Extensions = 'ts'; EnableVSCode = $true
+    }
+    Assert-Equal $ordinary.ExitCode 0 "T14 ordinary forced setup still downloads, stops processes, and configures MCP: $($ordinary.Output)"
+    Assert-True (Test-WindowsExecutable $updateBinary) 'T14 ordinary setup uses the shared release installer'
+    Assert-True (([IO.File]::ReadAllText($updateConfig)) -match '"xray"') 'T14 ordinary setup still configures MCP'
 }
 finally {
     $env:GIT_CONFIG_GLOBAL = $oldGlobalConfig
     $env:GIT_CONFIG_NOSYSTEM = $oldNoSystemConfig
+    $env:COPILOT_HOME = $oldCopilotHome
+    $env:APPDATA = $oldAppData
+    $env:VSCODE_PORTABLE = $oldVSCodePortable
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-$expectedAssertions = 17
+$expectedAssertions = 60
 if (($Script:Passed + $Script:Failed) -ne $expectedAssertions) {
     $Script:Failed++
     Write-Host "FAIL  expected $expectedAssertions assertions, ran $($Script:Passed + $Script:Failed - 1)" -ForegroundColor Red

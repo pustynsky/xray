@@ -39,6 +39,13 @@
 .PARAMETER SkipDownload
     Skip downloading xray.exe and use the existing installation.
 
+.PARAMETER UpdateOnly
+    Download and replace only xray.exe, without prompts or repository setup.
+    Stop running Xray processes only from the selected InstallDir. No RepoPath
+    is required; MCP registrations, workspace profiles, and Git remain untouched.
+    Cannot be combined with SkipDownload, Restore, Uninstall, DryRun, PlanOnly,
+    or PreserveSettings. Restart affected MCP connections after updating.
+
 .PARAMETER PreserveSettings
     With -UserMcp, preserve supported serve arguments from the current profile
     or legacy workspace entries. Refuse conflicting settings and foreign personal
@@ -157,6 +164,9 @@
     .\setup-xray.ps1 -RepoPath C:\Repos\MyProject -EnableCopilotCli
 
 .EXAMPLE
+    .\setup-xray.ps1 -UpdateOnly
+
+.EXAMPLE
     .\setup-xray.ps1 -RepoPath C:\Repos\MyProject -Restore
 
 .EXAMPLE
@@ -174,6 +184,7 @@ param(
     [string]$GithubRepo = 'pustynsky/xray',
     [string]$Extensions,
     [switch]$SkipDownload,
+    [switch]$UpdateOnly,
     [switch]$PreserveSettings,
     [switch]$PlanOnly,
     [switch]$EnableVSCode,
@@ -445,6 +456,55 @@ function Install-XrayBinaryWithRetry {
     }
 
     throw "Cannot replace $Destination after $maxAttempts attempts. Last error: $($deploymentError.Exception.Message)"
+}
+
+function Install-XrayRelease {
+    param(
+        [Parameter(Mandatory)] [string]$GithubRepo,
+        [Parameter(Mandatory)] [string]$Destination,
+        [switch]$KillRunning,
+        [switch]$Force,
+        [switch]$PreserveSettings
+    )
+
+    $installDirectory = Split-Path -Parent $Destination
+    if (-not (Test-Path -LiteralPath $installDirectory)) {
+        New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
+    }
+    Write-Host 'Downloading the latest xray release...' -ForegroundColor Cyan
+    $tempDir = Join-Path ([IO.Path]::GetTempPath()) ("xray-download-{0}" -f [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tempDir | Out-Null
+    $downloaded = Join-Path $tempDir 'xray.exe'
+    try {
+        Save-XrayReleaseAsset -GithubRepo $GithubRepo -Destination $downloaded
+        $replaceWithRetry = [bool]$KillRunning
+        if (-not $replaceWithRetry) {
+            try {
+                Move-Item -LiteralPath $downloaded -Destination $Destination -Force -ErrorAction Stop
+            }
+            catch [System.IO.IOException], [System.UnauthorizedAccessException] {
+                $running = @(Get-Process -Name 'xray' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Destination })
+                if ($running.Count -eq 0) {
+                    throw "Cannot replace $Destination but no xray.exe process is running. Original error: $($_.Exception.Message)"
+                }
+
+                Write-Host "$Destination is in use by $($running.Count) running xray.exe process(es):" -ForegroundColor Yellow
+                $running | ForEach-Object { Write-Host ("  PID $($_.Id)  $($_.Path)") -ForegroundColor Yellow }
+                $replaceWithRetry = -not $PreserveSettings -and (Read-YesNo -Prompt 'Kill these processes and continue?' -Default $false -ForceYes:$Force)
+                if (-not $replaceWithRetry) {
+                    throw 'Aborted: xray.exe is in use. Re-run with -KillRunning to terminate it automatically, or close the MCP hosts manually.'
+                }
+            }
+        }
+        if ($replaceWithRetry) {
+            Install-XrayBinaryWithRetry -Downloaded $downloaded -Destination $Destination
+            Write-Host 'Note: MCP hosts that were using xray will need to restart it.' -ForegroundColor Yellow
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $tempDir -Recurse -Force
+    }
+    Write-Host "Installed the latest xray release to $Destination" -ForegroundColor Green
 }
 
 
@@ -1678,6 +1738,18 @@ function Get-DetectedExtensions {
     return $extCounts
 }
 
+if ($UpdateOnly) {
+    if ($SkipDownload -or $Restore -or $Uninstall -or $DryRun -or $PlanOnly -or $PreserveSettings) {
+        throw '-UpdateOnly cannot be combined with -SkipDownload, -Restore, -Uninstall, -DryRun, -PlanOnly, or -PreserveSettings.'
+    }
+    $InstallDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir)
+    $InstallDir = [IO.Path]::GetFullPath($InstallDir)
+    Write-Host "`n=== Updating xray executable only ===" -ForegroundColor Cyan
+    Install-XrayRelease -GithubRepo $GithubRepo -Destination (Join-Path $InstallDir 'xray.exe') -KillRunning
+    if ($null -ne $BinaryPrepared) { $BinaryPrepared.Value = $true }
+    exit 0
+}
+
 if (-not $RepoPath) {
     Write-Host 'Target repository = the LOCAL project folder you want to use xray with' -ForegroundColor Cyan
     $RepoPath = Read-Host 'Enter the path to the target repository (e.g. C:\Repos\MyProject)'
@@ -1933,10 +2005,6 @@ Write-Host "`n=== Setting up xray MCP for: $RepoPath ===" -ForegroundColor Cyan
 
 $xrayPath = Join-Path $InstallDir 'xray.exe'
 if (-not $SkipDownload) {
-    if (-not (Test-Path $InstallDir)) {
-        New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    }
-
     $needsDownload = $true
     if (Test-Path $xrayPath) {
         Write-Host "xray.exe already exists at $xrayPath" -ForegroundColor Yellow
@@ -1947,61 +2015,7 @@ if (-not $SkipDownload) {
     }
 
     if ($needsDownload) {
-        Write-Host 'Downloading the latest xray release...' -ForegroundColor Cyan
-        $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("xray-download-{0}" -f [Guid]::NewGuid().ToString('N'))
-        if (Test-Path $tempDir) {
-            Remove-Item $tempDir -Recurse -Force
-        }
-        New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-
-        $downloaded = Join-Path $tempDir 'xray.exe'
-        try {
-            Save-XrayReleaseAsset -GithubRepo $GithubRepo -Destination $downloaded
-        }
-        catch {
-            $message = $_.Exception.Message
-            Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Error $message
-            exit 1
-        }
-
-        # Windows refuses to overwrite a running .exe. If xray.exe is in use
-        # (typically an MCP server spawned by another VS Code / Roo instance),
-        # terminate the running processes first - either silently when the user
-        # opts in via -KillRunning / -Force, or after an interactive prompt.
-        try {
-            Move-Item -LiteralPath $downloaded -Destination $xrayPath -Force -ErrorAction Stop
-        }
-        catch [System.IO.IOException], [System.UnauthorizedAccessException] {
-            $running = @(Get-Process -Name 'xray' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $xrayPath })
-            if ($running.Count -eq 0) {
-                Remove-Item $tempDir -Recurse -Force
-                Write-Error "Cannot replace $xrayPath but no xray.exe process is running. Original error: $($_.Exception.Message)"
-                exit 1
-            }
-
-            Write-Host "$xrayPath is in use by $($running.Count) running xray.exe process(es):" -ForegroundColor Yellow
-            $running | ForEach-Object { Write-Host ("  PID $($_.Id)  $($_.Path)") -ForegroundColor Yellow }
-
-            $kill = $KillRunning -or (-not $PreserveSettings -and (Read-YesNo -Prompt 'Kill these processes and continue?' -Default $false -ForceYes:$Force))
-            if (-not $kill) {
-                Remove-Item $tempDir -Recurse -Force
-                Write-Error "Aborted: xray.exe is in use. Re-run with -KillRunning to terminate it automatically, or close the MCP hosts manually."
-                exit 1
-            }
-
-            try {
-                Install-XrayBinaryWithRetry -Downloaded $downloaded -Destination $xrayPath
-            }
-            catch {
-                Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-                Write-Error $_.Exception.Message
-                exit 1
-            }
-            Write-Host 'Note: MCP hosts that were using xray will need to restart it.' -ForegroundColor Yellow
-        }
-        Remove-Item $tempDir -Recurse -Force
-        Write-Host "Installed the latest xray release to $xrayPath" -ForegroundColor Green
+        Install-XrayRelease -GithubRepo $GithubRepo -Destination $xrayPath -KillRunning:$KillRunning -Force:$Force -PreserveSettings:$PreserveSettings
     }
 }
 else {
