@@ -23,7 +23,8 @@ $Script:Failed = 0
 function Assert-True {
     param(
         [Parameter(Mandatory)] [bool]$Condition,
-        [Parameter(Mandatory)] [string]$Label
+        [Parameter(Mandatory)] [string]$Label,
+        [string]$Details
     )
 
     if ($Condition) {
@@ -33,6 +34,7 @@ function Assert-True {
     else {
         $Script:Failed++
         Write-Host "FAIL  $Label" -ForegroundColor Red
+        if ($Details) { Write-Host $Details -ForegroundColor DarkGray }
     }
 }
 
@@ -230,9 +232,15 @@ function Move-Item {
     $moveItem = $ExecutionContext.InvokeCommand.GetCommand('Move-Item', [Management.Automation.CommandTypes]::Cmdlet)
     & $moveItem @PSBoundParameters
 }
-if ($payload.Inline) { & ([scriptblock]::Create([IO.File]::ReadAllText($payload.ScriptPath))) @parameters }
-else { & $payload.ScriptPath @parameters }
-exit $LASTEXITCODE
+try {
+    if ($payload.Inline) { & ([scriptblock]::Create([IO.File]::ReadAllText($payload.ScriptPath))) @parameters }
+    else { & $payload.ScriptPath @parameters }
+    exit $LASTEXITCODE
+}
+catch {
+    Write-Output ("Setup failed: " + $_.Exception.Message)
+    exit 1
+}
 '@.Replace('__PAYLOAD__', $encodedPayload)
     $command = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
     $ErrorActionPreference = 'Continue'
@@ -438,7 +446,7 @@ exit /b 0
         [IO.File]::WriteAllText($updateBinary, 'old binary')
         $failedDownload = Invoke-DownloadSetupProcess -Parameters $updateParameters -Running -DownloadMode $mode
         Assert-True ($failedDownload.ExitCode -ne 0) "T11 update-only rejects $mode downloads"
-        Assert-True ($failedDownload.Output -match 'not a valid Windows executable|simulated download failure') "T11 $mode download failure is reported"
+        Assert-True ($failedDownload.Output -match 'not a valid Windows executable|simulated download failure') "T11 $mode download failure is reported" -Details $failedDownload.Output
         Assert-Equal ([IO.File]::ReadAllText($updateBinary)) 'old binary' "T11 $mode download preserves the old binary"
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $failedDownload.Directory 'stopped'))) "T11 $mode download leaves running processes alone"
         Assert-Equal (@(Get-ChildItem -LiteralPath (Join-Path $failedDownload.Directory 'temp')).Count) 0 "T11 $mode download cleans up staging"
@@ -446,7 +454,7 @@ exit /b 0
 
     $denied = Invoke-DownloadSetupProcess -Parameters $updateParameters -Running -DenyStop
     Assert-True ($denied.ExitCode -ne 0) 'T12 update-only fails if a process cannot be stopped'
-    Assert-True ($denied.Output -match 'Failed to stop PID 11001') 'T12 update-only reports process termination failure'
+    Assert-True ($denied.Output -match 'Failed to stop PID 11001') 'T12 update-only reports process termination failure' -Details $denied.Output
     Assert-Equal ([IO.File]::ReadAllText($updateBinary)) 'old binary' 'T12 termination failure preserves the old binary'
     Assert-Equal (@(Get-ChildItem -LiteralPath (Join-Path $denied.Directory 'temp')).Count) 0 'T12 termination failure cleans up staging'
 
@@ -454,7 +462,7 @@ exit /b 0
         $options = @{ UpdateOnly = $true; InstallDir = $updateInstall }
         $options[$conflict] = $true
         $rejected = Invoke-DownloadSetupProcess -Parameters $options
-        Assert-True ($rejected.ExitCode -ne 0 -and $rejected.Output -match 'UpdateOnly cannot be combined') "T13 update-only rejects $conflict before setup"
+        Assert-True ($rejected.ExitCode -ne 0 -and $rejected.Output -match 'UpdateOnly cannot be combined') "T13 update-only rejects $conflict before setup" -Details $rejected.Output
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $rejected.Directory 'download-uri'))) "T13 $conflict conflict does not download"
     }
 
