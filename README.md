@@ -175,6 +175,11 @@ The script does this:
 
 Ordinary setup leaves the root `.mcp.json` untouched. Legacy entries and filters require explicit migration consent, either an interactive confirmation or `-MigrateLegacy`. `-GitVisibility` is deprecated and accepted with a warning; it no longer selects an installation strategy.
 
+To update only the executable without prompts, run `.\scripts\setup-xray.ps1 -UpdateOnly`
+(or pass `-UpdateOnly` to the one-liner above). It downloads the latest release,
+stops Xray processes using that installation, and leaves MCP configs and workspace
+profiles unchanged. No `-RepoPath` or `-Force` is needed. Restart affected MCP connections afterward.
+
 See the [Installation guide](docs/installation.md) for legacy migration, manual setup, Cline configuration, and the Roo Code note (the `-EnableRoo` switch is currently a no-op).
 
 **A4. Set up or migrate a directory of repositories.** Use the

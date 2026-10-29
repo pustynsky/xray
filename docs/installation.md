@@ -10,6 +10,7 @@ Choose the scope before running setup:
 
 | Scope | Command options | Use it for |
 |---|---|---|
+| Executable only | `setup-xray.ps1 -UpdateOnly` | Download the latest release and stop Xray processes using that installation without prompts; leave all MCP settings unchanged. |
 | One repository | `setup-xray.ps1 -RepoPath <path> -UserMcp` | A first install or update for one checkout. Add `-MigrateLegacy` when moving from old workspace registrations. |
 | Previously configured repositories under one directory | `setup-xray-repos.ps1 -Root <path>` | A shared executable update and migration of existing Xray setups only. |
 | All discovered repositories under one directory | `setup-xray-repos.ps1 -Root <path> -IncludeNewRepos` | The same update/migration, plus new profiles for repositories without Xray. |
@@ -1008,8 +1009,9 @@ If it returns ranked file paths with line numbers and scores in < 1 sec, you're 
 
 ## 5. Updating to a new version
 
-There is no separate `-Update` switch. Repeat setup in the mode you already use,
-or explicitly migrate from workspace mode to personal mode:
+Use `-UpdateOnly` to replace only the executable without prompts. To change
+workspace settings as well, repeat setup in the mode you already use, or
+explicitly migrate from workspace mode to personal mode:
 
 | Situation | Action |
 |---|---|
@@ -1017,7 +1019,7 @@ or explicitly migrate from workspace mode to personal mode:
 | Existing personal installation | Repeat the same command, using the same `-InstallDir` and client selection |
 | First migration from workspace setup | Add `-UserMcp -MigrateLegacy` |
 | Keep legacy workspace mode | Omit `-UserMcp`; setup refuses if a relevant personal Xray registration exists |
-| Replace only the executable | Follow the binary-only steps below; configs and profiles are not migrated |
+| Replace only the executable | Run `setup-xray.ps1 -UpdateOnly`; configs and profiles are not changed |
 
 ### Fresh personal install or ordinary personal update
 
@@ -1056,6 +1058,35 @@ The default installed path is `%LOCALAPPDATA%\xray\xray.exe`. If you used
 `-InstallDir`, update that installation instead. Check the `command` in your active
 MCP registration rather than assuming another copy of Xray on `PATH` is the one
 your client runs.
+
+For an unattended binary-only update, use a local clone:
+
+```powershell
+.\scripts\setup-xray.ps1 -UpdateOnly
+
+# If Xray is installed elsewhere:
+.\scripts\setup-xray.ps1 -UpdateOnly -InstallDir C:\Tools\xray
+```
+
+Or download and run the current installer inline:
+
+```powershell
+& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content)) -UpdateOnly
+```
+
+This mode always downloads the latest release, validates the executable, and
+automatically terminates only Xray processes whose executable path matches the
+installation being replaced. The download is validated before any process is
+stopped. No `-RepoPath`, `-Force`, Git, or MCP configuration access is required.
+It also works for a first binary-only install. `-GithubRepo` selects another
+release repository. Do not combine it with `-SkipDownload`, `-Restore`,
+`-Uninstall`, `-DryRun`, `-PlanOnly`, or `-PreserveSettings`.
+
+Restart affected MCP connections after updating; stopped servers are not
+restarted automatically. Workspace profiles, client registrations, trust, and
+Git settings remain untouched.
+
+For a manual update instead:
 
 1. Stop the affected MCP connections through their clients and exit CLI sessions
    using that executable. It is shared across registered workspaces, and active

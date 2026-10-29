@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Update only the Xray executable without prompts.** `setup-xray.ps1 -UpdateOnly` downloads and validates the latest GitHub release, stops only processes running from the selected installation directory, and replaces `xray.exe`. No repository path or `-Force` is required; MCP registrations, workspace profiles, trust, and Git settings remain unchanged. Restart affected MCP connections afterward.
+
 ## 0.9.5 (2026-10-28)
 
 - **Wait for index builds before filesystem reconciliation.** The event watcher and periodic rescan now wait for both initial builds to finish, including failure or disabled definitions, and for active companion builds on workspace switches. Slow builds warn after five minutes instead of bypassing the startup barrier and reprocessing the whole workspace. The first periodic interval starts after build completion, and workspace changes cancel pending waits. Definition companion builds release ownership even on panic. Query readiness and cache formats are unchanged.
