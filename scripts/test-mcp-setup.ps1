@@ -88,13 +88,23 @@ if ($payload.BackupReplacement) {
         & $copyItem @PSBoundParameters
     }
 }
-if ($payload.Inline) {
-    & ([scriptblock]::Create([IO.File]::ReadAllText($payload.Path))) @parameters
+$global:LASTEXITCODE = 73
+try {
+    if ($payload.Inline) {
+        & ([scriptblock]::Create([IO.File]::ReadAllText($payload.Path))) @parameters
+    }
+    else {
+        & $payload.Path @parameters
+    }
+    $setupExitCode = $LASTEXITCODE
+    Write-Output "XRAY_SETUP_RETURNED:$setupExitCode"
+    exit $setupExitCode
 }
-else {
-    & $payload.Path @parameters
+catch {
+    Write-Output 'XRAY_SETUP_CAUGHT_ERROR'
+    Write-Output ("Setup failed: " + $_.Exception.Message)
+    exit 1
 }
-exit $LASTEXITCODE
 '@.Replace('__PAYLOAD__', $encodedPayload)
     $info = New-Object Diagnostics.ProcessStartInfo
     $info.FileName = $powerShellExe
@@ -162,6 +172,12 @@ function Invoke-FixtureProcess {
 function Assert-Success {
     param($Result)
     Assert-True ($Result.ExitCode -eq 0) "Setup failed: $($Result.Output)"
+}
+
+function Assert-SetupReturned {
+    param($Result)
+    Assert-Success $Result
+    Assert-True ($Result.Output -match '(?m)^XRAY_SETUP_RETURNED:0\r?$') "Setup did not return control with a clean native status: $($Result.Output)"
 }
 
 function Invoke-FixtureLauncher {
@@ -328,6 +344,16 @@ try {
 
     if ($UserMcpOnly -and -not $XrayBinary) { throw '-UserMcpOnly requires -XrayBinary.' }
     if ($XrayBinary) {
+        Test-Case 'caller continuation for inline personal setup plan restore and uninstall' {
+            $f = New-UserMcpFixture
+            Assert-SetupReturned (Invoke-UserMcpSetup $f @{ PlanOnly = $true } -Inline)
+            Assert-SetupReturned (Invoke-UserMcpSetup $f @{ Extensions = 'rs' } -Inline)
+            Assert-SetupReturned (Invoke-UserMcpSetup $f @{ Extensions = 'ts' } -Inline)
+            Assert-SetupReturned (Invoke-UserMcpSetup $f @{ Restore = $true } -Inline)
+            Assert-SetupReturned (Invoke-UserMcpSetup $f @{ Uninstall = $true; DryRun = $true } -Inline)
+            Assert-SetupReturned (Invoke-UserMcpSetup $f @{ Uninstall = $true } -Inline)
+        }
+
         Test-Case 'personal Git environment upgrades both hosts and survives ordinary and preserving updates' {
             foreach ($preserve in @($false, $true)) {
                 $f = New-UserMcpFixture
@@ -1464,6 +1490,32 @@ try {
             Assert-True ([IO.File]::ReadAllText($vscode) -ceq $text) 'Personal preflight leaves workspace config unchanged'
             Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.Home 'mcp-config.json'))) 'Plan does not write personal config'
             Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.Install 'workspaces'))) 'Plan does not write workspace profile'
+        }
+    }
+
+    Test-Case 'caller continuation for workspace setup restore and uninstall' {
+        foreach ($inline in @($false, $true)) {
+            $f = New-Fixture
+            Assert-SetupReturned (Invoke-FixtureSetup $f -Inline:$inline)
+            Assert-SetupReturned (Invoke-FixtureSetup $f @{ Extensions = 'rs' } -Inline:$inline)
+            Assert-SetupReturned (Invoke-FixtureSetup $f @{ Restore = $true } -Inline:$inline)
+            Assert-SetupReturned (Invoke-FixtureSetup $f @{ Uninstall = $true; DryRun = $true } -Inline:$inline)
+            Assert-SetupReturned (Invoke-FixtureSetup $f @{ Uninstall = $true; KeepBinary = $true } -Inline:$inline)
+        }
+    }
+
+    Test-Case 'caller continuation after inline partial setup restore and uninstall failures' {
+        $f = New-Fixture
+        $cliPath = Join-Path $f.Repo '.github\mcp.json'
+        $original = '{"mcpServers":{"corporate":{"command":"corporate"}}}'
+        Write-FixtureFile $cliPath $original
+        [void](Invoke-SetupGit -RepoRoot $f.Repo -Arguments @('add', '.github/mcp.json'))
+        [void](Invoke-SetupGit -RepoRoot $f.Repo -Arguments @('commit', '--quiet', '-m', 'tracked client fixture'))
+        foreach ($parameters in @(@{}, @{ Restore = $true }, @{ Uninstall = $true; KeepBinary = $true })) {
+            $result = Invoke-FixtureSetup $f $parameters -Inline
+            Assert-True ($result.ExitCode -eq 1) 'Incomplete operation must retain failure status'
+            Assert-True ($result.Output -match '(?m)^XRAY_SETUP_CAUGHT_ERROR\r?$') "Caller could not catch the incomplete operation: $($result.Output)"
+            Assert-True ([IO.File]::ReadAllText($cliPath) -ceq $original) 'Tracked config remains unchanged'
         }
     }
 

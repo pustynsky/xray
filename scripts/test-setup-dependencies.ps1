@@ -232,12 +232,16 @@ function Move-Item {
     $moveItem = $ExecutionContext.InvokeCommand.GetCommand('Move-Item', [Management.Automation.CommandTypes]::Cmdlet)
     & $moveItem @PSBoundParameters
 }
+$global:LASTEXITCODE = 73
 try {
     if ($payload.Inline) { & ([scriptblock]::Create([IO.File]::ReadAllText($payload.ScriptPath))) @parameters }
     else { & $payload.ScriptPath @parameters }
-    exit $LASTEXITCODE
+    $setupExitCode = $LASTEXITCODE
+    Write-Output "XRAY_SETUP_RETURNED:$setupExitCode"
+    exit $setupExitCode
 }
 catch {
+    Write-Output 'XRAY_SETUP_CAUGHT_ERROR'
     Write-Output ("Setup failed: " + $_.Exception.Message)
     exit 1
 }
@@ -276,6 +280,8 @@ try {
     $parseErrors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors)
     if (@($parseErrors).Count -gt 0) { throw "Parse errors in setup-xray.ps1: $($parseErrors -join '; ')" }
+    $exitStatements = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.ExitStatementAst] }, $true))
+    Assert-Equal $exitStatements.Count 0 'T0b installer never terminates the calling PowerShell host'
     foreach ($functionName in @('Test-WindowsExecutable', 'Save-XrayReleaseAsset')) {
         $functionAst = $ast.Find({
                 param($node)
@@ -423,6 +429,7 @@ exit /b 0
     $updateParameters = @{ UpdateOnly = $true; InstallDir = $updateInstall }
     $update = Invoke-DownloadSetupProcess -Parameters $updateParameters -Running -UnlockedRunning
     Assert-Equal $update.ExitCode 0 "T9 update-only succeeds without RepoPath, Force, prompts, or git: $($update.Output)"
+    Assert-True ($update.Output -match '(?m)^XRAY_SETUP_RETURNED:0\r?$') 'T9 file-backed update returns control and clears stale native status' -Details $update.Output
     Assert-True (Test-WindowsExecutable $updateBinary) 'T9 update-only replaces the existing binary'
     Assert-Equal ([IO.File]::ReadAllText((Join-Path $update.Directory 'download-uri'))) 'https://github.com/pustynsky/xray/releases/latest/download/xray.exe' 'T9 update-only downloads the latest public release'
     Assert-Equal (([IO.File]::ReadAllLines((Join-Path $update.Directory 'stopped'))) -join ',') '11001,11002' 'T9 update-only stops only matching installation processes even without a file lock'
@@ -433,6 +440,7 @@ exit /b 0
     $inline = Invoke-DownloadSetupProcess -Parameters @{ UpdateOnly = $true; GithubRepo = 'owner/repo'; RepoPath = (Join-Path $root 'does-not-exist') } -Inline
     $inlineBinary = Join-Path $inline.Directory 'local\xray\xray.exe'
     Assert-Equal $inline.ExitCode 0 "T10 inline update-only ignores RepoPath and installs to the default location: $($inline.Output)"
+    Assert-True ($inline.Output -match '(?m)^XRAY_SETUP_RETURNED:0\r?$') 'T10 inline update returns control and clears stale native status' -Details $inline.Output
     Assert-True (Test-WindowsExecutable $inlineBinary) 'T10 update-only supports a first binary-only install'
     Assert-Equal ([IO.File]::ReadAllText((Join-Path $inline.Directory 'download-uri'))) 'https://github.com/owner/repo/releases/latest/download/xray.exe' 'T10 update-only honors GithubRepo'
 
@@ -442,27 +450,32 @@ exit /b 0
     Assert-Equal ([IO.File]::ReadAllText($profilePath)) 'existing workspace profile' 'T10b repeated update preserves existing profiles'
     Assert-True (Test-Path -LiteralPath (Join-Path $repeat.Directory 'download-uri')) 'T10b update-only always downloads even when already installed'
 
-    foreach ($mode in @('invalid', 'throw')) {
-        [IO.File]::WriteAllText($updateBinary, 'old binary')
-        $failedDownload = Invoke-DownloadSetupProcess -Parameters $updateParameters -Running -DownloadMode $mode
-        Assert-True ($failedDownload.ExitCode -ne 0) "T11 update-only rejects $mode downloads"
-        Assert-True ($failedDownload.Output -match 'not a valid Windows executable|simulated download failure') "T11 $mode download failure is reported" -Details $failedDownload.Output
-        Assert-Equal ([IO.File]::ReadAllText($updateBinary)) 'old binary' "T11 $mode download preserves the old binary"
-        Assert-True (-not (Test-Path -LiteralPath (Join-Path $failedDownload.Directory 'stopped'))) "T11 $mode download leaves running processes alone"
-        Assert-Equal (@(Get-ChildItem -LiteralPath (Join-Path $failedDownload.Directory 'temp')).Count) 0 "T11 $mode download cleans up staging"
+    foreach ($inlineMode in @($false, $true)) {
+        foreach ($mode in @('invalid', 'throw')) {
+            [IO.File]::WriteAllText($updateBinary, 'old binary')
+            $failedDownload = Invoke-DownloadSetupProcess -Parameters $updateParameters -Running -DownloadMode $mode -Inline:$inlineMode
+            Assert-True ($failedDownload.ExitCode -ne 0) "T11 update-only rejects $mode downloads (inline=$inlineMode)"
+            Assert-True ($failedDownload.Output -match 'not a valid Windows executable|simulated download failure') "T11 $mode download failure is reported" -Details $failedDownload.Output
+            Assert-True ($failedDownload.Output -match '(?m)^XRAY_SETUP_CAUGHT_ERROR\r?$') "T11 $mode failure can be caught without terminating the caller" -Details $failedDownload.Output
+            Assert-Equal ([IO.File]::ReadAllText($updateBinary)) 'old binary' "T11 $mode download preserves the old binary"
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $failedDownload.Directory 'stopped'))) "T11 $mode download leaves running processes alone"
+            Assert-Equal (@(Get-ChildItem -LiteralPath (Join-Path $failedDownload.Directory 'temp')).Count) 0 "T11 $mode download cleans up staging"
+        }
     }
 
-    $denied = Invoke-DownloadSetupProcess -Parameters $updateParameters -Running -DenyStop
+    $denied = Invoke-DownloadSetupProcess -Parameters $updateParameters -Running -DenyStop -Inline
     Assert-True ($denied.ExitCode -ne 0) 'T12 update-only fails if a process cannot be stopped'
     Assert-True ($denied.Output -match 'Failed to stop PID 11001') 'T12 update-only reports process termination failure' -Details $denied.Output
+    Assert-True ($denied.Output -match '(?m)^XRAY_SETUP_CAUGHT_ERROR\r?$') 'T12 inline termination failure can be caught by the caller' -Details $denied.Output
     Assert-Equal ([IO.File]::ReadAllText($updateBinary)) 'old binary' 'T12 termination failure preserves the old binary'
     Assert-Equal (@(Get-ChildItem -LiteralPath (Join-Path $denied.Directory 'temp')).Count) 0 'T12 termination failure cleans up staging'
 
     foreach ($conflict in @('SkipDownload', 'Restore', 'Uninstall', 'DryRun', 'PlanOnly', 'PreserveSettings')) {
         $options = @{ UpdateOnly = $true; InstallDir = $updateInstall }
         $options[$conflict] = $true
-        $rejected = Invoke-DownloadSetupProcess -Parameters $options
+        $rejected = Invoke-DownloadSetupProcess -Parameters $options -Inline
         Assert-True ($rejected.ExitCode -ne 0 -and $rejected.Output -match 'UpdateOnly cannot be combined') "T13 update-only rejects $conflict before setup" -Details $rejected.Output
+        Assert-True ($rejected.Output -match '(?m)^XRAY_SETUP_CAUGHT_ERROR\r?$') "T13 inline $conflict conflict can be caught by the caller" -Details $rejected.Output
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $rejected.Directory 'download-uri'))) "T13 $conflict conflict does not download"
     }
 
@@ -474,6 +487,12 @@ exit /b 0
     Assert-Equal $ordinary.ExitCode 0 "T14 ordinary forced setup still downloads, stops processes, and configures MCP: $($ordinary.Output)"
     Assert-True (Test-WindowsExecutable $updateBinary) 'T14 ordinary setup uses the shared release installer'
     Assert-True (([IO.File]::ReadAllText($updateConfig)) -match '"xray"') 'T14 ordinary setup still configures MCP'
+
+    $incompleteRepo = New-GitFixture -Root $root -Name 'incomplete-file-mode' -Config 'VsCode'
+    $incomplete = Invoke-SetupProcess -ScriptPath $scriptPath -RepoPath $incompleteRepo -InstallDir $updateInstall `
+        -Arguments @('-SkipDownload', '-Extensions', 'ts', '-Force')
+    Assert-Equal $incomplete.ExitCode 1 'T15 incomplete setup preserves the nonzero -File process status'
+    Assert-True (($incomplete.Output -join "`n") -match 'Xray MCP setup incomplete') 'T15 incomplete setup reports a terminating error'
 }
 finally {
     $env:GIT_CONFIG_GLOBAL = $oldGlobalConfig
@@ -484,7 +503,7 @@ finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-$expectedAssertions = 60
+$expectedAssertions = 86
 if (($Script:Passed + $Script:Failed) -ne $expectedAssertions) {
     $Script:Failed++
     Write-Host "FAIL  expected $expectedAssertions assertions, ran $($Script:Passed + $Script:Failed - 1)" -ForegroundColor Red
