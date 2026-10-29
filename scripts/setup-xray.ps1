@@ -1747,7 +1747,8 @@ if ($UpdateOnly) {
     Write-Host "`n=== Updating xray executable only ===" -ForegroundColor Cyan
     Install-XrayRelease -GithubRepo $GithubRepo -Destination (Join-Path $InstallDir 'xray.exe') -KillRunning
     if ($null -ne $BinaryPrepared) { $BinaryPrepared.Value = $true }
-    exit 0
+    $global:LASTEXITCODE = 0
+    return
 }
 
 if (-not $RepoPath) {
@@ -1761,7 +1762,6 @@ try {
 }
 catch {
     Write-Error "Cannot resolve repository or installation path: $($_.Exception.Message)"
-    exit 1
 }
 
 $gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue
@@ -1770,16 +1770,15 @@ $gitWorkTreeRoot = if ($gitCommand) { Get-GitWorkTreeRoot -RepoRoot $RepoPath } 
 $isGitRepo = $null -ne $gitWorkTreeRoot
 if ($gitMetadataRoot -and -not $isGitRepo) {
     Write-Error "Git metadata exists at $gitMetadataRoot, but Git could not inspect it. Check Git availability and safe.directory. No files were changed."
-    exit 1
 }
 if ($isGitRepo) { $RepoPath = $gitWorkTreeRoot }
 if ($GitVisibility) { Write-Warning '-GitVisibility is deprecated. All generated configs are now local; neither Visible nor Hidden installs a Git filter.' }
 if ($EnableRoo) { Write-Warning '-EnableRoo is disabled. Use -EnableVSCode or -EnableCopilotCli instead.' }
-if ($Restore -and $Uninstall) { Write-Error '-Restore and -Uninstall cannot be used together.'; exit 1 }
+if ($Restore -and $Uninstall) { Write-Error '-Restore and -Uninstall cannot be used together.' }
 if (($PlanOnly -or $PreserveSettings) -and (-not $UserMcp -or $Restore -or $Uninstall -or $DryRun)) {
-    Write-Error '-PlanOnly and -PreserveSettings require ordinary -UserMcp setup.'; exit 1
+    Write-Error '-PlanOnly and -PreserveSettings require ordinary -UserMcp setup.'
 }
-if ($DryRun -and -not $Uninstall) { Write-Error '-DryRun is supported only with -Uninstall.'; exit 1 }
+if ($DryRun -and -not $Uninstall) { Write-Error '-DryRun is supported only with -Uninstall.' }
 $nonInteractiveHost = @([Environment]::GetCommandLineArgs() | Where-Object { $_ -match '^-NonI' }).Count -gt 0
 $interactive = -not $Force -and -not $PlanOnly -and -not $nonInteractiveHost -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
 $selectAll = -not ($EnableVSCode -or $EnableCopilotCli)
@@ -1787,7 +1786,7 @@ $targets = @(
     [PSCustomObject]@{ Relative = '.github/mcp.json'; Container = 'mcpServers'; Client = 'Copilot CLI'; Selected = $selectAll -or $EnableCopilotCli; Path = (Join-Path $RepoPath '.github\mcp.json'); Status = 'Not selected'; Document = $null },
     [PSCustomObject]@{ Relative = '.vscode/mcp.json'; Container = 'servers'; Client = 'VS Code'; Selected = $selectAll -or $EnableVSCode; Path = (Join-Path $RepoPath '.vscode\mcp.json'); Status = 'Not selected'; Document = $null }
 )
-if ($VSCodeMcpPath -and -not $UserMcp) { Write-Error '-VSCodeMcpPath requires -UserMcp.'; exit 1 }
+if ($VSCodeMcpPath -and -not $UserMcp) { Write-Error '-VSCodeMcpPath requires -UserMcp.' }
 if (-not $UserMcp -and -not $Uninstall) {
     foreach ($target in @(Get-UserMcpTargets -RepoRoot $RepoPath -IncludeVSCode ($selectAll -or $EnableVSCode) | Where-Object Selected)) {
         $document = Read-SetupJson -Path $target.Path
@@ -1809,7 +1808,7 @@ if ($UserMcp) {
     $repoPrefix = $RepoPath.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
     foreach ($path in @($profilePath) + @($targets | Where-Object { $_.Selected } | ForEach-Object { $_.Path })) {
         if ([IO.Path]::GetFullPath($path).StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-            Write-Error "-UserMcp files must be outside the repository: $path"; exit 1
+            Write-Error "-UserMcp files must be outside the repository: $path"
         }
     }
     $profileAction = if ($Restore) { 'Restore' } elseif ($Uninstall) { 'Uninstall' } else { 'Setup' }
@@ -1817,16 +1816,18 @@ if ($UserMcp) {
     $profile = Resolve-WorkspaceProfile $profilesPath $RepoPath -Action $profileAction -ReportedWarnings $profileWarnings
     $profilePath = $profile.Path
     if ($Restore) {
-        if (-not (Test-Path -LiteralPath "$profilePath.bak")) { Write-Error "No workspace profile backup found: $profilePath.bak"; exit 1 }
+        if (-not (Test-Path -LiteralPath "$profilePath.bak")) { Write-Error "No workspace profile backup found: $profilePath.bak" }
         $profile = Resolve-WorkspaceProfile $profilesPath $RepoPath -Migrate -Action Restore -ReportedWarnings $profileWarnings
         $profilePath = $profile.Path
-        if (-not (Restore-McpJson -Path $profilePath)) { Write-Error "No workspace profile backup found: $profilePath.bak"; exit 1 }
-        exit 0
+        if (-not (Restore-McpJson -Path $profilePath)) { Write-Error "No workspace profile backup found: $profilePath.bak" }
+        $global:LASTEXITCODE = 0
+        return
     }
     if ($Uninstall) {
         Remove-UserMcpWorkspace -ProfilePath $profilePath -Profiles $profilesPath -Binary (Join-Path $InstallDir 'xray.exe') -Targets @($targets | Where-Object { $_.Selected }) -DryRun:$DryRun -KeepBinary:$KeepBinary -KeepBackups:$KeepBackups
         Write-Host $(if ($DryRun) { 'Dry-run complete. No files were changed.' } else { 'User MCP uninstall complete.' })
-        exit 0
+        $global:LASTEXITCODE = 0
+        return
     }
     $userMigrations = @(Get-UserMcpMigrationConfigs -RepoRoot $RepoPath -Binary (Join-Path $InstallDir 'xray.exe') -IsGitRepo $isGitRepo -Consent $MigrateLegacy)
     $preservedSettings = if ($PreserveSettings) { Get-PreservedWorkspaceSettings -Profile $profile -Migrations $userMigrations -RepoRoot $RepoPath } else { $null }
@@ -1870,9 +1871,10 @@ if ($Restore) {
             }
         }
     }
-    if (-not $restored) { Write-Error 'No eligible .bak files found. Nothing was restored.'; exit 1 }
-    if ($restoreFailed) { Write-Warning 'Restore incomplete. Eligible client configs were restored; see launcher cleanup warnings above.'; exit 1 }
-    exit 0
+    if (-not $restored) { Write-Error 'No eligible .bak files found. Nothing was restored.' }
+    if ($restoreFailed) { throw 'Restore incomplete. Eligible client configs were restored; see launcher cleanup warnings above.' }
+    $global:LASTEXITCODE = 0
+    return
 }
 
 $legacyStates = if ($UserMcp) { @() } else { @(Get-LegacyMcpState -RepoRoot $RepoPath -IsGitRepo $isGitRepo | Where-Object {
@@ -1939,8 +1941,9 @@ if ($Uninstall) {
         }
     }
     Write-Host $(if ($DryRun) { 'Dry-run complete. No files were changed.' } elseif ($failed) { 'Uninstall incomplete. See warnings above.' } else { 'Uninstall complete.' })
-    if ($failed) { exit 1 }
-    exit 0
+    if ($failed) { throw 'Uninstall incomplete. See warnings above.' }
+    $global:LASTEXITCODE = 0
+    return
 }
 
 foreach ($target in ($targets | Where-Object { $_.Selected })) {
@@ -1976,11 +1979,10 @@ foreach ($target in ($targets | Where-Object { $_.Selected })) {
     catch { Write-Warning $_.Exception.Message; $target.Status = 'Skipped (error)' }
 }
 if ($UserMcp -and @($targets | Where-Object { $_.Selected -and $_.Status -ne 'Ready' }).Count -gt 0) {
-    Write-Error 'Personal MCP preflight failed. No workspace profile or personal MCP config was written.'; exit 1
+    Write-Error 'Personal MCP preflight failed. No workspace profile or personal MCP config was written.'
 }
 if (@($targets | Where-Object { $_.Status -eq 'Ready' }).Count -eq 0) {
     Write-Error 'No eligible MCP configuration could be prepared. No MCP config was written.'
-    exit 1
 }
 Resolve-XrayMcpEnvironment -Targets @($targets | Where-Object { $_.Status -eq 'Ready' })
 if ($isGitRepo -and -not $UserMcp) {
@@ -1998,7 +2000,8 @@ if ($PlanOnly) {
         Extensions = $Extensions
         Arguments = if ($preservedSettings) { $preservedSettings.Arguments } else { @() }
     }
-    exit 0
+    $global:LASTEXITCODE = 0
+    return
 }
 if (-not $isGitRepo) { Write-Warning 'This folder is not a Git worktree. MCP files will be written without Git exclude protection.' }
 Write-Host "`n=== Setting up xray MCP for: $RepoPath ===" -ForegroundColor Cyan
@@ -2021,7 +2024,6 @@ if (-not $SkipDownload) {
 else {
     if (-not (Test-Path $xrayPath)) {
         Write-Error "xray.exe not found at $xrayPath. Run without -SkipDownload."
-        exit 1
     }
     Write-Host "Using existing xray at $xrayPath" -ForegroundColor Yellow
 }
@@ -2031,7 +2033,6 @@ if ($Extensions) {
     $selectedExts = Normalize-ExtensionList -Value $Extensions
     if (-not $selectedExts) {
         Write-Error '-Extensions was provided but no valid extensions were found'
-        exit 1
     }
     Write-Host "`nUsing extensions from -Extensions: $selectedExts" -ForegroundColor Green
 }
@@ -2042,7 +2043,6 @@ else {
     if ($extCounts.Count -eq 0) {
         $guidance = if ($PreserveSettings) { ' Supply -Extensions for this new repository.' } else { '' }
         Write-Error "No recognized code/text files found in $RepoPath.$guidance"
-        exit 1
     }
 
     $ranked = $extCounts.GetEnumerator() |
@@ -2091,7 +2091,6 @@ else {
             Write-Error 'No extensions meet the installer threshold. Supply -Extensions for new repositories; existing settings are unchanged.'
         }
         else { Write-Error 'No extensions were selected' }
-        exit 1
     }
 
     Write-Host "Using extensions: $selectedExts" -ForegroundColor Green
@@ -2110,7 +2109,7 @@ $xrayArgs = @(
 )
 if ($UserMcp) {
     $capability = @(& $xrayPath serve-workspace --help 2>&1)
-    if ($LASTEXITCODE -ne 0) { Write-Error "The installed Xray does not support serve-workspace. Upgrade the executable before using -UserMcp. $($capability -join ' ')"; exit 1 }
+    if ($LASTEXITCODE -ne 0) { Write-Error "The installed Xray does not support serve-workspace. Upgrade the executable before using -UserMcp. $($capability -join ' ')" }
     $profile = Resolve-WorkspaceProfile $profilesPath $RepoPath -Migrate -ReportedWarnings $profileWarnings
     $profilePath = $profile.Path
     if ($PreserveSettings) {
@@ -2171,8 +2170,9 @@ if ($UserMcp) {
     foreach ($target in $targets) { Write-Host "$($target.Client): $($target.Path) ($($target.Status))" }
     Write-Host 'Restart MCP connections in VS Code and CLI. No CLI wrapper is required.'
     Write-Host 'Verify actual xray_info and xray_definitions calls in each client.'
-    if ($incomplete) { exit 1 }
-    exit 0
+    if ($incomplete) { throw 'User MCP setup incomplete. See warnings above.' }
+    $global:LASTEXITCODE = 0
+    return
 }
 
 $legacyRemaining = $false
@@ -2230,5 +2230,6 @@ if ($targets[0].Status -in @('Configured', 'Up to date')) {
     }
     else { Write-Host "`nVerify from this repository: copilot mcp list; copilot mcp get xray" }
 }
-if ($incomplete) { exit 1 }
-exit 0
+if ($incomplete) { throw 'Xray MCP setup incomplete. See warnings above.' }
+$global:LASTEXITCODE = 0
+return

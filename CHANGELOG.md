@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Keep PowerShell open after inline setup.** The installer returns to its caller instead of exiting PowerShell.
+
 - **Update only the Xray executable without prompts.** `setup-xray.ps1 -UpdateOnly` downloads and validates the latest GitHub release, stops only processes running from the selected installation directory, and replaces `xray.exe`. No repository path or `-Force` is required; MCP registrations, workspace profiles, trust, and Git settings remain unchanged. Restart affected MCP connections afterward.
 
 ## 0.9.5 (2026-10-28)
