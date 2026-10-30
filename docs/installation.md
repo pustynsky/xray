@@ -738,7 +738,7 @@ CI runs these suites on Windows PowerShell 5.1 and PowerShell 7.
 
 If you prefer to set things up by hand, or need to configure Cline, follow the steps below.
 
-> **Platform note:** Pre-built releases are currently published for **Windows x64** only. For Linux / macOS, build from source — `cargo build --release` (see README).
+> **Platform note:** Pre-built releases are currently published for **Windows x64** only. For Linux / macOS, build from source — `cargo build --release` (see [Development guide](development.md#build-from-source)).
 
 > **Tip — let the agent set it up for you:** once you have `xray.exe` on disk, you can also just open a chat in **GitHub Copilot Chat (agent mode)**, **Roo Code**, or **Cline** and ask:
 > _"Install the xray MCP server for this workspace. Binary is at `C:\path\to\xray.exe`. I want extensions <list> indexed, with `--definitions` and `--watch` enabled."_

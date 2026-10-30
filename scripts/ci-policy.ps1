@@ -45,6 +45,7 @@ function Get-CiMode {
         'docs/benchmarks.md'
         'docs/cli-reference.md'
         'docs/concurrency.md'
+        'docs/development.md'
         'docs/di-support.md'
         'docs/e2e-test-plan.md'
         'docs/e2e/README.md'

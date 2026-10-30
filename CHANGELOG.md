@@ -4,6 +4,8 @@
 
 - **Keep PowerShell open after inline setup.** The installer returns to its caller instead of exiting PowerShell.
 
+- **Compact README.** The README now keeps the overview, benchmarks, scenarios, quick start, feature summary, and documentation map. Detailed installation variants live only in the [Installation guide](docs/installation.md); build-from-source, Cargo feature flags, testing, and dependencies moved to the new [Development guide](docs/development.md); response delivery, workspace-switch build status, exact `paramCount`, and `xray_edit` path scope moved to the [MCP server guide](docs/mcp-guide.md).
+
 - **Update only the Xray executable without prompts.** `setup-xray.ps1 -UpdateOnly` downloads and validates the latest GitHub release, stops only processes running from the selected installation directory, and replaces `xray.exe`. No repository path or `-Force` is required; MCP registrations, workspace profiles, trust, and Git settings remain unchanged. Restart affected MCP connections afterward.
 
 ## 0.9.5 (2026-10-28)
