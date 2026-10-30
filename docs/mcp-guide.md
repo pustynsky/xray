@@ -270,6 +270,24 @@ Example:
 
 ---
 
+## Response delivery
+
+Set `XRAY_TRANSPORT_MAX_BYTES` in the MCP server environment when a client needs a hard response-text limit. For example, `16384` caps the combined UTF-8 text blocks, including guidance and metrics, at 16 KiB. The value must be an integer of at least 512. It is read when finalizing each response; unset leaves the existing per-tool budgets in place. This is a text-content limit, not a limit on the surrounding JSON-RPC envelope. If useful content cannot fit, Xray returns a compact error instead of claiming a complete result.
+
+With `includeBody=true`, `containsLine` centers the available body window on the requested line. Explicit `bodyLineStart`/`bodyLineEnd` ranges take precedence. `bodyStartLine` and `bodyEndLine` describe the actual delivered fragment; `bodyAnchorVisible` reports whether it contains the anchor. `bodyComplete` covers the whole definition (and requested doc comments), while `bodyRangeComplete` covers only the requested range.
+
+Partial bodies provide `bodyContinuation.beforeArgs` and/or `nextArgs` for `xray_definitions`. Pass these argument objects unchanged. They target one exact source file and definition range through `bodyTarget`, with a SHA-256 hash of the decoded file snapshot used for the read. A changed source or missing/ambiguous definition requires a fresh lookup. Cross-tool filters that cannot be represented by `xray_definitions` produce `bodyContinuationUnavailable` instead of a broader query.
+
+Paginated lists provide `resultStatus.page.nextArgs`, including the original query and the final continuation token after byte fitting. Use it with the same tool and stop when it is absent. Unknown argument names must be corrected before Xray can generate ready-to-run continuation arguments.
+
+Definition discovery can return up to three `recommendedNextQueries` with `operation: "readSelectedDefinition"`. Each reads one selected file/name/kind/parent using `exactNameOnly=true`, `autoCorrect=false`, and a snapshot-bound `bodyTarget`. Applicable filters, ranges, enrichment, and body budgets are retained; the original discovery query is unchanged. Ambiguous identities or unavailable snapshots do not produce an exact read. Body continuation takes priority over optional hints.
+
+Cross-tool navigation uses `summary.nextStepQuery` when the selected target and original restrictions can be represented. Otherwise, the hint explains why no equivalent query was generated. Search alternatives, including punctuation cleanup, token intersection, and literal source-line matching, carry `semanticsChanged: true` outside `args`; they are not equivalent rewrites. Execute only the nested `args` object with its named tool. All hints count toward the final transport limit and may be omitted to preserve result delivery.
+
+### Index build status during a workspace switch
+
+During a dynamic workspace switch, an already-running content build follows the latest binding; `contentIndexAction: "build_in_progress"` does not require another request to schedule it. Poll `xray_info` until the content entry has no `status` field (an empty index is also ready). If a build fails for the current workspace, content tools return the JSON error `INDEX_BUILD_FAILED`, and `xray_info` reports content `status: "failed"` with a retry hint. Fix the underlying cause and call `xray_reindex`; polling alone does not retry a failed build. A roots change awaiting explicit reindexing is not a build failure.
+
 ## Common arg name mistakes (alias hints)
 
 All xray MCP tools validate incoming args against their JSON schema. Unknown
@@ -840,6 +858,7 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 | `minParams`         | integer | —       | Filter: min parameter count. Auto-enables `includeCodeStats`                             |
 | `minReturns`        | integer | —       | Filter: min return/throw count. Auto-enables `includeCodeStats`                          |
 | `minCalls`          | integer | —       | Filter: min call count (fan-out). Auto-enables `includeCodeStats`                         |
+| `paramCount`        | integer | —       | Filter: exact declared parameter count (`0..=254`) for C#/TypeScript/TSX/Rust callables. Auto-enables `includeCodeStats` |
 | `exactNameOnly`     | boolean | false   | Match `name` exactly instead of by substring. Also disables name auto-correction and XML text-content matching for the request |
 | `autoCorrect`       | boolean | true    | Allow best-effort kind/name correction when the first pass returns 0 definitions. Set `false` to keep a not-found result exact. Ignored when `exactNameOnly=true` |
 | `includeUsageCount` | boolean | false   | Add `usageCount` per definition — how many files contain that name in the content index (not a call count; includes comments and strings). Useful for dead-code scans |
@@ -994,6 +1013,14 @@ Get complexity metrics for methods, functions, and constructors. Metrics are alw
 // Find methods with high complexity AND many params AND high fan-out
 { "minComplexity": 20, "minParams": 5, "minCalls": 15, "sortBy": "cyclomaticComplexity" }
 ```
+
+**Exact parameter count:**
+
+```json
+{ "name": ["Route"], "parent": ["Router"], "exactNameOnly": true, "paramCount": 2 }
+```
+
+`paramCount` matches the indexed parameter count for callables with code stats. It counts declarations, not required call arguments; Rust `self` is excluded. It accepts integers `0..=254` (255 is rejected because C#/TypeScript counts can saturate there), combines with `minParams` using AND, and enables `includeCodeStats`. SQL is excluded ([tracked separately](https://github.com/pustynsky/xray/issues/458)); XML on-demand, `containsLine`, and `audit` combinations return an error.
 
 **Note:** Classes, fields, and enum members do not have `codeStats`. Old indexes (before this feature) return results normally with `summary.codeStatsAvailable: false` — run `xray_reindex_definitions` to compute metrics.
 
@@ -1449,6 +1476,8 @@ Invalid extensions return an MCP tool error (`isError: true`, text content), bef
 ## `xray_edit` — File Editing
 
 Edit files by line-range operations or text-match replacements. Works on any text file (not limited to `--dir`). Supports multi-file editing, insert after/before, safety checks, and returns unified diff.
+
+`xray_edit` is workspace-scope-agnostic by design: it accepts relative paths (resolved against `--dir`) and absolute paths anywhere on disk, so one server instance can edit files across multiple workspaces, scratch directories, or tooling configs without a relaunch. Read-only tools (`xray_grep`, `xray_definitions`, `xray_callers`, `xray_fast`) stay workspace-bound so in-memory indexes stay scoped and workspace topology does not leak to disk.
 
 On Windows, edits to an existing file preserve named NTFS data streams, including `Zone.Identifier`. Paths that directly address a named stream remain unsupported.
 
