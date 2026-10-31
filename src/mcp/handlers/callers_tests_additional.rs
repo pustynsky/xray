@@ -3,6 +3,30 @@ use super::*;
 use crate::definitions::{DefinitionEntry, DefinitionIndex, DefinitionKind};
 use std::collections::HashMap;
 
+fn with_mock_rust_call_sites(mut definitions: DefinitionIndex, content: &crate::ContentIndex) -> DefinitionIndex {
+    // These graph-ordering fixtures encode their call edges as postings,
+    // without parsing source files. Rust traversal now also requires AST sites.
+    for (target, postings) in &content.index {
+        let declarations = collect_definition_locations(&definitions, target);
+        for posting in postings {
+            let file = &content.files[posting.file_id as usize];
+            let file_id = definitions.path_to_id[&crate::path_identity_key(std::path::Path::new(file))];
+            for &line in &posting.lines {
+                if declarations.contains(&(file_id, line)) {
+                    continue;
+                }
+                if let Some((_, _, _, owner)) = find_containing_method(&definitions, file_id, line) {
+                    definitions.method_calls.entry(owner).or_default().push(crate::definitions::CallSite {
+                        method_name: target.clone(), receiver_type: None, line,
+                        call_kind: Default::default(), receiver_is_generic: false,
+                    });
+                }
+            }
+        }
+    }
+    definitions
+}
+
 fn make_def_index_simple(definitions: Vec<DefinitionEntry>) -> DefinitionIndex {
     let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
     let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
@@ -685,6 +709,7 @@ fn make_ctx_test_deprioritization() -> super::super::HandlerContext {
         ..Default::default()
     };
 
+    let def_index = with_mock_rust_call_sites(def_index, &content_index);
     super::super::HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
@@ -888,6 +913,7 @@ fn test_callers_only_tests_no_production() {
         ..Default::default()
     };
 
+    let def_index = with_mock_rust_call_sites(def_index, &content_index);
     let ctx = super::super::HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
@@ -1121,6 +1147,7 @@ mod builder_state_tests {
             ..Default::default()
         };
 
+        let def_index = with_mock_rust_call_sites(def_index, &content_index);
         let ctx = HandlerContext {
             index: Arc::new(RwLock::new(content_index)),
             def_index: Some(Arc::new(RwLock::new(def_index))),
@@ -1279,6 +1306,7 @@ mod builder_state_tests {
             ..Default::default()
         };
 
+        let def_index = with_mock_rust_call_sites(def_index, &content_index);
         let ctx = HandlerContext {
             index: Arc::new(RwLock::new(content_index)),
             def_index: Some(Arc::new(RwLock::new(def_index))),
@@ -1468,6 +1496,7 @@ mod builder_state_tests {
             ..Default::default()
         };
 
+        let def_index = with_mock_rust_call_sites(def_index, &content_index);
         let ctx = HandlerContext {
             index: Arc::new(RwLock::new(content_index)),
             def_index: Some(Arc::new(RwLock::new(def_index))),
@@ -1698,6 +1727,7 @@ mod builder_state_tests {
             ..Default::default()
         };
 
+        let def_index = with_mock_rust_call_sites(def_index, &content_index);
         let ctx = HandlerContext {
             index: Arc::new(RwLock::new(content_index)),
             def_index: Some(Arc::new(RwLock::new(def_index))),

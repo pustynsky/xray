@@ -341,7 +341,7 @@ fn test_find_def_index_meta_rejects_extension_mismatch() {
 
 #[test]
 fn test_definition_index_version_is_pinned() {
-    assert_eq!(crate::definitions::DEFINITION_INDEX_VERSION, 11);
+    assert_eq!(crate::definitions::DEFINITION_INDEX_VERSION, 12);
 }
 
 #[test]

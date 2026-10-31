@@ -168,6 +168,20 @@ fn build_callers_result_status(
     result_status
 }
 
+fn unresolved_call_scope(
+    direction: &str,
+    unresolved_reasons: &std::collections::BTreeMap<String, usize>,
+) -> &'static str {
+    if direction == "up" && (unresolved_reasons.contains_key("unexpanded_rust_macro")
+        || unresolved_reasons.contains_key("rust_call_analysis_limit")
+        || unresolved_reasons.contains_key("unindexed_rust_nested_callable"))
+    {
+        "eligibleRustCallersAndTraversedGraph"
+    } else {
+        "traversedGraph"
+    }
+}
+
 fn attach_unresolved_call_status(
     output: &mut Value,
     result_status: &mut Value,
@@ -179,7 +193,16 @@ fn attach_unresolved_call_status(
     let total: usize = unresolved_reasons.values().sum();
     output["summary"]["unresolvedCallSites"] = json!(total);
     output["summary"]["unresolvedCallReasons"] = json!(unresolved_reasons);
-    output["summary"]["unresolvedCallSitesScope"] = json!("traversedGraph");
+    let scope = if unresolved_reasons.contains_key("unexpanded_rust_macro")
+        || unresolved_reasons.contains_key("rust_call_analysis_limit")
+        || unresolved_reasons.contains_key("unindexed_rust_nested_callable")
+    {
+        let direction = output["query"]["direction"].as_str().expect("Rust call graph output has a direction");
+        unresolved_call_scope(direction, unresolved_reasons)
+    } else {
+        "traversedGraph"
+    };
+    output["summary"]["unresolvedCallSitesScope"] = json!(scope);
 
     result_status["status"] = json!("partial");
     result_status["complete"] = json!(false);
@@ -2314,7 +2337,7 @@ fn handle_multi_method_callers(
                 let unresolved_total: usize = builder.unresolved_call_reasons.values().sum();
                 method_result["unresolvedCallSites"] = json!(unresolved_total);
                 method_result["unresolvedCallReasons"] = json!(&builder.unresolved_call_reasons);
-                method_result["unresolvedCallSitesScope"] = json!("traversedGraph");
+                method_result["unresolvedCallSitesScope"] = json!(unresolved_call_scope(&direction, &builder.unresolved_call_reasons));
                 for (reason, count) in &builder.unresolved_call_reasons {
                     *unresolved_call_reasons_all.entry(reason.clone()).or_insert(0) += count;
                 }
@@ -2432,7 +2455,7 @@ fn handle_multi_method_callers(
                 let unresolved_total: usize = builder.unresolved_call_reasons.values().sum();
                 method_result["unresolvedCallSites"] = json!(unresolved_total);
                 method_result["unresolvedCallReasons"] = json!(&builder.unresolved_call_reasons);
-                method_result["unresolvedCallSitesScope"] = json!("traversedGraph");
+                method_result["unresolvedCallSitesScope"] = json!(unresolved_call_scope(&direction, &builder.unresolved_call_reasons));
                 for (reason, count) in &builder.unresolved_call_reasons {
                     *unresolved_call_reasons_all.entry(reason.clone()).or_insert(0) += count;
                 }
@@ -4198,6 +4221,30 @@ impl CallerTreeBuilder<'_> {
         }
     }
 
+    fn record_rust_analysis_gaps(&mut self) {
+        // A skipped macro can generate a call without spelling the target name,
+        // so upward completeness must include eligible callers without postings.
+        for (&owner, calls) in &self.ctx.def_idx.method_calls {
+            let Some(definition) = self.ctx.def_idx.definitions.get(owner as usize) else { continue };
+            let Some(file) = self.ctx.def_idx.files.get(definition.file_id as usize) else { continue };
+            if !Path::new(file).extension().and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+                || !self.ctx.passes_file_filters(file)
+                || (self.ctx.production_only && is_test_caller(self.ctx.def_idx, owner, file))
+            {
+                continue;
+            }
+            for call in calls {
+                if matches!(call.call_kind, CallSiteKind::RustUnexpandedMacro | CallSiteKind::RustAnalysisIncomplete
+                    | CallSiteKind::RustUnindexedNestedCallable)
+                    && let Some(reason) = call.call_kind.unresolved_reason()
+                {
+                    *self.unresolved_call_reasons.entry(reason.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
     fn build_with_root(
         &mut self,
         method_name: &str,
@@ -4210,6 +4257,10 @@ impl CallerTreeBuilder<'_> {
             return Vec::new();
         }
         let method_lower = method_name.to_lowercase();
+
+        if current_depth == 0 {
+            self.record_rust_analysis_gaps();
+        }
 
         let target_line = root_definition
             .and_then(|definition| self.ctx.def_idx.definitions.get(definition as usize))
@@ -4294,6 +4345,7 @@ impl CallerTreeBuilder<'_> {
             let is_typescript = extension.is_some_and(|extension| {
                 extension.eq_ignore_ascii_case("ts") || extension.eq_ignore_ascii_case("tsx")
             });
+            let is_rust = extension.is_some_and(|extension| extension.eq_ignore_ascii_case("rs"));
             if !parent_file_matches && !is_typescript { continue; }
 
             if !self.ctx.passes_file_filters(file_path) {
@@ -4336,7 +4388,8 @@ impl CallerTreeBuilder<'_> {
                 let requires_call_site_validation = root_definition.is_some()
                     || parent_class.is_some()
                     || is_sql
-                    || is_typescript;
+                    || is_typescript
+                    || is_rust;
                 if is_typescript {
                     self.record_unresolved_call_reasons(caller_di, line, &method_lower);
                 }
@@ -5520,7 +5573,10 @@ fn call_site_kind_matches(call_kind: CallSiteKind, definition: &DefinitionEntry)
             definition.kind,
             DefinitionKind::Method | DefinitionKind::Function
         ) || callable_value,
-        CallSiteKind::TypeScriptAnalysisIncomplete => false,
+        CallSiteKind::TypeScriptAnalysisIncomplete
+        | CallSiteKind::RustUnexpandedMacro
+        | CallSiteKind::RustAnalysisIncomplete
+        | CallSiteKind::RustUnindexedNestedCallable => false,
         CallSiteKind::TypeScriptSameFile { .. }
         | CallSiteKind::TypeScriptLocalCallable { .. } => {
             definition.kind == DefinitionKind::Function || callable_value

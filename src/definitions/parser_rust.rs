@@ -1,6 +1,7 @@
 //! Rust AST parser using tree-sitter: extracts definitions, call sites, and code stats.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use super::types::*;
 use super::tree_sitter_utils::{node_text, find_child_by_kind, find_child_by_field, walk_code_stats, warn_ast_depth_exceeded, MAX_AST_RECURSION_DEPTH, MAX_PARSE_SOURCE_BYTES, PARSE_TIMEOUT_MICROS, RUST_CODE_STATS_CONFIG};
@@ -59,6 +60,16 @@ pub(crate) fn parse_rust_definitions(
 
     // Extract call sites from pre-collected method nodes
     let mut call_sites: Vec<(usize, Vec<CallSite>)> = Vec::new();
+    let mut shadowed_macro_names = HashSet::new();
+    collect_rust_macro_shadows(tree.root_node(), source_bytes, &mut shadowed_macro_names);
+    let mut call_context = RustCallContext {
+        parser,
+        deadline: Instant::now() + Duration::from_micros(PARSE_TIMEOUT_MICROS),
+        macro_bytes: 0,
+        macro_depth: 0,
+        shadowed_macro_names,
+        limit_warning_emitted: false,
+    };
     for &(def_local_idx, method_node) in &method_nodes {
         let def = &defs[def_local_idx];
         let parent_name = def.parent.as_deref().unwrap_or("");
@@ -66,7 +77,7 @@ pub(crate) fn parse_rust_definitions(
             .cloned()
             .unwrap_or_default();
 
-        let calls = extract_rust_call_sites(method_node, source_bytes, parent_name, &field_types);
+        let calls = extract_rust_call_sites(method_node, source_bytes, parent_name, &field_types, &mut call_context);
         if !calls.is_empty() {
             call_sites.push((def_local_idx, calls));
         }
@@ -74,7 +85,10 @@ pub(crate) fn parse_rust_definitions(
 
     // Compute code stats
     let call_count_map: HashMap<usize, u16> = call_sites.iter()
-        .map(|(idx, calls)| (*idx, calls.len() as u16))
+        .map(|(idx, calls)| (*idx, calls.iter().filter(|call| !matches!(
+            call.call_kind, CallSiteKind::RustUnexpandedMacro | CallSiteKind::RustAnalysisIncomplete
+                | CallSiteKind::RustUnindexedNestedCallable
+        )).count() as u16))
         .collect();
 
     let mut code_stats_entries: Vec<(usize, CodeStats)> = Vec::new();
@@ -619,56 +633,351 @@ fn parse_rust_field_type(sig: &str) -> Option<(String, String)> {
 
 // ─── Call site extraction ───────────────────────────────────────────
 
+struct RustCallContext<'a> {
+    parser: &'a mut tree_sitter::Parser,
+    deadline: Instant,
+    macro_bytes: usize,
+    macro_depth: usize,
+    shadowed_macro_names: HashSet<String>,
+    limit_warning_emitted: bool,
+}
+
+fn warn_rust_macro_limit(context: &mut RustCallContext<'_>, name: &str, reason: &str) {
+    if !context.limit_warning_emitted {
+        tracing::warn!(target: "xray::parse", macro_name = name, reason, "Rust macro call analysis limit reached");
+        context.limit_warning_emitted = true;
+    }
+}
+
+fn collect_rust_macro_shadows(node: tree_sitter::Node, source: &[u8], names: &mut HashSet<String>) {
+    let mut cursor = node.walk();
+    loop {
+        let current = cursor.node();
+        match current.kind() {
+            "macro_definition" | "mod_item" => {
+                if let Some(name) = find_child_by_field(current, "name") {
+                    names.insert(node_text(name, source).to_string());
+                }
+            }
+            "use_declaration" => {
+                let words: Vec<_> = node_text(current, source)
+                    .split(|character: char| !character.is_alphanumeric() && character != '_')
+                    .filter(|word| !word.is_empty()).collect();
+                let root = words.iter().position(|word| *word == "use")
+                    .and_then(|position| words.get(position + 1));
+                if !root.is_some_and(|root| matches!(*root, "std" | "core" | "alloc" | "tokio")) {
+                    names.extend(words.into_iter().map(str::to_string));
+                }
+            }
+            _ => {}
+        }
+        if !matches!(current.kind(), "macro_invocation" | "macro_definition")
+            && cursor.goto_first_child()
+        {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return;
+            }
+        }
+    }
+}
+
 fn extract_rust_call_sites(
     method_node: tree_sitter::Node,
     source: &[u8],
     parent_name: &str,
     field_types: &HashMap<String, String>,
+    context: &mut RustCallContext<'_>,
 ) -> Vec<CallSite> {
     let mut calls = Vec::new();
 
     let body = find_child_by_kind(method_node, "block");
     if let Some(body_node) = body {
-        walk_rust_for_calls(body_node, source, parent_name, field_types, &mut calls);
+        walk_rust_for_calls(body_node, source, parent_name, field_types, &mut calls, context, 0, 0);
     }
 
     calls.sort_by(|a, b| a.line.cmp(&b.line)
         .then_with(|| a.method_name.cmp(&b.method_name))
-        .then_with(|| a.receiver_type.cmp(&b.receiver_type)));
-    calls.dedup_by(|a, b| a.line == b.line && a.method_name == b.method_name && a.receiver_type == b.receiver_type);
+        .then_with(|| a.receiver_type.cmp(&b.receiver_type))
+        .then_with(|| a.call_kind.unresolved_reason().cmp(&b.call_kind.unresolved_reason())));
+    calls.dedup_by(|a, b| a.line == b.line && a.method_name == b.method_name
+        && a.receiver_type == b.receiver_type && a.call_kind == b.call_kind);
 
     calls
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_rust_for_calls(
     node: tree_sitter::Node,
     source: &[u8],
     parent_name: &str,
     field_types: &HashMap<String, String>,
     calls: &mut Vec<CallSite>,
+    context: &mut RustCallContext<'_>,
+    depth: usize,
+    line_offset: u32,
 ) {
+    if depth > MAX_AST_RECURSION_DEPTH {
+        warn_ast_depth_exceeded("rust calls", node);
+        push_rust_call_gap(calls, node, line_offset, CallSiteKind::RustAnalysisIncomplete);
+        return;
+    }
     match node.kind() {
         "call_expression" => {
-            if let Some(call) = extract_rust_call(node, source, parent_name, field_types) {
+            if let Some(mut call) = extract_rust_call(node, source, parent_name, field_types) {
+                call.line = call.line.saturating_add(line_offset);
                 calls.push(call);
             }
-            // Recurse into all children for chained/nested calls
-            for i in 0..node.child_count() {
-                if let Some(child) = node.child(i) {
-                    walk_rust_for_calls(child, source, parent_name, field_types, calls);
-                }
-            }
+        }
+        "macro_invocation" => {
+            collect_rust_macro_calls(node, source, parent_name, field_types, calls, context, depth, line_offset);
             return;
         }
-        // Skip macro invocations
-        "macro_invocation" => return,
+        "function_item" => {
+            push_rust_call_gap(calls, node, line_offset, CallSiteKind::RustUnindexedNestedCallable);
+            return;
+        }
+        "macro_definition" => return,
         _ => {}
     }
 
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            walk_rust_for_calls(child, source, parent_name, field_types, calls);
+            walk_rust_for_calls(child, source, parent_name, field_types, calls, context, depth + 1, line_offset);
         }
+    }
+}
+
+fn push_rust_call_gap(
+    calls: &mut Vec<CallSite>,
+    node: tree_sitter::Node,
+    line_offset: u32,
+    call_kind: CallSiteKind,
+) {
+    calls.push(CallSite {
+        method_name: "<rust-call-analysis>".to_string(),
+        receiver_type: None,
+        line: (node.start_position().row as u32 + 1).saturating_add(line_offset),
+        call_kind,
+        receiver_is_generic: false,
+    });
+}
+
+fn rust_macro_tokens(body: tree_sitter::Node) -> Vec<tree_sitter::Node> {
+    let mut cursor = body.walk();
+    body.children(&mut cursor)
+        .filter(|child| !child.is_extra()
+            && child.start_byte() > body.start_byte()
+            && child.end_byte() < body.end_byte())
+        .collect()
+}
+
+fn rewrite_rust_macro_payload(
+    body: tree_sitter::Node,
+    source: &[u8],
+    select: bool,
+    biased: bool,
+) -> Option<Vec<u8>> {
+    let payload_start = body.start_byte().checked_add(1)?;
+    let payload_end = body.end_byte().checked_sub(1)?;
+    source.get(payload_start..payload_end)?;
+    let tokens = rust_macro_tokens(body);
+    let mut edits: Vec<(usize, usize, &str)> = Vec::new();
+    if biased && tokens.len() >= 2
+        && node_text(tokens[0], source) == "biased"
+        && node_text(tokens[1], source) == ";"
+    {
+        edits.push((tokens[0].start_byte(), tokens[0].end_byte(), ""));
+        edits.push((tokens[1].start_byte(), tokens[1].end_byte(), ""));
+    }
+    if select {
+        let mut arm_start = 0;
+        let mut arrows = 0;
+        let mut i = 0;
+        while i < tokens.len() {
+            let text = node_text(tokens[i], source);
+            let arrow_width = if text == "=>" {
+                1
+            } else if text == "=" && i + 1 < tokens.len()
+                && node_text(tokens[i + 1], source) == ">"
+                && tokens[i].end_byte() == tokens[i + 1].start_byte()
+            {
+                2
+            } else {
+                i += 1;
+                continue;
+            };
+            if i > arm_start && node_text(tokens[i - 1], source) == "else" {
+                edits.push((tokens[i - 1].start_byte(), tokens[i - 1].end_byte(), "_"));
+            } else {
+                let mut binding = None;
+                let mut let_binding = false;
+                for (index, &token) in tokens.iter().enumerate().take(i).skip(arm_start) {
+                    if node_text(token, source) == "let" {
+                        let_binding = true;
+                    }
+                    if node_text(token, source) == "="
+                        && !matches!(source.get(token.start_byte().wrapping_sub(1)), Some(b'=' | b'!' | b'<' | b'>'))
+                        && !matches!(source.get(token.end_byte()), Some(b'=' | b'>'))
+                    {
+                        if let_binding {
+                            let_binding = false;
+                        } else {
+                            binding = Some(index);
+                        }
+                    }
+                }
+                let binding = binding?;
+                // Match-arm guards parse the future and optional condition as Rust
+                // expressions, while preserving patterns as patterns, not calls.
+                edits.push((tokens[binding].start_byte(), tokens[binding].end_byte(), "if ("));
+                for pair in tokens[binding + 1..i].windows(2) {
+                    if node_text(pair[0], source) == "," && node_text(pair[1], source) == "if" {
+                        edits.push((pair[1].start_byte(), pair[1].end_byte(), ""));
+                    }
+                }
+                edits.push((tokens[i].start_byte(), tokens[i].start_byte(), ")"));
+            }
+            arrows += 1;
+            i += arrow_width;
+            arm_start = i;
+        }
+        if arrows == 0 {
+            return None;
+        }
+    }
+    edits.sort_by_key(|edit| edit.0);
+    let mut payload = Vec::with_capacity(body.end_byte() - body.start_byte());
+    let mut position = payload_start;
+    for (start, end, replacement) in edits {
+        if start < position {
+            return None;
+        }
+        payload.extend_from_slice(source.get(position..start)?);
+        payload.extend_from_slice(replacement.as_bytes());
+        position = end;
+    }
+    payload.extend_from_slice(source.get(position..payload_end)?);
+    Some(payload)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_rust_macro_calls(
+    node: tree_sitter::Node,
+    source: &[u8],
+    parent_name: &str,
+    field_types: &HashMap<String, String>,
+    calls: &mut Vec<CallSite>,
+    context: &mut RustCallContext<'_>,
+    depth: usize,
+    line_offset: u32,
+) {
+    let Some(name_node) = find_child_by_field(node, "macro").or_else(|| node.named_child(0)) else {
+        push_rust_call_gap(calls, node, line_offset, CallSiteKind::RustUnexpandedMacro);
+        return;
+    };
+    let name: String = node_text(name_node, source).split_whitespace().collect();
+    let canonical_name = name.trim_start_matches("::");
+    let (path, short_name) = canonical_name.rsplit_once("::").unwrap_or(("", canonical_name));
+    let shadowed = if path.is_empty() {
+        context.shadowed_macro_names.contains(short_name)
+    } else {
+        !name.starts_with("::")
+            && path.split("::").next().is_some_and(|root| context.shadowed_macro_names.contains(root))
+    };
+    if shadowed {
+        push_rust_call_gap(calls, node, line_offset, CallSiteKind::RustUnexpandedMacro);
+        return;
+    }
+    let standard = matches!(path, "" | "std" | "core" | "alloc");
+    if standard && matches!(short_name,
+        "stringify" | "concat" | "concat_bytes" | "cfg" | "env" | "option_env"
+        | "include_str" | "include_bytes" | "file" | "line" | "column" | "module_path"
+        | "compile_error"
+    ) {
+        return;
+    }
+    let select = matches!(canonical_name, "select" | "tokio::select");
+    let join = matches!(canonical_name, "join" | "try_join" | "tokio::join" | "tokio::try_join");
+    let vector = standard && short_name == "vec";
+    let expressions = standard && matches!(short_name,
+        "assert" | "assert_eq" | "assert_ne" | "debug_assert" | "debug_assert_eq" | "debug_assert_ne"
+        | "print" | "println" | "eprint" | "eprintln" | "format" | "format_args" | "format_args_nl"
+        | "write" | "writeln" | "panic" | "todo" | "unimplemented" | "dbg"
+    );
+    if !select && !join && !vector && !expressions {
+        push_rust_call_gap(calls, node, line_offset, CallSiteKind::RustUnexpandedMacro);
+        return;
+    }
+    let Some(body) = find_child_by_kind(node, "token_tree") else {
+        push_rust_call_gap(calls, node, line_offset, CallSiteKind::RustUnexpandedMacro);
+        return;
+    };
+    if context.macro_depth >= 32
+        || context.macro_bytes.saturating_add(body.end_byte() - body.start_byte() + 64) > MAX_PARSE_SOURCE_BYTES
+        || Instant::now() >= context.deadline
+    {
+        warn_rust_macro_limit(context, &name, "depth_source_or_time_budget");
+        push_rust_call_gap(calls, node, line_offset, CallSiteKind::RustAnalysisIncomplete);
+        return;
+    }
+    let Some(payload) = rewrite_rust_macro_payload(body, source, select, select || join) else {
+        push_rust_call_gap(calls, node, line_offset, CallSiteKind::RustUnexpandedMacro);
+        return;
+    };
+    let (prefix, suffix) = if select {
+        ("fn __xray_macro(){match () {", "}}")
+    } else if vector {
+        ("fn __xray_macro(){[", "];}")
+    } else {
+        ("fn __xray_macro(){(", ");}")
+    };
+    let mut fragment = Vec::with_capacity(prefix.len() + payload.len() + suffix.len());
+    fragment.extend_from_slice(prefix.as_bytes());
+    fragment.extend_from_slice(&payload);
+    fragment.extend_from_slice(suffix.as_bytes());
+    context.macro_bytes = context.macro_bytes.saturating_add(fragment.len());
+    let remaining = context.deadline.saturating_duration_since(Instant::now()).as_micros();
+    if remaining == 0 {
+        warn_rust_macro_limit(context, &name, "file_time_budget");
+        push_rust_call_gap(calls, node, line_offset, CallSiteKind::RustAnalysisIncomplete);
+        return;
+    }
+    context.parser.reset();
+    context.parser.set_timeout_micros(remaining.min(PARSE_TIMEOUT_MICROS as u128) as u64);
+    let parsed = context.parser.parse(&fragment, None);
+    context.parser.reset();
+    let Some(tree) = parsed else {
+        warn_rust_macro_limit(context, &name, "fragment_parse_timeout");
+        push_rust_call_gap(calls, node, line_offset, CallSiteKind::RustAnalysisIncomplete);
+        return;
+    };
+    if tree.root_node().has_error() {
+        tracing::debug!(target: "xray::parse", macro_name = %name, "Rust macro payload is not supported Rust syntax");
+        push_rust_call_gap(calls, node, line_offset, CallSiteKind::RustUnexpandedMacro);
+        return;
+    }
+    let fragment_body = find_child_by_kind(tree.root_node(), "function_item")
+        .and_then(|function| find_child_by_kind(function, "block"));
+    let Some(fragment_body) = fragment_body else {
+        push_rust_call_gap(calls, node, line_offset, CallSiteKind::RustUnexpandedMacro);
+        return;
+    };
+    let mut fragment_shadows = HashSet::new();
+    collect_rust_macro_shadows(tree.root_node(), &fragment, &mut fragment_shadows);
+    let added_shadows: Vec<_> = fragment_shadows.into_iter()
+        .filter(|name| context.shadowed_macro_names.insert(name.clone()))
+        .collect();
+    context.macro_depth += 1;
+    walk_rust_for_calls(
+        fragment_body, &fragment, parent_name, field_types, calls, context, depth + 1,
+        line_offset.saturating_add(body.start_position().row as u32),
+    );
+    context.macro_depth -= 1;
+    for name in added_shadows {
+        context.shadowed_macro_names.remove(&name);
     }
 }
 
@@ -680,7 +989,7 @@ fn extract_rust_call(
 ) -> Option<CallSite> {
     // call_expression: child(0) = function expression, child(1) = arguments
     let func = node.child(0)?;
-    let line = node.start_position().row as u32 + 1;
+    let line = func.start_position().row as u32 + 1;
 
     match func.kind() {
         // Simple function call: my_function(args)
@@ -690,11 +999,11 @@ fn extract_rust_call(
         }
         // Method call: receiver.method(args) — tree-sitter-rust uses field_expression
         "field_expression" => {
-            extract_rust_field_expression_call(func, source, parent_name, field_types, line)
+            extract_rust_field_expression_call(func, source, parent_name, field_types)
         }
         // Static/path call: Type::method(args) or module::function(args)
         "scoped_identifier" => {
-            extract_rust_scoped_call(func, source, line)
+            extract_rust_scoped_call(func, source)
         }
         // Generic function call: function::<T>(args)
         "generic_function" => {
@@ -706,10 +1015,10 @@ fn extract_rust_call(
                     Some(CallSite { method_name, receiver_type: None, line, call_kind: Default::default(), receiver_is_generic: false })
                 }
                 "scoped_identifier" => {
-                    extract_rust_scoped_call(inner_func, source, line)
+                    extract_rust_scoped_call(inner_func, source)
                 }
                 "field_expression" => {
-                    extract_rust_field_expression_call(inner_func, source, parent_name, field_types, line)
+                    extract_rust_field_expression_call(inner_func, source, parent_name, field_types)
                 }
                 _ => None,
             }
@@ -723,7 +1032,6 @@ fn extract_rust_field_expression_call(
     source: &[u8],
     parent_name: &str,
     field_types: &HashMap<String, String>,
-    line: u32,
 ) -> Option<CallSite> {
     // field_expression: value.field
     let value_node = find_child_by_field(node, "value").or_else(|| node.child(0))?;
@@ -734,6 +1042,7 @@ fn extract_rust_field_expression_call(
     })?;
 
     let method_name = node_text(field_node, source).to_string();
+    let line = field_node.start_position().row as u32 + 1;
     let receiver_type = resolve_rust_receiver(value_node, source, parent_name, field_types);
 
     Some(CallSite { method_name, receiver_type, line, call_kind: Default::default(), receiver_is_generic: false })
@@ -742,11 +1051,11 @@ fn extract_rust_field_expression_call(
 fn extract_rust_scoped_call(
     node: tree_sitter::Node,
     source: &[u8],
-    line: u32,
 ) -> Option<CallSite> {
     // scoped_identifier: path::name, e.g., HashMap::new
     let name_node = find_child_by_field(node, "name")?;
     let method_name = node_text(name_node, source).to_string();
+    let line = name_node.start_position().row as u32 + 1;
 
     let path_node = find_child_by_field(node, "path")?;
     let path_text = node_text(path_node, source).trim();

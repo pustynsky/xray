@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.9.6 (2026-10-31)
+
+- **Find Rust calls inside Tokio select and expression macros.** Explicit futures,
+  guards, and nested `spawn` / `async move` handlers retain their enclosing function
+  and callable-name source lines in both caller directions, including split-line
+  method chains. Unindexed nested callable bodies report explicit analysis gaps.
+  Rust UP requires call-site evidence
+  rather than treating comments, strings, or variable names as calls. Unknown
+  macro payloads and bounded-analysis gaps make affected single/batch results
+  explicitly partial and non-exhaustive. Definition-index format v12 invalidates
+  stale pre-fix call-site caches automatically.
+
+- **Set up unregistered workspaces on first MCP use.** Personal `serve-workspace` registrations keep an unknown workspace available through `xray_setup`, which proposes installer-compatible extension settings and requires a separate explicit confirmation before atomically creating its profile. Workspace discovery uses MCP roots or a Git ancestor of the client's launch directory, never an arbitrary host directory. Optional pre-initialize client probes (including Agent Host's `server/discover`) receive normal JSON-RPC errors instead of terminating bootstrap; pings remain available. The connection then joins the existing shared backend; clients wait for authoritative `xray_info` readiness before searching. Existing profiles and installer registrations remain unchanged.
+
 - **Keep PowerShell open after inline setup.** The installer returns to its caller instead of exiting PowerShell.
 
 - **Compact README.** The README now keeps the overview, benchmarks, scenarios, quick start, feature summary, and documentation map. Detailed installation variants live only in the [Installation guide](docs/installation.md); build-from-source, Cargo feature flags, testing, and dependencies moved to the new [Development guide](docs/development.md); response delivery, workspace-switch build status, exact `paramCount`, and `xray_edit` path scope moved to the [MCP server guide](docs/mcp-guide.md).

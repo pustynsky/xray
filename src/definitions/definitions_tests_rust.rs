@@ -9,6 +9,156 @@ fn make_rust_parser() -> tree_sitter::Parser {
     parser
 }
 
+fn rust_macro_calls(source: &str, method: &str) -> Vec<CallSite> {
+    let mut parser = make_rust_parser();
+    let (defs, calls, _) = parse_rust_definitions(&mut parser, source, 0);
+    let owner = defs.iter().position(|definition| definition.name == method).unwrap();
+    calls.into_iter().find_map(|(index, calls)| (index == owner).then_some(calls))
+        .unwrap_or_default()
+}
+
+#[test]
+fn test_rust_macro_multiline_names_and_fragment_shadow_scope() {
+    let source = "fn earlier() { dbg!({ use custom::println; println!(\"hidden\"); }); }\nfn main() {\ntokio::select! {\n_ = Client\n::new()\n.send() => { println!(\"{}\", target()); }\n}\n}";
+    let calls = rust_macro_calls(source, "main");
+    for (name, line) in [("new", 5), ("send", 6), ("target", 6)] {
+        assert!(calls.iter().any(|call| call.method_name == name && call.line == line), "{name}: {calls:?}");
+    }
+    assert!(calls.iter().all(|call| call.call_kind.unresolved_reason().is_none()), "{calls:?}");
+}
+
+#[test]
+fn test_rust_macro_incomplete_delimiters_do_not_panic() {
+    for source in ["fn main() { dbg!(", "fn main() { tokio::select! {", "fn main() { vec!["] {
+        let mut parser = make_rust_parser();
+        parse_rust_definitions(&mut parser, source, 0);
+    }
+}
+
+#[test]
+fn test_rust_macro_select_preserves_nested_calls_and_lines() {
+    let source = r#"
+async fn main() {
+    loop {
+        tokio::select! {
+            biased;
+            Some(client) = accept(), if enabled() => {
+                tokio::spawn(async move {
+                    handle(client).await;
+                    println!("not_a_call()", format!("{}", describe()));
+                });
+            }
+            _ = shutdown() => cleanup(),
+            else => fallback(),
+        }
+    }
+}
+"#;
+    for source in [source.to_string(), source.replace('\n', "\r\n")] {
+        let calls = rust_macro_calls(&source, "main");
+        for name in ["accept", "enabled", "spawn", "handle", "describe", "shutdown", "cleanup", "fallback"] {
+            let call = calls.iter().find(|call| call.method_name == name)
+                .unwrap_or_else(|| panic!("missing {name}: {calls:?}"));
+            let line = source.lines().position(|line| line.contains(&format!("{name}("))).unwrap() as u32 + 1;
+            assert_eq!(call.line, line, "{name} source line");
+        }
+        assert!(!calls.iter().any(|call| ["Some", "not_a_call"].contains(&call.method_name.as_str())));
+        assert!(calls.iter().all(|call| call.call_kind.unresolved_reason().is_none()));
+    }
+}
+
+#[test]
+fn test_rust_macro_expression_arguments_and_inert_tokens() {
+    let source = format!(r#"
+fn main() {{
+    println!("{0}", handle());
+    let _ = tokio::join!(biased; first(), second());
+    let _ = vec![item(); count()];
+    let _ = stringify!(fake());
+    let _ = concat!("fake()", " more");
+    // fake()
+}}
+"#, '\u{e9}');
+    let calls = rust_macro_calls(&source, "main");
+    for name in ["handle", "first", "second", "item", "count"] {
+        assert!(calls.iter().any(|call| call.method_name == name), "missing {name}: {calls:?}");
+    }
+    assert!(!calls.iter().any(|call| call.method_name == "fake"));
+    assert!(calls.iter().all(|call| call.call_kind.unresolved_reason().is_none()));
+}
+
+#[test]
+fn test_rust_macro_unknown_and_invalid_payloads_remain_unresolved() {
+    for invocation in ["opaque!(handle())", "tokio::select! { not valid => }", "println!(handle() => broken)"] {
+        let calls = rust_macro_calls(&format!("fn main() {{ {invocation}; }}"), "main");
+        assert!(!calls.iter().any(|call| call.method_name == "handle"), "{calls:?}");
+        assert!(calls.iter().any(|call| call.call_kind.unresolved_reason() == Some("unexpanded_rust_macro")), "{calls:?}");
+    }
+}
+
+#[test]
+fn test_rust_macro_nested_analysis_is_bounded() {
+    let mut expression = "handle()".to_string();
+    for _ in 0..128 {
+        expression = format!("format!(\"{{}}\", {expression})");
+    }
+    let calls = rust_macro_calls(&format!("fn main() {{ {expression}; }}"), "main");
+    assert!(calls.iter().any(|call| call.call_kind.unresolved_reason() == Some("rust_call_analysis_limit")), "{calls:?}");
+}
+
+#[test]
+fn test_rust_macro_preserves_self_receiver_and_skips_definitions() {
+    let source = r#"
+struct Service;
+impl Service {
+    fn run(&self) {
+        tokio::select! {
+            _ = ready() => {
+                self.handle();
+                fn nested() { not_a_call_from_run(); }
+                macro_rules! inert { () => { not_a_call_from_run() }; }
+            }
+        }
+    }
+}
+"#;
+    let calls = rust_macro_calls(source, "run");
+    let call = calls.iter().find(|call| call.method_name == "handle").unwrap();
+    assert_eq!(call.receiver_type.as_deref(), Some("Service"));
+    assert!(!calls.iter().any(|call| call.method_name == "not_a_call_from_run"));
+}
+
+#[test]
+fn test_rust_macro_select_handles_rust_patterns_futures_and_handler_expressions() {
+    for payload in [
+        "Some(client) = if let Some(x) = lookup() { first(x) } else { second() } => handle(client),",
+        "_ = first() => |a, b| handle(a, b), _ = second() => value = cleanup(),",
+        "_ = first() => { tokio::select! { _ = second() => handle() } }",
+    ] {
+        let calls = rust_macro_calls(&format!("async fn main() {{ ::tokio::select! {{ {payload} }} }}"), "main");
+        assert!(calls.iter().any(|call| call.method_name == "handle"), "{calls:?}");
+        assert!(calls.iter().all(|call| call.call_kind.unresolved_reason().is_none()), "{calls:?}");
+        assert!(!calls.iter().any(|call| call.method_name == "Some"));
+    }
+}
+
+#[test]
+fn test_rust_macro_shadowed_names_are_not_assumed_to_be_standard_macros() {
+    for source in [
+        "macro_rules! println { ($($t:tt)*) => {} }\nfn main() { println!(handle()); }",
+        "use custom::println;\nfn main() { println!(handle()); }",
+        "mod tokio {}\nfn main() { tokio::select! { _ = first() => handle() } }",
+    ] {
+        let calls = rust_macro_calls(source, "main");
+        assert!(!calls.iter().any(|call| call.method_name == "handle"), "{calls:?}");
+        assert!(calls.iter().any(|call| call.call_kind.unresolved_reason() == Some("unexpanded_rust_macro")), "{calls:?}");
+    }
+    let calls = rust_macro_calls(
+        "macro_rules! println { ($($t:tt)*) => {} }\nfn main() { ::std::println!(\"{}\", handle()); }", "main"
+    );
+    assert!(calls.iter().any(|call| call.method_name == "handle"));
+}
+
 // ─── Definition extraction tests ────────────────────────────────────
 
 #[test]

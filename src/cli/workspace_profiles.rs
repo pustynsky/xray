@@ -1,4 +1,6 @@
-use std::{ffi::OsString, fs, io::{self, BufRead, Read, Write}, path::{Path, PathBuf}};
+mod onboarding;
+
+use std::{collections::VecDeque, ffi::OsString, fs, io::{self, BufRead, Read, Write}, path::{Path, PathBuf}};
 
 use clap::Parser;
 use serde::Deserialize;
@@ -26,13 +28,17 @@ struct Profile {
 }
 
 pub(super) fn run(args: WorkspaceServeArgs) -> io::Result<()> {
-    match resolve(&args.profiles, &std::env::current_dir()?) {
+    let cwd = std::env::current_dir()?;
+    match resolve(&args.profiles, &cwd) {
         Ok(serve) => super::shared_backend::run(serve),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let (serve, session) = bootstrap(
-                &args.profiles, error, &mut io::stdin().lock(), &mut io::stdout().lock(),
+            let selected = bootstrap(
+                &args.profiles, &cwd, error, &mut io::stdin().lock(), &mut io::stdout().lock(),
             )?;
-            super::shared_backend::run_with_session(serve, Some(session))
+            match selected {
+                Some((serve, session)) => super::shared_backend::run_with_session(serve, Some(session)),
+                None => Ok(()),
+            }
         }
         Err(error) => Err(error),
     }
@@ -58,22 +64,43 @@ fn send_message(writer: &mut impl Write, value: Value) -> io::Result<()> {
 }
 
 fn bootstrap(
-    profiles: &Path, cwd_error: io::Error, reader: &mut impl BufRead, writer: &mut impl Write,
-) -> io::Result<(ServeArgs, InitializedSession)> {
+    profiles: &Path, cwd: &Path, cwd_error: io::Error, reader: &mut impl BufRead, writer: &mut impl Write,
+) -> io::Result<Option<(ServeArgs, InitializedSession)>> {
     let mut remaining = MAX_BOOTSTRAP_BYTES;
-    let (initialize, request) = match read_message(reader, &mut remaining) {
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Err(cwd_error),
-        result => result?,
+    let (initialize, request) = loop {
+        let (line, request) = match read_message(reader, &mut remaining) {
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Err(cwd_error),
+            result => result?,
+        };
+        let id = request.get("id").filter(|id| !id.is_null());
+        if request["jsonrpc"] != "2.0" || !request["method"].is_string() {
+            send_message(writer, json!({"jsonrpc":"2.0","id":id,"error":{"code":-32600,"message":"Invalid JSON-RPC request"}}))?;
+            continue;
+        }
+        if request["method"] == "initialize" {
+            if id.is_none() { return Err(invalid("Expected MCP initialize with a request ID before workspace discovery")); }
+            break (line, request);
+        }
+        if let Some(id) = id {
+            // Clients may probe optional methods such as server/discover before initialize.
+            let response = if request["method"] == "ping" {
+                json!({"jsonrpc":"2.0","id":id,"result":{}})
+            } else {
+                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Method not found before MCP initialization"}})
+            };
+            send_message(writer, response)?;
+        }
     };
-    if request["method"] != "initialize" || request.get("id").is_none() || request["id"].is_null() {
-        return Err(invalid("Expected MCP initialize before workspace discovery"));
-    }
-    if !request.pointer("/params/capabilities/roots").is_some_and(Value::is_object) {
-        return Err(io::Error::new(cwd_error.kind(), format!("{cwd_error} This client does not advertise MCP roots; launch it from the registered workspace.")));
-    }
+    let has_roots = request.pointer("/params/capabilities/roots").is_some_and(Value::is_object);
+    let cwd_root = if has_roots { None } else {
+        Some(onboarding::git_root(cwd).ok_or_else(|| io::Error::new(cwd_error.kind(), format!(
+            "{cwd_error} This client does not advertise MCP roots; launch it from a Git workspace or register a workspace with the installer."
+        )))?)
+    };
     let mut result = crate::mcp::protocol::InitializeResult::new_with_extensions_and_xml_on_demand(&[], &[], false);
     // Workspace-specific language guidance is not known until roots/list completes.
     result.instructions = None;
+    result.capabilities.tools.list_changed = true;
     send_message(writer, json!({"jsonrpc": "2.0", "id": request["id"], "result": result}))?;
     let mut buffered = Vec::new();
     loop {
@@ -84,6 +111,9 @@ fn bootstrap(
         } else {
             buffered.extend_from_slice(line.as_bytes());
         }
+    }
+    if let Some(root) = cwd_root {
+        return select_or_onboard(profiles, &root, InitializedSession { initialize, buffered }, reader, writer);
     }
     send_message(writer, json!({"jsonrpc": "2.0", "id": ROOTS_REQUEST_ID, "method": "roots/list", "params": {}}))?;
     loop {
@@ -102,8 +132,97 @@ fn bootstrap(
         }
         let path = roots[0]["uri"].as_str().and_then(crate::mcp::server::uri_to_path)
             .ok_or_else(|| invalid("MCP workspace root must be a valid file URI"))?;
-        let serve = resolve(profiles, Path::new(&path))?;
-        return Ok((serve, InitializedSession { initialize, buffered }));
+        return select_or_onboard(profiles, Path::new(&path), InitializedSession { initialize, buffered }, reader, writer);
+    }
+}
+
+fn select_or_onboard(
+    profiles: &Path, root: &Path, mut session: InitializedSession,
+    reader: &mut impl BufRead, writer: &mut impl Write,
+) -> io::Result<Option<(ServeArgs, InitializedSession)>> {
+    match resolve(profiles, root) {
+        Ok(serve) => return Ok(Some((serve, session))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let root = std::path::absolute(root)?;
+    if !fs::canonicalize(&root)?.is_dir() { return Err(invalid("MCP workspace root must be a directory")); }
+    let mut queued: VecDeque<_> = String::from_utf8(std::mem::take(&mut session.buffered))
+        .map_err(|error| invalid(error.to_string()))?.lines()
+        .map(|line| Ok((format!("{line}\n"), serde_json::from_str::<Value>(line).map_err(|error| invalid(error.to_string()))?)))
+        .collect::<io::Result<_>>()?;
+    let mut proposal = None;
+    loop {
+        let (_, request) = match queued.pop_front() {
+            Some(message) => message,
+            None => {
+                let mut remaining = MAX_BOOTSTRAP_BYTES;
+                match read_message(reader, &mut remaining) {
+                    Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+                    result => result?,
+                }
+            }
+        };
+        if request["method"] == "notifications/roots/list_changed" {
+            return Err(invalid("MCP workspace roots changed during setup. Reconnect to request a proposal for the current workspace; no profile was created."));
+        }
+        let Some(id) = request.get("id").filter(|id| !id.is_null()) else { continue; };
+        if request["jsonrpc"] != "2.0" || !request["method"].is_string() {
+            send_message(writer, json!({"jsonrpc":"2.0","id":id,"error":{"code":-32600,"message":"Invalid JSON-RPC request"}}))?;
+            continue;
+        }
+        let result = match request["method"].as_str() {
+            Some("ping") => json!({}),
+            Some("tools/list") => {
+                let mut tools = crate::mcp::handlers::tool_definitions(&[]);
+                tools.push(onboarding::tool());
+                json!({"tools":tools})
+            }
+            Some("tools/call") => {
+                let is_setup = request.pointer("/params/name") == Some(&json!("xray_setup"));
+                let arguments = request.pointer("/params/arguments").cloned().unwrap_or_else(|| json!({}));
+                let outcome = (|| -> io::Result<(Value, Option<ServeArgs>)> {
+                    if !is_setup {
+                        if proposal.is_none() { proposal = Some(onboarding::Proposal::scan(&root)?); }
+                        let mut body = proposal.as_ref().ok_or_else(|| invalid("Workspace proposal is unavailable"))?.body();
+                        body["error"] = json!("XRAY_SETUP_REQUIRED");
+                        return Ok((serde_json::to_value(crate::mcp::protocol::ToolCallResult::error(body.to_string()))?, None));
+                    }
+                    let options: onboarding::Options = serde_json::from_value(arguments).map_err(|error| invalid(error.to_string()))?;
+                    if !options.confirm {
+                        let detected = onboarding::Proposal::scan(&root)?;
+                        let body = detected.body();
+                        proposal = Some(detected);
+                        return Ok((serde_json::to_value(crate::mcp::protocol::ToolCallResult::success(body.to_string()))?, None));
+                    }
+                    let detected = proposal.as_ref().ok_or_else(|| invalid("Call xray_setup without confirm first, then ask the user for approval."))?;
+                    let serve = detected.install(profiles, options)?;
+                    let body = json!({
+                        "status":"indexing", "workspaceRoot": detected.body()["workspaceRoot"], "extensions": serve.ext,
+                        "hint":"Profile created. Please wait while Xray builds the indexes. Poll xray_info until no indexes[] entry has a status field, then retry the original request. A failed status is an error, not readiness; follow its recovery hint. Do not treat partial indexes as complete."
+                    });
+                    Ok((serde_json::to_value(crate::mcp::protocol::ToolCallResult::success(body.to_string()))?, Some(serve)))
+                })();
+                match outcome {
+                    Ok((result, Some(serve))) => {
+                        send_message(writer, json!({"jsonrpc":"2.0","id":id,"result":result}))?;
+                        send_message(writer, json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"}))?;
+                        session.buffered = queued.into_iter().flat_map(|(line, _)| line.into_bytes()).collect();
+                        return Ok(Some((serve, session)));
+                    }
+                    Ok((result, None)) => result,
+                    Err(error) => {
+                        eprintln!("Xray workspace setup: {error}");
+                        serde_json::to_value(crate::mcp::protocol::ToolCallResult::error(error.to_string()))?
+                    }
+                }
+            }
+            _ => {
+                send_message(writer, json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Method not found during workspace setup"}}))?;
+                continue;
+            }
+        };
+        send_message(writer, json!({"jsonrpc":"2.0","id":id,"result":result}))?;
     }
 }
 
@@ -321,7 +440,7 @@ mod tests {
             "uri":url::Url::from_directory_path(&root).unwrap().as_str(),
         }]}}));
         let mut output = Vec::new();
-        let (serve, session) = bootstrap(&profiles, io::ErrorKind::NotFound.into(), &mut input, &mut output).unwrap();
+        let (serve, session) = bootstrap(&profiles, temp.path(), io::ErrorKind::NotFound.into(), &mut input, &mut output).unwrap().unwrap();
         assert_eq!(fs::canonicalize(serve.dir).unwrap(), fs::canonicalize(root).unwrap());
         let messages: Vec<Value> = String::from_utf8(output).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
         assert_eq!(messages.len(), 3);
@@ -349,14 +468,108 @@ mod tests {
         ] {
             let mut response = response;
             response["id"] = json!(ROOTS_REQUEST_ID);
-            let error = bootstrap(&profiles, io::ErrorKind::NotFound.into(), &mut bootstrap_input(response), &mut Vec::new()).err().unwrap();
+            let error = bootstrap(&profiles, temp.path(), io::ErrorKind::NotFound.into(), &mut bootstrap_input(response), &mut Vec::new()).err().unwrap();
             assert!(matches!(error.kind(), io::ErrorKind::InvalidData | io::ErrorKind::NotFound));
         }
-        let input = json!({"id":1,"method":"initialize","params":{"capabilities":{}}});
+        let input = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}});
         let mut output = Vec::new();
-        let error = bootstrap(&profiles, io::ErrorKind::NotFound.into(), &mut io::Cursor::new(format!("{input}\n")), &mut output).err().unwrap();
+        let error = bootstrap(&profiles, temp.path(), io::ErrorKind::NotFound.into(), &mut io::Cursor::new(format!("{input}\n")), &mut output).err().unwrap();
         assert!(error.to_string().contains("does not advertise MCP roots"));
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn workspace_profiles_bootstrap_handles_optional_probes_before_initialize() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        let profiles = temp.path().join("profiles");
+        profile(&profiles, "registered", &root, &["--ext", "rs"]);
+        let mut input = format!("{}\n{}\n{}\n",
+            json!({"jsonrpc":"2.0","id":"discover","method":"server/discover","params":{}}),
+            json!({"jsonrpc":"2.0","id":0,"method":"ping"}),
+            json!({"jsonrpc":"2.0","method":"notifications/optional-probe"}),
+        ).into_bytes();
+        input.extend_from_slice(&bootstrap_input(json!({"jsonrpc":"2.0","id":ROOTS_REQUEST_ID,"result":{"roots":[{
+            "uri":url::Url::from_directory_path(&root).unwrap().as_str(),
+        }]}})).into_inner());
+        let mut output = Vec::new();
+        let (serve, session) = bootstrap(&profiles, temp.path(), io::ErrorKind::NotFound.into(),
+            &mut io::Cursor::new(input), &mut output).unwrap().unwrap();
+        assert_eq!(fs::canonicalize(serve.dir).unwrap(), fs::canonicalize(root).unwrap());
+        let messages: Vec<Value> = String::from_utf8(output).unwrap().lines()
+            .map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0]["id"], "discover");
+        assert_eq!(messages[0]["error"]["code"], -32601);
+        assert_eq!(messages[1]["id"], 0);
+        assert_eq!(messages[1]["result"], json!({}));
+        assert_eq!(messages[2]["id"], 1);
+        assert_eq!(messages[4]["method"], "roots/list");
+        assert_eq!(serde_json::from_str::<Value>(&session.initialize).unwrap()["method"], "initialize");
+        assert_eq!(serde_json::from_slice::<Value>(&session.buffered).unwrap()["method"], "tools/list");
+    }
+
+    #[test]
+    fn workspace_profiles_bootstrap_rejects_invalid_probe_and_idless_initialize() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut output = Vec::new();
+        let input = format!("{}\n{}\n",
+            json!({"jsonrpc":"1.0","id":1,"method":"server/discover"}),
+            json!({"jsonrpc":"2.0","method":"initialize"}),
+        );
+        let error = bootstrap(&temp.path().join("profiles"), temp.path(), io::ErrorKind::NotFound.into(),
+            &mut io::Cursor::new(input), &mut output).err().unwrap();
+        assert!(error.to_string().contains("request ID"));
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(response["error"]["code"], -32600);
+    }
+
+    #[test]
+    fn workspace_profiles_unregistered_empty_root_lists_tools_and_reports_scan_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("empty");
+        fs::create_dir(&root).unwrap();
+        let profiles = temp.path().join("profiles");
+        let response = json!({"jsonrpc":"2.0","id":ROOTS_REQUEST_ID,"result":{"roots":[{
+            "uri":url::Url::from_directory_path(&root).unwrap().as_str(),
+        }]}});
+        let mut input = bootstrap_input(response).into_inner();
+        input.extend_from_slice(format!("{}\n{}\n",
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_setup"}}),
+            json!({"jsonrpc":"2.0","id":5,"method":"ping"}),
+        ).as_bytes());
+        let mut output = Vec::new();
+        let selected = bootstrap(&profiles, temp.path(), io::ErrorKind::NotFound.into(),
+            &mut io::Cursor::new(input), &mut output).unwrap();
+        assert!(selected.is_none());
+        let messages: Vec<Value> = String::from_utf8(output).unwrap().lines()
+            .map(|line| serde_json::from_str(line).unwrap()).collect();
+        let list = messages.iter().find(|value| value["id"] == 3).unwrap();
+        assert!(list["result"]["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "xray_setup"));
+        let scan = messages.iter().find(|value| value["id"] == 4).unwrap();
+        assert_eq!(scan["result"]["isError"], true);
+        assert!(scan["result"]["content"][0]["text"].as_str().unwrap().contains("No recognized"));
+        assert_eq!(messages.last().unwrap()["id"], 5);
+        assert!(!profiles.exists());
+    }
+
+    #[test]
+    fn workspace_profiles_roots_changed_during_setup_cannot_confirm_old_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        let profiles = temp.path().join("profiles");
+        fs::write(root.join("README.md"), "").unwrap();
+        let response = json!({"jsonrpc":"2.0","id":ROOTS_REQUEST_ID,"result":{"roots":[{
+            "uri":url::Url::from_directory_path(&root).unwrap().as_str(),
+        }]}});
+        let mut input = bootstrap_input(response).into_inner();
+        input.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/roots/list_changed\"}\n");
+        let error = bootstrap(&profiles, temp.path(), io::ErrorKind::NotFound.into(),
+            &mut io::Cursor::new(input), &mut Vec::new()).err().unwrap();
+        assert!(error.to_string().contains("roots changed"));
+        assert!(!profiles.exists());
     }
 
     #[test]

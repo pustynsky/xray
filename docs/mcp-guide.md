@@ -118,6 +118,10 @@ For a setup shared by ordinary Copilot Chat, SDK Agent Host, and standalone
 Copilot CLI, use [personal MCP with workspace profiles](installation.md#personal-mcp-with-workspace-profiles).
 The native `serve-workspace` command selects per-repository settings without
 editing a tracked workspace MCP config or requiring a CLI wrapper.
+For an unregistered workspace it offers
+[first-use setup](installation.md#first-use-setup-for-an-unregistered-workspace)
+through `xray_setup`: propose extensions, ask the user for approval, confirm,
+then wait for `xray_info` to report ready indexes before retrying the request.
 The manual workspace registration below does not configure SDK Agent Host.
 
 1. **Install xray** (if not already):
@@ -647,6 +651,27 @@ Legacy `method + class` discovery remains supported. When it matches multiple C#
 `excludeFile` accepts literal, case-insensitive substrings with either `\` or
 `/`, including mixed separators in relative or absolute paths. This applies to
 both single-method and batch requests.
+
+### Rust macros and call-graph completeness
+
+Rust UP and DOWN queries use parser-emitted call-site evidence; a name inside a
+comment, string, variable, or `stringify!` payload is not a call edge. Recognized
+expression macros and Tokio `select!`, `join!`, and `try_join!` expose explicit
+calls, including nested async handlers, with original file line numbers. Macro
+expansion and arbitrary macro DSLs are not resolved.
+
+Unknown macros or unsupported payloads report `unexpanded_rust_macro`; bounded
+analysis reports `rust_call_analysis_limit`. Nested callable bodies that are not
+indexed separately report `unindexed_rust_nested_callable` rather than being
+attributed to their enclosing function. Affected single and batch queries
+return `status: "partial"`, `complete: false`, `totalKnown: false`, and
+`safeForExhaustiveClaims: false`, even when no edges were found. DOWN reports gaps
+in the traversed graph. UP also checks eligible indexed Rust callers, even when
+the target has no indexed definition, including callers that lack
+text postings for the target, since a macro may generate an unspelled call;
+`unresolvedCallSitesScope: "eligibleRustCallersAndTraversedGraph"` identifies
+that wider evidence scope. Extension/file exclusions and `productionOnly` apply
+to those callers. Reconnect after upgrading so old definition indexes rebuild.
 
 ### Impact analysis
 
