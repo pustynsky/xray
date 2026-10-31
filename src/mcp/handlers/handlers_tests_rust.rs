@@ -68,7 +68,8 @@ fn make_rs_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
 
 fn make_rs_macro_ctx(files: &[(&str, &str)]) -> (HandlerContext, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().to_string_lossy().to_string();
+    let canonical_root = std::fs::canonicalize(tmp.path()).unwrap();
+    let root = crate::clean_path(&canonical_root.to_string_lossy());
     let mut definitions = DefinitionIndex {
         root: root.clone(),
         extensions: vec!["rs".to_string()],
@@ -76,7 +77,7 @@ fn make_rs_macro_ctx(files: &[(&str, &str)]) -> (HandlerContext, tempfile::TempD
         ..Default::default()
     };
     for (name, source) in files {
-        let path = tmp.path().join(name);
+        let path = canonical_root.join(name);
         std::fs::write(&path, source).unwrap();
         update_file_definitions(&mut definitions, &path);
     }
