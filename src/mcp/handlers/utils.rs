@@ -1601,6 +1601,17 @@ fn build_analysis_context(ctx: &HandlerContext, allow_live_probe: bool) -> Value
 }
 
 
+pub(crate) fn tool_result_output(result: &ToolCallResult) -> Option<Value> {
+    let text = &result.content.first()?.text;
+    match serde_json::from_str::<Value>(text) {
+        Ok(output) => Some(output),
+        // Plain-text errors need an envelope for diagnostics; plain successes
+        // remain unchanged.
+        Err(_) if result.is_error => Some(json!({ "error": text, "summary": {} })),
+        Err(_) => None,
+    }
+}
+
 pub(crate) fn inject_response_guidance_with_args(
     result: ToolCallResult,
     tool_name: &str,
@@ -1609,21 +1620,9 @@ pub(crate) fn inject_response_guidance_with_args(
     invocation_args: Option<&Value>,
 ) -> ToolCallResult {
     let was_error = result.is_error;
-    let text = match result.content.first() {
-        Some(c) => c.text.clone(),
+    let mut output = match tool_result_output(&result) {
+        Some(output) => output,
         None => return result,
-    };
-
-    let mut output = match serde_json::from_str::<Value>(&text) {
-        Ok(v) => v,
-        // 2026-04-27: wrap plain-text errors into a JSON envelope so the rest of
-        // the response pipeline (guidance + metrics) can inject diagnostics. Before
-        // this, plain-text errors (e.g. xray_edit "File 'X': Text not found")
-        // skipped totalTimeMs/policyReminder, leaving callers unable to tell
-        // "server spent 5min on CPU" from "transport hang". Plain-text SUCCESS
-        // responses still pass through unchanged (no current tool emits them).
-        Err(_) if was_error => json!({ "error": text, "summary": {} }),
-        Err(_) => return result,
     };
 
     {
@@ -1631,6 +1630,9 @@ pub(crate) fn inject_response_guidance_with_args(
             return result;
         };
 
+        if tool_name == "xray_info" {
+            obj.insert("softwareUpdate".to_string(), ctx.updates.snapshot());
+        }
         if !obj.contains_key("summary") {
             obj.insert("summary".to_string(), json!({}));
         }
@@ -3840,4 +3842,3 @@ fn type_label(v: &Value) -> &'static str {
 #[cfg(test)]
 #[path = "utils_tests.rs"]
 mod tests;
-

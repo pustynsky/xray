@@ -12,6 +12,13 @@ cargo build --release
 
 Needs [Rust](https://rustup.rs/) 1.91+ (MSRV; see `rust-version` in [Cargo.toml](../Cargo.toml)). Binary: `target/release/xray.exe` (Windows) or `target/release/xray` (Linux/macOS). Pre-built releases are published for Windows x64 only, so Linux and macOS users build from source.
 
+The update-check HTTPS client uses native TLS. Linux builds also need OpenSSL
+development libraries and `pkg-config` (for example, `libssl-dev` and
+`pkg-config` on Ubuntu); the executable needs the corresponding OpenSSL runtime.
+Windows/macOS use their system TLS providers.
+Update-check regressions use local HTTP fixtures; no routine test downloads
+releases or executes an update script.
+
 ## Build with feature flags
 
 Tree-sitter language parsers are configurable via Cargo features. The SQL parser is always built in (regex-based, no tree-sitter dependency) and isn't feature-gated. Default features enable C#, TypeScript/TSX, Rust, and on-demand XML parsing:
@@ -79,6 +86,8 @@ Test files are split by language module to stay maintainable. See [Architecture]
 | [serde_json](https://crates.io/crates/serde_json) | JSON serialization for the MCP protocol |
 | [notify](https://crates.io/crates/notify) | Cross-platform filesystem notifications |
 | [dirs](https://crates.io/crates/dirs) | Platform-specific data directory paths |
+| [ureq](https://crates.io/crates/ureq) | Bounded background HTTPS release checks with native TLS |
+| [semver](https://crates.io/crates/semver) | Semantic release-version comparison |
 | [tree-sitter](https://crates.io/crates/tree-sitter) | Incremental parsing for code definition extraction (C#, TypeScript/TSX, Rust) |
 | [lz4_flex](https://crates.io/crates/lz4_flex) | LZ4 frame compression for index files on disk |
 | [mimalloc](https://crates.io/crates/mimalloc) | Memory allocator |
@@ -87,4 +96,3 @@ Test files are split by language module to stay maintainable. See [Architecture]
 | [ctrlc](https://crates.io/crates/ctrlc) | Graceful shutdown signal handling |
 | [criterion](https://crates.io/crates/criterion) | Statistical benchmarking (dev) |
 | [proptest](https://crates.io/crates/proptest) | Property-based testing (dev) |
-

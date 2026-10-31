@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 #[allow(clippy::disallowed_methods, reason = "Process-level cache tests need the public executable and native creation flags")]
 fn command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_xray"));
+    command.env("XRAY_CHECK_UPDATES", "0");
     command.stdin(Stdio::null());
     #[cfg(windows)]
     {

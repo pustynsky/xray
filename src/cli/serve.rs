@@ -412,6 +412,7 @@ fn build_context_with_index_dir(args: ServeArgs, idx_base: PathBuf) -> mcp::hand
         policy_reminder_state: Arc::new(
             crate::mcp::handlers::utils::PolicyReminderState::new(),
         ),
+        updates: crate::mcp::updates::Session::from_env(index_dir()),
     };
 
     if !is_unresolved && !ctx.content_ready.load(Ordering::Acquire) {

@@ -24,6 +24,7 @@ struct ServerState {
     pending_roots_request_id: Option<u64>,
     /// Next request ID for server-initiated requests.
     next_id: u64,
+    initialize_completed: bool,
 }
 
 impl ServerState {
@@ -33,6 +34,7 @@ impl ServerState {
             client_supports_roots_list_changed: false,
             pending_roots_request_id: None,
             next_id: 1,
+            initialize_completed: false,
         }
     }
 }
@@ -563,6 +565,7 @@ fn run_server_loop<R: BufRead, W: Write>(
                         debug!(method = %request.method, "Received notification");
                         // Handle initialized notification — trigger roots/list
                         if request.method == "notifications/initialized" {
+                            if state.initialize_completed { ctx.updates.start(); }
                             let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
                             let is_pinned = ws.mode == handlers::WorkspaceBindingMode::PinnedCli;
                             drop(ws);
@@ -662,6 +665,9 @@ fn run_server_loop<R: BufRead, W: Write>(
                     if let Err(e) = writer.flush() {
                         error!(error = %e, "Failed to flush stdout, shutting down");
                         break "error";
+                    }
+                    if request.method == "initialize" && response.get("result").is_some() {
+                        state.initialize_completed = true;
                     }
                 } else if raw.get("result").is_some() || raw.get("error").is_some() {
                     // Response to a server-initiated request. Wrap in
@@ -881,11 +887,15 @@ fn handle_request(
             crate::index::log_request(tool_name, &serde_json::to_string(&arguments).unwrap_or_default());
 
             let tool_start = std::time::Instant::now();
+            let notice_was_sent = ctx.updates.notice_sent.load(Ordering::Acquire);
             let result = handlers::dispatch_tool(ctx, tool_name, &arguments);
 
             // Log response (no-op when --debug-log not passed)
             let elapsed_ms = tool_start.elapsed().as_secs_f64() * 1000.0;
-            let result_json = safe_to_value(&result, &id);
+            let mut result_json = safe_to_value(&result, &id);
+            if !notice_was_sent && ctx.updates.notice_sent.load(Ordering::Acquire) {
+                super::updates::add_notice_meta(&mut result_json);
+            }
             let response_str = serde_json::to_string(&result_json).unwrap_or_default();
             let response_bytes = response_str.len();
             crate::index::log_response(tool_name, elapsed_ms, response_bytes, &response_str);

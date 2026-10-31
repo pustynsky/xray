@@ -41,7 +41,7 @@ impl Configuration {
     fn includes_environment(key: &str) -> bool {
         // Credential prompt controls belong to the MCP host, not the local indexes.
         (key.starts_with("XRAY_") || key.starts_with("GIT_"))
-            && !matches!(key, "GIT_ASKPASS" | "GIT_TERMINAL_PROMPT")
+            && !matches!(key, "GIT_ASKPASS" | "GIT_TERMINAL_PROMPT" | "XRAY_CHECK_UPDATES" | "XRAY_UPDATE_REPOSITORY")
     }
 
     fn capture(args: &ServeArgs) -> io::Result<Self> {
@@ -89,6 +89,8 @@ impl Configuration {
 struct Hello {
     protocol: u32,
     configuration: Configuration,
+    #[serde(default)]
+    updates: crate::mcp::updates::Settings,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -240,6 +242,7 @@ fn normalize(args: &mut ServeArgs) -> io::Result<()> {
 pub(super) struct InitializedSession {
     pub initialize: String,
     pub buffered: Vec<u8>,
+    pub updates: crate::mcp::updates::Session,
 }
 
 pub(super) fn run(args: ServeArgs) -> io::Result<()> {
@@ -375,7 +378,10 @@ fn try_connect(workspace: &Workspace, configuration: &Configuration) -> io::Resu
     };
     platform::verify_peer(&stream)?;
     let handshake = (|| {
-        send_frame(&mut stream, &Hello { protocol: PROTOCOL, configuration: Configuration(configuration.0.clone()) })?;
+        send_frame(&mut stream, &Hello {
+            protocol: PROTOCOL, configuration: Configuration(configuration.0.clone()),
+            updates: crate::mcp::updates::Settings::from_env(),
+        })?;
         receive_frame::<Welcome>(&mut stream)
     })();
     let welcome = match handshake {
@@ -529,7 +535,9 @@ fn serve_connection(
     stream.set_nonblocking(false)?;
     let mut reader = BufReader::new(ClientInput::new(&stream));
     let mut writer = &stream;
-    server::run_shared_session(ctx.clone(), &mut reader, &mut writer, gate);
+    let mut session_ctx = ctx.clone();
+    session_ctx.updates = crate::mcp::updates::Session::new(hello.updates, ctx.index_base.clone());
+    server::run_shared_session(session_ctx, &mut reader, &mut writer, gate);
     Ok(())
 }
 
@@ -786,8 +794,8 @@ mod tests {
     }
 
     #[test]
-    fn shared_configuration_excludes_only_git_prompt_controls() {
-        for key in ["GIT_ASKPASS", "GIT_TERMINAL_PROMPT", "VSCODE_GIT_ASKPASS_NODE", "SSH_ASKPASS", "PATH"] {
+    fn shared_configuration_excludes_host_prompt_and_update_controls() {
+        for key in ["GIT_ASKPASS", "GIT_TERMINAL_PROMPT", "XRAY_CHECK_UPDATES", "XRAY_UPDATE_REPOSITORY", "VSCODE_GIT_ASKPASS_NODE", "SSH_ASKPASS", "PATH"] {
             assert!(!Configuration::includes_environment(key), "{key}");
         }
         for key in [
