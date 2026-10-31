@@ -142,6 +142,7 @@ fn command_with_watch(root: &Path, ext: &str, watch: bool) -> Command {
     command.args(["serve", "--dir"]).arg(root)
         .args(["--ext", ext, "--definitions", "--debounce-ms", "20", "--no-periodic-rescan"])
         .env("XRAY_BACKEND_IDLE_SECONDS", "1")
+        .env("XRAY_CHECK_UPDATES", "0")
         .env("XRAY_GUIDANCE_PREFIX", "0")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if watch { command.arg("--watch"); }
@@ -295,6 +296,23 @@ impl Drop for Client {
             if let Err(error) = self.child.wait() { eprintln!("Proxy wait failed: {error}"); }
         }
     }
+}
+
+#[test]
+fn configured_update_source_is_preserved_without_install_tools_in_private_and_shared_servers() {
+    let workspace = Workspace::new("configured_update_source_marker");
+    for shared in [false, true] {
+        let mut cmd = command(workspace.path(), "rs");
+        if !shared { cmd.arg("--standalone"); }
+        cmd.env("XRAY_UPDATE_REPOSITORY", "future-owner/future-repo");
+        let mut client = Client::attach_with_backend(cmd.spawn().unwrap(), shared);
+        let info = Client::payload(&client.call("xray_info", json!({})));
+        assert_eq!(info["softwareUpdate"]["status"], "disabled", "{info}");
+        assert_eq!(info["softwareUpdate"]["repository"], "future-owner/future-repo", "{info}");
+        assert!(info["softwareUpdate"].get("installation").is_none(), "{info}");
+        client.close();
+    }
+    workspace.wait_for_shutdown();
 }
 
 #[test]
@@ -496,11 +514,89 @@ fn shared_backend_isolates_workspaces_and_checks_configuration() {
     second.wait_for_shutdown();
 }
 
+#[test]
+fn update_policy_is_per_client_without_splitting_the_shared_backend() {
+    let workspace = Workspace::new("update_policy_shared");
+    let mut disabled = Client::start(workspace.path());
+    let body = Client::payload(&disabled.call("xray_info", json!({})));
+    assert_eq!(body["softwareUpdate"]["status"], "disabled");
+
+    let mut invalid_command = command(workspace.path(), "rs");
+    invalid_command.env("XRAY_CHECK_UPDATES", "invalid");
+    let mut invalid = Client::start_command(invalid_command);
+    assert_eq!(invalid.backend_pid, disabled.backend_pid);
+    let body = Client::payload(&invalid.call("xray_info", json!({})));
+    assert_eq!(body["softwareUpdate"]["status"], "check_failed");
+    assert_eq!(body["softwareUpdate"]["error"], "invalid_configuration");
+    assert_eq!(body["softwareUpdate"]["automaticInstall"], false);
+    disabled.request(9, "ping", json!({}));
+    invalid.request(9, "ping", json!({}));
+}
+
+#[test]
+fn private_server_reports_disabled_update_checks() {
+    let workspace = Workspace::new("update_policy_private");
+    let mut command = command(workspace.path(), "rs");
+    command.arg("--standalone");
+    let mut client = Client::attach_with_backend(command.spawn().unwrap(), false);
+    let body = Client::payload(&client.call("xray_info", json!({})));
+    assert_eq!(body["softwareUpdate"]["status"], "disabled");
+    assert_eq!(body["softwareUpdate"]["currentVersion"], env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn unconfigured_workspace_reports_update_policy_without_creating_a_profile() {
+    let profiles = tempfile::tempdir().unwrap();
+    let host = tempfile::tempdir().unwrap();
+    let workspace = Workspace::new("update_policy_bootstrap");
+    let mut command = workspace_profile_command(profiles.path(), host.path());
+    command.env("XRAY_CHECK_UPDATES", "invalid");
+    let mut client = Client::attach_uninitialized(command.spawn().unwrap());
+    client.request(1, "initialize", json!({"capabilities":{"roots":{}}}));
+    client.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    let roots = client.replies.recv_timeout(WAIT).unwrap();
+    assert_eq!(roots["method"], "roots/list");
+    client.send(json!({"jsonrpc":"2.0","id":roots["id"],"result":{"roots":[{
+        "uri":url::Url::from_directory_path(workspace.path()).unwrap().as_str(),
+    }]}}));
+    let result = client.call("xray_info", json!({}));
+    assert_eq!(result["isError"], true);
+    let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(body["error"], "XRAY_SETUP_REQUIRED");
+    assert_eq!(body["softwareUpdate"]["status"], "check_failed");
+    assert_eq!(body["softwareUpdate"]["error"], "invalid_configuration");
+    assert_eq!(fs::read_dir(profiles.path()).unwrap().count(), 0);
+    client.request(9, "ping", json!({}));
+}
+
+#[test]
+fn empty_workspace_info_scan_error_does_not_terminate_the_setup_session() {
+    let profiles = tempfile::tempdir().unwrap();
+    let host = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut command = workspace_profile_command(profiles.path(), host.path());
+    let mut client = Client::attach_uninitialized(command.spawn().unwrap());
+    client.request(1, "initialize", json!({"capabilities":{"roots":{}}}));
+    client.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    let roots = client.replies.recv_timeout(WAIT).unwrap();
+    client.send(json!({"jsonrpc":"2.0","id":roots["id"],"result":{"roots":[{
+        "uri":url::Url::from_directory_path(workspace.path()).unwrap().as_str(),
+    }]}}));
+    let result = client.call("xray_info", json!({}));
+    assert_eq!(result["isError"], true);
+    let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(body["error"].as_str().unwrap().contains("No recognized"));
+    assert_eq!(body["softwareUpdate"]["status"], "disabled");
+    client.request(9, "ping", json!({}));
+    assert_eq!(fs::read_dir(profiles.path()).unwrap().count(), 0);
+}
+
 fn workspace_profile_command(profiles: &Path, cwd: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_xray"));
     command.args(["serve-workspace", "--profiles"]).arg(profiles)
         .current_dir(cwd)
         .env("XRAY_BACKEND_IDLE_SECONDS", "1")
+        .env("XRAY_CHECK_UPDATES", "0")
         .env("XRAY_GUIDANCE_PREFIX", "0")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     command

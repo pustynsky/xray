@@ -13,6 +13,9 @@ pub(crate) mod token_regex;
 pub(crate) use grep::{start_warm_trigram_index, warm_trigram_index};
 pub(crate) mod utils;
 mod body_delivery;
+pub(crate) use body_delivery::transport_limit as response_transport_limit;
+#[cfg(test)]
+pub(crate) use body_delivery::with_transport_limit;
 #[cfg(feature = "lang-xml")]
 mod xml_on_demand;
 
@@ -1099,6 +1102,7 @@ pub struct HandlerContext {
     pub policy_reminder_mode: utils::PolicyReminderMode,
     /// Shared cadence state for the adaptive policy reminder.
     pub policy_reminder_state: Arc<utils::PolicyReminderState>,
+    pub(crate) updates: crate::mcp::updates::Session,
 }
 
 impl HandlerContext {
@@ -1154,6 +1158,7 @@ impl Default for HandlerContext {
             autosave_dirty: Arc::new(AtomicBool::new(false)),
             policy_reminder_mode: utils::policy_reminder_mode(),
             policy_reminder_state: Arc::new(utils::PolicyReminderState::new()),
+            updates: crate::mcp::updates::Session::default(),
         }
     }
 }
@@ -1466,7 +1471,7 @@ fn finalize_response(
     if transport_limit.is_some_and(|limit| result.content.iter().map(|content| content.text.len()).sum::<usize>() > limit) {
         body_delivery::budget_error()
     } else {
-        result
+        ctx.updates.attach_notice(result, effective_max)
     }
 }
 

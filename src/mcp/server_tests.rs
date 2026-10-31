@@ -43,6 +43,7 @@ fn workspace_completion_case(tool: &str, roots_response: bool, explicit_dir: boo
         let mut state = ServerState {
             pending_roots_request_id: Some(17), client_supports_roots: true,
             client_supports_roots_list_changed: true, next_id: 18,
+            initialize_completed: true,
         };
         let root_path = if root_alias {
             let alias = tmp.path().join("root alias");
@@ -91,6 +92,7 @@ fn workspace_completion_case(tool: &str, roots_response: bool, explicit_dir: boo
         let mut state = ServerState {
             pending_roots_request_id: Some(19), client_supports_roots: true,
             client_supports_roots_list_changed: true, next_id: 20,
+            initialize_completed: true,
         };
         let uri = url::Url::from_file_path(tmp.path().join("root alias")).unwrap();
         handle_pending_response(&json!({

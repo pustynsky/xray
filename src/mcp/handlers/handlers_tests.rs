@@ -115,6 +115,7 @@ fn test_handler_context_field_count_guard() {
         policy_reminder_state: Arc::new(
             crate::mcp::handlers::utils::PolicyReminderState::new(),
         ),
+        updates: crate::mcp::updates::Session::default(),
     };
     drop(_guard);
 }

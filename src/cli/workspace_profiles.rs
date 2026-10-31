@@ -102,10 +102,11 @@ fn bootstrap(
     result.instructions = None;
     result.capabilities.tools.list_changed = true;
     send_message(writer, json!({"jsonrpc": "2.0", "id": request["id"], "result": result}))?;
+    let updates = crate::mcp::updates::Session::from_env(crate::index_dir());
     let mut buffered = Vec::new();
     loop {
         let (line, value) = read_message(reader, &mut remaining)?;
-        if value["method"] == "notifications/initialized" { break; }
+        if value["method"] == "notifications/initialized" { updates.start(); break; }
         if value["method"] == "ping" && value.get("id").is_some() {
             send_message(writer, json!({"jsonrpc": "2.0", "id": value["id"], "result": {}}))?;
         } else {
@@ -113,7 +114,7 @@ fn bootstrap(
         }
     }
     if let Some(root) = cwd_root {
-        return select_or_onboard(profiles, &root, InitializedSession { initialize, buffered }, reader, writer);
+        return select_or_onboard(profiles, &root, InitializedSession { initialize, buffered, updates }, reader, writer);
     }
     send_message(writer, json!({"jsonrpc": "2.0", "id": ROOTS_REQUEST_ID, "method": "roots/list", "params": {}}))?;
     loop {
@@ -132,7 +133,7 @@ fn bootstrap(
         }
         let path = roots[0]["uri"].as_str().and_then(crate::mcp::server::uri_to_path)
             .ok_or_else(|| invalid("MCP workspace root must be a valid file URI"))?;
-        return select_or_onboard(profiles, Path::new(&path), InitializedSession { initialize, buffered }, reader, writer);
+        return select_or_onboard(profiles, Path::new(&path), InitializedSession { initialize, buffered, updates }, reader, writer);
     }
 }
 
@@ -205,7 +206,7 @@ fn select_or_onboard(
                 })();
                 match outcome {
                     Ok((result, Some(serve))) => {
-                        send_message(writer, json!({"jsonrpc":"2.0","id":id,"result":result}))?;
+                        send_setup_tool_result(writer, id, result, &session.updates, &request)?;
                         send_message(writer, json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"}))?;
                         session.buffered = queued.into_iter().flat_map(|(line, _)| line.into_bytes()).collect();
                         return Ok(Some((serve, session)));
@@ -222,8 +223,45 @@ fn select_or_onboard(
                 continue;
             }
         };
-        send_message(writer, json!({"jsonrpc":"2.0","id":id,"result":result}))?;
+        if request["method"] == "tools/call" {
+            send_setup_tool_result(writer, id, result, &session.updates, &request)?;
+        } else {
+            send_message(writer, json!({"jsonrpc":"2.0","id":id,"result":result}))?;
+        }
     }
+}
+
+fn send_setup_tool_result(
+    writer: &mut impl Write, id: &Value, result: Value,
+    updates: &crate::mcp::updates::Session, request: &Value,
+) -> io::Result<()> {
+    let mut result: crate::mcp::protocol::ToolCallResult = serde_json::from_value(result)?;
+    if request.pointer("/params/name").and_then(Value::as_str) == Some("xray_info")
+        && let Some(mut body) = crate::mcp::handlers::utils::tool_result_output(&result)
+        && body.is_object()
+        && let Some(content) = result.content.first_mut() {
+        body["softwareUpdate"] = updates.snapshot();
+        content.text = body.to_string();
+    }
+    let notice_was_sent = updates.notice_sent.load(std::sync::atomic::Ordering::Acquire);
+    let result = match crate::mcp::handlers::response_transport_limit() {
+        Ok(limit) => {
+            let budget = limit.map(|limit| limit.min(crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES))
+                .unwrap_or(crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES);
+            let result = crate::mcp::handlers::utils::truncate_response_if_needed(result, budget);
+            updates.attach_notice(result, budget)
+        }
+        Err(_) => {
+            tracing::warn!("Xray setup update notice omitted: invalid XRAY_TRANSPORT_MAX_BYTES");
+            result
+        }
+    };
+    let mut result = serde_json::to_value(result)?;
+    let notice_sent = !notice_was_sent && updates.notice_sent.load(std::sync::atomic::Ordering::Acquire);
+    if notice_sent { crate::mcp::updates::add_notice_meta(&mut result); }
+    send_message(writer, json!({"jsonrpc":"2.0","id":id,"result":result}))?;
+    if notice_sent { crate::mcp::updates::mark_frontend_notice(); }
+    Ok(())
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -326,6 +364,48 @@ mod tests {
             "version": 1, "workspaceRoot": root, "args": args,
         })).unwrap()).unwrap();
         file
+    }
+
+    #[test]
+    fn workspace_profile_update_notice_obeys_transport_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let checked_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        fs::write(temp.path().join("update-check.json"), serde_json::to_vec(&json!({
+            "schema_version":2, "checked_at":checked_at,
+            "outcome":{"status":"available","release":{"tag":"v999.0.0","version":"999.0.0","windows_download":false}}
+        })).unwrap()).unwrap();
+        let updates = crate::mcp::updates::Session::new(
+            crate::mcp::updates::Settings { policy: crate::mcp::updates::Policy::Enabled, notice_sent: false, ..Default::default() },
+            temp.path().to_path_buf(),
+        );
+        updates.start();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while updates.snapshot()["status"] == "checking" && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(updates.snapshot()["status"], "update_available");
+        let result = serde_json::to_value(crate::mcp::protocol::ToolCallResult::success(
+            json!({"status":"proposal","padding":"x".repeat(300)}).to_string(),
+        )).unwrap();
+        let request = json!({"params":{"name":"xray_setup"}});
+        let mut output = Vec::new();
+        crate::mcp::handlers::with_transport_limit(512, || {
+            send_setup_tool_result(&mut output, &json!(1), result.clone(), &updates, &request).unwrap();
+        });
+        let reply: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(reply["result"]["content"].as_array().unwrap().len(), 1);
+        assert!(reply["result"]["content"][0]["text"].as_str().unwrap().len() <= 512);
+        assert!(!updates.notice_sent.load(std::sync::atomic::Ordering::Acquire));
+        output.clear();
+        crate::mcp::handlers::with_transport_limit(1024, || {
+            send_setup_tool_result(&mut output, &json!(2), result, &updates, &request).unwrap();
+        });
+        let reply: Value = serde_json::from_slice(&output).unwrap();
+        let bytes: usize = reply["result"]["content"].as_array().unwrap().iter()
+            .map(|content| content["text"].as_str().unwrap().len()).sum();
+        assert!(bytes <= 1024);
+        assert_eq!(reply["result"]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(reply["result"]["_meta"]["xray/updateNotice"], true);
     }
 
     #[test]

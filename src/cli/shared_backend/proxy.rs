@@ -205,6 +205,9 @@ pub(super) fn run(mut stream: Stream, args: &ServeArgs, workspace: &Workspace, c
                 match result {
                     Ok(Some(line)) => {
                         write_output(&mut writer, &line)?;
+                        if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                            crate::mcp::updates::mark_wire_notice(&value);
+                        }
                         if let Ok(value) = serde_json::from_str::<Value>(&line)
                             && value.get("method").is_none()
                             && pending.as_ref().is_some_and(|request| value.get("id") == Some(&request.id)) {

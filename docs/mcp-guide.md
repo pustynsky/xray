@@ -1357,6 +1357,83 @@ Search pre-built file name index for instant file lookup (~35ms vs ~3s for live 
 
 Shows all existing indexes with their status, sizes, age, and memory usage. Pass `file=["path", ...]` for per-file metadata without file content.
 
+### Software update checks
+
+`softwareUpdate` also appears in ordinary and per-file `xray_info` responses,
+including setup-required responses before a workspace profile exists:
+
+| Field | Description |
+|-------|-------------|
+| `status` | `disabled`, `checking`, `up_to_date`, `update_available`, or `check_failed` |
+| `currentVersion` | Version of the running MCP executable |
+| `latestVersion` / `releaseUrl` | Validated stable release and its trusted GitHub page, when known |
+| `downloadUrl` | Trusted `xray.exe` asset link, only on Windows when that asset exists |
+| `updateScriptUrl` | Manual PowerShell update script from the validated release tag, on Windows when the executable asset exists |
+| `error` | Sanitized failure code; a failed check is not "up to date" |
+| `automaticInstall` | Always `false` |
+| `repository` | Configured GitHub `owner/repo` release source |
+
+Checks start in a background thread only after a successful initialize response
+and `notifications/initialized`. They never wait for networking in the handshake
+or a tool call. Successful results are cached for 24 hours across repositories
+and MCP processes in the local Xray data directory (`%LOCALAPPDATA%\xray` on
+Windows), using `update-check.json` and an OS-locked `update-check.lock`.
+Failures are cached for one hour. A new initialized connection refreshes expired
+results; this is not a periodic polling service.
+
+When a newer release is known, a tool response includes an additional text
+content block with a link to the manual update script (or the release page on
+other platforms). The script link uses the validated release tag, not an
+untrusted upstream URL or a mutable default-branch name.
+This happens at most once per MCP session, including workspace-setup handoff and
+shared-backend recovery. If the response budget cannot fit the hint, it waits
+for a later response. The MCP host decides whether/how to present the suggestion;
+Xray cannot open a guaranteed user dialog.
+
+Set `XRAY_CHECK_UPDATES=0` in the MCP server's environment to opt out of automatic checks. The default
+is enabled; `1` explicitly enables it. Other values disable networking and
+report `check_failed` / `invalid_configuration` with a diagnostic.
+Disabled sessions do not read or write the update cache.
+
+The anonymous request goes only to
+`https://api.github.com/repos/<owner>/<repo>/releases/latest`, with a five-second
+HTTP deadline, system TLS certificate validation, no redirects, a 16 KiB header
+limit, and a 1 MiB body limit. It sends the Xray version and ordinary HTTP
+connection information, not repository paths, source code, Git settings, or
+GitHub tokens. Release notes and arbitrary upstream URLs are not relayed to the
+agent. Offline checks never block indexing/search and report `check_failed`.
+
+Set `"XRAY_UPDATE_REPOSITORY": "owner/repo"` in the MCP registration's `env` to
+change the source (default `pustynsky/xray`). Review and trust that repository's
+code before manually running its script. Only GitHub repositories
+are supported, not arbitrary API URLs. Invalid settings fail explicitly without
+falling back to another source. Caches are isolated by source; source/policy
+changes do not invalidate workspace indexes. Reconnect after changing settings.
+
+### Manual updating
+
+The MCP server **only checks versions and offers links**. It never downloads
+updates, runs PowerShell, stops sessions, or replaces executables. There is no
+MCP installation/confirmation tool.
+
+On Windows, review and download `updateScriptUrl`, then run the existing script
+yourself:
+
+```powershell
+.\setup-xray.ps1 -UpdateOnly -GithubRepo 'pustynsky/xray'
+```
+
+Use the configured `repository` value instead of `pustynsky/xray` for another
+source. For a non-default installation, add `-InstallDir '<directory containing
+the MCP executable>'`. `-UpdateOnly` changes only the binary, not workspace
+profiles or MCP configuration. The script can stop Xray MCP processes while
+replacing an in-use binary; Copilot chats are not stopped. Reconnect affected
+MCP servers afterward. See the [update procedure](installation.md#5-updating-to-a-new-version).
+
+Manual execution still follows your organization's Defender/ASR policy;
+offering a link does not guarantee that policy permits the script or executable.
+Linux/macOS receive a release-page link and continue building from source.
+
 ### Response fields (per index entry)
 
 | Field | Description |

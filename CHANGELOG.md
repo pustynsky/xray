@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.10.0 (2026-10-31)
+
+- **Suggest MCP updates without delaying initialization.** Background anonymous
+  HTTPS checks use a shared daily stable-release cache and a one-hour failure
+  cooldown. `xray_info.softwareUpdate` reports disabled, checking, up-to-date,
+  available, or failed checks. A bounded one-time tool-response hint offers a
+  trusted release link and a version-pinned manual Windows update-script link,
+  including during first-use workspace setup. The MCP server never downloads
+  updates, runs scripts, or replaces executables. `XRAY_CHECK_UPDATES=0` disables
+  checking; `XRAY_UPDATE_REPOSITORY=owner/repo` configures the release source.
+
 ## 0.9.6 (2026-10-31)
 
 - **Find Rust calls inside Tokio select and expression macros.** Explicit futures,

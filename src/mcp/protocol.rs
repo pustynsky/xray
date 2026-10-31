@@ -86,14 +86,14 @@ pub struct ToolDefinition {
 
 /// MCP tool call result content
 #[must_use]
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ToolCallResult {
     pub content: Vec<ToolContent>,
-    #[serde(rename = "isError", skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, rename = "isError", skip_serializing_if = "std::ops::Not::not")]
     pub is_error: bool,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ToolContent {
     #[serde(rename = "type")]
     pub content_type: String,

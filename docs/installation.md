@@ -1069,6 +1069,26 @@ If it returns ranked file paths with line numbers and scores in < 1 sec, you're 
 
 ## 5. Updating to a new version
 
+The MCP server can [check for new stable releases in the background](mcp-guide.md#software-update-checks)
+and suggest a trusted manual update-script link once per session. Check
+`xray_info.softwareUpdate` for the result and `updateScriptUrl` for the script.
+The MCP server does not download updates, execute scripts, or replace binaries.
+Review and download the script yourself, then run it with `-UpdateOnly` and
+`-GithubRepo owner/repo`. For custom installations, also supply `-InstallDir`
+pointing to the directory containing the Xray executable used by MCP.
+Updating may stop Xray MCP connections; reconnect afterward. Copilot chats are
+not stopped. To disable checks, add
+`"XRAY_CHECK_UPDATES": "0"` to the Xray MCP registration's `env` object and
+reconnect the MCP server.
+
+Set `"XRAY_UPDATE_REPOSITORY": "owner/repo"` in the same `env` object to change
+the GitHub release source used by MCP checks and links. This setting is
+independent of the installer's `-GithubRepo`, which selects its download source
+and does not set the MCP update source. When changing repositories, set the MCP
+environment value and pass the same repository to the manual update script.
+`-UpdateOnly` does not rewrite MCP registrations. Manual execution remains subject to your
+organization's Defender/ASR policy; the link is not a security-policy bypass.
+
 Use `-UpdateOnly` to replace only the executable without prompts. To change
 workspace settings as well, repeat setup in the mode you already use, or
 explicitly migrate from workspace mode to personal mode:

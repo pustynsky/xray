@@ -21,6 +21,7 @@ impl Server {
             .args(["serve", "--standalone", "--dir"]).arg(root).args(["--ext", "rs", "--definitions"])
             .current_dir(root)
             .env("XRAY_TRANSPORT_MAX_BYTES", limit)
+            .env("XRAY_CHECK_UPDATES", "0")
             .env("XRAY_GUIDANCE_PREFIX", "1")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
             .spawn().unwrap();
