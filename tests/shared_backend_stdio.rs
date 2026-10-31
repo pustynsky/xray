@@ -616,6 +616,141 @@ fn workspace_profiles_reuse_explicit_serve_backend_and_reject_unknown_cwd() {
 }
 
 #[test]
+fn workspace_profiles_onboarding_requires_confirmation_and_reuses_backend() {
+    let profiles = tempfile::tempdir().unwrap();
+    let host = tempfile::tempdir().unwrap();
+    let workspace = Workspace::new("onboarding_marker");
+    for index in 0..4 {
+        fs::write(workspace.path().join(format!("source{index}.rs")), "pub fn source() {}\n").unwrap();
+    }
+    fs::write(workspace.path().join("README.md"), "onboarding docs\n").unwrap();
+    fs::create_dir(workspace.path().join("target")).unwrap();
+    fs::write(workspace.path().join("target/generated.ts"), "ignored\n").unwrap();
+    let mut command = workspace_profile_command(profiles.path(), host.path());
+    let mut client = Client::attach_uninitialized(command.spawn().unwrap());
+    client.send(json!({"jsonrpc": "2.0", "id": "discover", "method": "server/discover", "params": {}}));
+    let discovery = client.replies.recv_timeout(WAIT).unwrap();
+    assert_eq!(discovery["id"], "discover");
+    assert_eq!(discovery["error"]["code"], -32601);
+    client.request(0, "ping", json!({}));
+    client.request(1, "initialize", json!({"capabilities": {"roots": {}}}));
+    client.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    let roots = client.replies.recv_timeout(WAIT).unwrap();
+    assert_eq!(roots["method"], "roots/list");
+    client.send(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}));
+    client.send(json!({"jsonrpc": "2.0", "id": roots["id"], "result": {"roots": [{
+        "uri": url::Url::from_directory_path(workspace.path()).unwrap().as_str(),
+    }]}}));
+    let tools = client.response(3);
+    assert!(tools["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "xray_setup"));
+    assert_eq!(fs::read_dir(profiles.path()).unwrap().count(), 0);
+    assert!(workspace.owner_released());
+    let blocked = client.call("xray_grep", json!({"terms": ["onboarding_marker"]}));
+    assert_eq!(blocked["isError"], true);
+    let proposal: Value = serde_json::from_str(blocked["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(proposal["error"], "XRAY_SETUP_REQUIRED");
+    fs::write(workspace.path().join("between-calls.ts"), "").unwrap();
+    let again = client.call("xray_info", json!({}));
+    assert_eq!(again["isError"], true);
+    let cached: Value = serde_json::from_str(again["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(cached["proposalId"], proposal["proposalId"]);
+    assert!(cached["detectedExtensions"].get("ts").is_none());
+    fs::remove_file(workspace.path().join("between-calls.ts")).unwrap();
+    let proposed = Client::payload(&client.call("xray_setup", json!({})));
+    assert_eq!(proposed["status"], "confirmation_required");
+    assert_eq!(proposed["suggestedExtensions"], json!(["md", "rs"]));
+    assert_eq!(proposed["detectedExtensions"]["rs"], 5);
+    assert!(proposed["detectedExtensions"].get("ts").is_none());
+    let missing_consent = client.call("xray_setup", json!({"confirm": true}));
+    assert_eq!(missing_consent["isError"], true);
+    let invalid_extensions = client.call("xray_setup", json!({
+        "confirm": true, "proposalId": proposed["proposalId"], "extensions": ["exe"],
+    }));
+    assert_eq!(invalid_extensions["isError"], true);
+    assert_eq!(fs::read_dir(profiles.path()).unwrap().count(), 0);
+    let configured = Client::payload(&client.call("xray_setup", json!({
+        "confirm": true, "proposalId": proposed["proposalId"],
+    })));
+    assert_eq!(configured["status"], "indexing");
+    assert!(configured["hint"].as_str().unwrap().contains("xray_info"));
+    let changed = client.replies.recv_timeout(WAIT).unwrap();
+    assert_eq!(changed["method"], "notifications/tools/list_changed");
+    client.backend_pid = client.backend_pids.recv_timeout(WAIT).unwrap();
+    let mut second = Client::start_command(workspace_profile_command(profiles.path(), workspace.path()));
+    assert_eq!(client.backend_pid, second.backend_pid);
+    client.wait_for_marker("onboarding_marker");
+    let start = Instant::now();
+    loop {
+        let info = Client::payload(&client.call("xray_info", json!({})));
+        if info["indexes"].as_array().unwrap().iter().all(|entry| entry.get("status").is_none()) { break; }
+        assert!(start.elapsed() < WAIT, "onboarding indexes did not become ready: {info}");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let definitions = Client::payload(&client.call("xray_definitions", json!({
+        "name": ["onboarding_marker"], "file": ["sample.rs"],
+    })));
+    assert_eq!(definitions["definitions"][0]["name"], "onboarding_marker");
+    let tools = client.request(8, "tools/list", json!({}));
+    assert!(!tools["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "xray_setup"));
+    client.close();
+    second.close();
+    workspace.wait_for_shutdown();
+}
+
+#[test]
+fn workspace_profiles_onboarding_from_git_cwd_can_be_declined_without_writes() {
+    let profiles = tempfile::tempdir().unwrap();
+    let workspace = Workspace::new("onboarding_cwd_marker");
+    fs::write(workspace.path().join("README.md"), "docs\n").unwrap();
+    assert!(Command::new("git").args(["init", "--quiet"]).arg(workspace.path()).status().unwrap().success());
+    let nested = workspace.path().join("nested");
+    fs::create_dir(&nested).unwrap();
+    let mut command = workspace_profile_command(profiles.path(), &nested);
+    let mut client = Client::attach_uninitialized(command.spawn().unwrap());
+    client.request(1, "initialize", json!({"capabilities": {}}));
+    client.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    let proposed = Client::payload(&client.call("xray_setup", json!({"confirm": false})));
+    assert_eq!(proposed["status"], "confirmation_required");
+    assert_eq!(fs::canonicalize(proposed["workspaceRoot"].as_str().unwrap()).unwrap(),
+        fs::canonicalize(workspace.path()).unwrap());
+    assert_eq!(proposed["detectedExtensions"]["rs"], 1);
+    let invalid = client.call("xray_setup", json!({"confirm": "true", "proposalId": proposed["proposalId"]}));
+    assert_eq!(invalid["isError"], true);
+    client.request(5, "ping", json!({}));
+    assert_eq!(fs::read_dir(profiles.path()).unwrap().count(), 0);
+    assert!(workspace.owner_released());
+    client.close();
+    assert!(!client.stderr.lock().unwrap().contains("connected to workspace backend"));
+}
+
+#[test]
+fn workspace_profiles_onboarding_confirms_and_hands_off_from_git_cwd() {
+    let profiles = tempfile::tempdir().unwrap();
+    let workspace = Workspace::new("onboarding_confirmed_cwd");
+    fs::write(workspace.path().join("README.md"), "docs\n").unwrap();
+    assert!(Command::new("git").args(["init", "--quiet"]).arg(workspace.path()).status().unwrap().success());
+    let nested = workspace.path().join("nested");
+    fs::create_dir(&nested).unwrap();
+    let mut command = workspace_profile_command(profiles.path(), &nested);
+    let mut client = Client::attach_uninitialized(command.spawn().unwrap());
+    client.request(1, "initialize", json!({"capabilities": {}}));
+    client.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    let proposed = Client::payload(&client.call("xray_setup", json!({})));
+    let configured = Client::payload(&client.call("xray_setup", json!({
+        "confirm": true, "proposalId": proposed["proposalId"], "extensions": ["md", "rs"],
+    })));
+    assert_eq!(configured["status"], "indexing");
+    assert_eq!(client.replies.recv_timeout(WAIT).unwrap()["method"], "notifications/tools/list_changed");
+    client.backend_pid = client.backend_pids.recv_timeout(WAIT).unwrap();
+    let mut second = Client::start_command(workspace_profile_command(profiles.path(), workspace.path()));
+    assert_eq!(client.backend_pid, second.backend_pid);
+    client.wait_for_marker("onboarding_confirmed_cwd");
+    client.close();
+    second.close();
+    workspace.wait_for_shutdown();
+}
+
+#[test]
 fn workspace_profiles_client_roots_from_unrelated_host_share_the_correct_backend() {
     let profiles = tempfile::tempdir().unwrap();
     let host = tempfile::tempdir().unwrap();

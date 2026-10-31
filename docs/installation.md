@@ -279,7 +279,9 @@ checks that command before writing a profile or personal MCP registration.
 An older release binary is rejected explicitly; a newer installer alone is
 not enough.
 
-Run once for each workspace, using the same installation directory:
+Run once to register Xray with your clients. You can configure additional
+workspaces with the installer, using the same installation directory, or use
+the [first-use setup](#first-use-setup-for-an-unregistered-workspace) below:
 
 ```powershell
 .\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -UserMcp
@@ -361,12 +363,13 @@ Personal registrations contain no `cwd` or unresolved workspace variables, so
 VS Code can forward them to the Copilot harness. CLI/SDK sessions launch MCP
 in their session working directory. If no profile matches the launch directory,
 Xray asks clients advertising MCP roots for `roots/list` after initialization.
-Exactly one file root is required; it must select an installed profile. This
+Exactly one file root is required. It selects an installed profile or offers
+first-use setup for an unregistered workspace. This
 also supports ordinary VS Code launching a user MCP server from the home
 directory. No backend or indexes start before workspace selection.
 Launching from a workspace subdirectory selects the same profile.
-Unknown workspaces, multiple roots during discovery, duplicate canonical
-roots, malformed profiles, or invalid arguments fail explicitly. Xray does not
+Multiple roots during discovery, duplicate canonical roots, malformed profiles,
+or invalid arguments fail explicitly. Xray does not
 fall back to indexing an arbitrary host directory. Profiles cannot override
 `--dir`, select `--standalone`, or run an internal backend directly.
 
@@ -375,6 +378,63 @@ Compatible sessions share indexes and a watcher, but keep separate MCP proxies.
 Three active workspaces with five sessions each use 15 proxies and 3 backends.
 Different workspace profiles may use different extensions and settings.
 Configuration conflicts within one active workspace still fail explicitly.
+
+### First-use setup for an unregistered workspace
+
+With a personal registration, opening another repository no longer requires
+running the installer first. This requires an executable with first-use setup
+support; updating the installer alone does not update an already running MCP
+server.
+
+1. Xray uses exactly one client-provided MCP root. If the client does not support
+   roots, its launch directory must be inside a Git workspace; Xray finds the
+   nearest ancestor containing a `.git` directory or worktree file. An unrelated
+   launch directory, such as the home directory, is not scanned automatically.
+   Before initialization, optional client probes such as `server/discover`
+   receive JSON-RPC `Method not found` and pings are answered without ending
+   the connection or starting workspace discovery.
+2. Until configured, `tools/list` includes `xray_setup` alongside the ordinary
+   tools. Listing tools does not scan files or start a backend. The first tool
+   call scans file names and proposes extensions. Search/edit calls return
+   `isError: true` with `XRAY_SETUP_REQUIRED` instead of empty search results.
+3. The agent must show the workspace path and extension proposal to the user and
+   ask for explicit approval. `xray_setup` with no arguments returns
+   `status: "confirmation_required"` and a `proposalId`. Declining or closing
+   the session leaves profiles and indexes unchanged.
+4. Only after approval, call `xray_setup` with `confirm: true` and that
+   `proposalId`. Optional `extensions` selects from the detected extensions.
+   If no extensions meet the normal installer threshold, the user must choose
+   explicitly. Missing/stale proposals, invalid selections, and scan errors
+   return tool errors without starting indexing.
+5. Confirmation atomically creates the ordinary version-1 workspace profile
+   outside the repository with `--watch --definitions --debug-log`. Existing
+   profiles are never overwritten. Xray reports `status: "indexing"`, announces
+   a tool-list change, and hands the same MCP connection to the shared backend.
+   Refreshing the tool list removes `xray_setup`; subsequent sessions use the
+   saved profile without asking again.
+6. **Wait before retrying the original request.** Poll `xray_info` until no
+   `indexes[]` entry has a `status` field. `"building"` means wait; `"failed"`
+   is an error and includes recovery guidance, not permission to query partial
+   indexes. Ordinary search readiness gates remain in force.
+
+Detection uses the installer's known extensions, case-insensitive directory
+pruning, `max(5, ceil(totalDetectedFiles * 0.005))` threshold, and structural-file
+exceptions. It does not follow symlinks/junctions or read file contents. Counts
+are estimates: actual indexing retains its normal ignore rules. Regression
+tests keep the runtime detection lists and threshold in sync with the installer.
+The proposal is reused for blocked tool calls; calling `xray_setup` without
+confirmation explicitly refreshes it. Git workspaces use the installer's
+`git rev-parse --show-toplevel` path for the profile name and stored root,
+preserving drive/junction aliases; canonical paths are used only for safety and
+workspace comparisons. Dot-prefixed file extensions follow the installer's
+filename rules too.
+The confirmation rechecks the proposal; changed file counts require a fresh
+proposal and approval. A workspace-root change during setup requires reconnecting.
+
+This two-call confirmation works without MCP interactive-form support. It
+does not grant client folder trust, change MCP registrations, migrate legacy
+configs, or replace the executable; use the installer for those operations and
+for deliberately custom extension scopes not detected by first-use setup.
 
 ### Consistent Git environment across MCP hosts
 

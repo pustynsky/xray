@@ -203,6 +203,9 @@ pub enum CallSiteKind {
     TypeScriptUnresolvedLocal,
     TypeScriptImported,
     TypeScriptUnknownGlobal,
+    RustUnexpandedMacro,
+    RustAnalysisIncomplete,
+    RustUnindexedNestedCallable,
 }
 
 impl CallSiteKind {
@@ -213,6 +216,9 @@ impl CallSiteKind {
             Self::TypeScriptImported => Some("module_resolution_failed"),
             Self::TypeScriptUnknownGlobal => Some("unknown_global"),
             Self::TypeScriptAnalysisIncomplete => Some("ast_depth_limit"),
+            Self::RustUnexpandedMacro => Some("unexpanded_rust_macro"),
+            Self::RustAnalysisIncomplete => Some("rust_call_analysis_limit"),
+            Self::RustUnindexedNestedCallable => Some("unindexed_rust_nested_callable"),
             _ => None,
         }
     }
@@ -254,9 +260,9 @@ pub struct CallSite {
 //
 // Fields are categorized below by their relationship to def_idx.
 
-/// Format version for DefinitionIndex. Bump when changing the struct layout.
+/// Format version for DefinitionIndex. Bump when changing layout or call-analysis semantics.
 /// Loading an index with a different version triggers a rebuild.
-pub const DEFINITION_INDEX_VERSION: u32 = 11;
+pub const DEFINITION_INDEX_VERSION: u32 = 12;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct DefinitionInputFingerprint {

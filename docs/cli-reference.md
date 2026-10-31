@@ -343,6 +343,17 @@ xray def-index --dir C:\Projects --ext cs --threads 8
 
 Each definition includes: name, kind, file path, line range, full signature, modifiers (public/static/async/etc.), attributes/decorators (`[ServiceProvider]`, `@Injectable()`, etc.), base types/interfaces, and parent class.
 
+**Rust call sites:** recognized expression macros (including formatting, assertions,
+`vec!`, and Tokio `join!` / `try_join!`) and `tokio::select!` are parsed for explicit
+calls in their arguments, futures, guards, and handlers. Nested `spawn` / `async move`
+calls retain their containing function and original callable-name source lines,
+including split-line chains. Nested callable bodies that are not separately
+indexed report analysis gaps instead of false enclosing-function edges. This is source
+analysis, not macro expansion: unknown macros, unsupported payload syntax, and
+analysis limits retain incomplete-analysis evidence instead of guessing edges.
+Definition indexes from before this change rebuild automatically (format v12).
+See [`xray_callers`](mcp-guide.md#xray_callers--call-tree) for completeness reporting.
+
 **TypeScript field type resolution** for call-site analysis supports three patterns:
 
 - Constructor DI parameters: `constructor(private service: UserService)`
@@ -454,7 +465,7 @@ The `notify` crate (and `ReadDirectoryChangesW` on Windows) is best-effort and m
 
 ---
 
-## `xray serve-workspace` - Select an installed workspace profile
+## `xray serve-workspace` - Select or set up a workspace profile
 
 ```powershell
 xray serve-workspace --profiles C:\Users\you\AppData\Local\xray\workspaces
@@ -466,13 +477,16 @@ MCP proxy. Profiles retain each workspace's `serve` arguments; clients need
 only one personal MCP registration, without a `cwd` variable. When the launch
 directory has no profile, clients advertising MCP roots can supply exactly one
 file root through `roots/list` after initialization. This supports user-scoped
-VS Code servers launched outside the workspace. Unknown workspaces, multiple
-discovery roots, and invalid or ambiguous profiles fail explicitly, without
-starting a private index.
+VS Code servers launched outside the workspace. An unregistered workspace
+exposes `xray_setup` to propose extensions and obtain explicit user confirmation
+before creating a profile or starting indexes. Without MCP roots, first-use setup
+requires launching from inside a Git workspace. Multiple discovery roots and
+invalid or ambiguous profiles still fail explicitly.
 
 Use `setup-xray.ps1 -UserMcp -RepoPath <workspace>` to install profiles.
 See [personal MCP setup](installation.md#personal-mcp-with-workspace-profiles)
-for locations, schema, migration, and client configuration.
+for locations, schema, migration, client configuration, and
+[first-use setup](installation.md#first-use-setup-for-an-unregistered-workspace).
 
 ## `xray tips` — Best Practices Guide
 
