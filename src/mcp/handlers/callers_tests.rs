@@ -2230,7 +2230,7 @@ fn test_callers_next_step_hint_generic_fallback_for_normal_call_tree() {
     let hint = v["summary"]["nextStepHint"].as_str().unwrap();
 
     assert!(v["summary"].get("templateNavigation").is_none());
-    assert_eq!(hint, "Next: use xray_definitions includeBody=true for source or xray_grep for text refs");
+    assert_eq!(hint, "Next: if more evidence is needed, use xray_definitions for selected source or xray_grep for text references.");
 }
 
 

@@ -1394,14 +1394,14 @@ fn next_step_hint(context: &ResponseGuidanceContext<'_>) -> Option<String> {
     }
     match context.tool_name {
         "xray_grep" => grep_or_fast_next_step(context, "grep")
-            .or_else(|| Some("Next: narrow content results with xray_grep filters, or use xray_definitions when a parser-active target file is known".to_string())),
+            .or_else(|| Some("Next: if more evidence is needed, narrow xray_grep filters or read an identified parser-active target with xray_definitions.".to_string())),
         "xray_fast" => grep_or_fast_next_step(context, "fast")
-            .or_else(|| Some("Next: use xray_definitions file=[\"<match>\"] to inspect parser-active files, or xray_grep for content".to_string())),
-        "xray_definitions" => Some("Next: use xray_callers for call chains or xray_grep for text patterns".to_string()),
-        "xray_callers" => Some("Next: use xray_definitions includeBody=true for source or xray_grep for text refs".to_string()),
-        "xray_edit" => Some("Next: use xray_definitions to verify or xray_grep to check related files".to_string()),
+            .or_else(|| Some("Next: if more evidence is needed, inspect parser-active targets with xray_definitions, or use xray_grep for content.".to_string())),
+        "xray_definitions" => Some("Next: if more evidence is needed, use xray_callers for call relationships or xray_grep for text/configuration references.".to_string()),
+        "xray_callers" => Some("Next: if more evidence is needed, use xray_definitions for selected source or xray_grep for text references.".to_string()),
+        "xray_edit" => Some("Next: if verification is needed, use xray_definitions for selected source or xray_grep for related references.".to_string()),
         "xray_git_history" | "xray_git_diff" | "xray_git_authors" | "xray_git_activity" | "xray_git_blame" | "xray_branch_status" => {
-            Some("Next: use xray_definitions for code context or xray_callers for impact".to_string())
+            Some("Next: if more evidence is needed, use xray_definitions for selected source or xray_callers for call impact.".to_string())
         }
         _ => None,
     }
@@ -1448,7 +1448,7 @@ fn selected_file_symbol_query(context: &ResponseGuidanceContext<'_>) -> Result<O
     Ok(Some(json!({
         "tool": "xray_definitions", "args": query,
         "operation": "inspectSelectedFile", "semanticsChanged": true,
-        "reason": "List symbols in this selected file, not content matches or file-name matches. Select a definition before reading its body.",
+        "reason": "Optional symbol map of the first returned file, not a continuation of the search. Use if relevant and the target is unknown; identified targets can be read directly.",
     })))
 }
 
@@ -1456,7 +1456,7 @@ fn grep_or_fast_next_step(context: &ResponseGuidanceContext<'_>, _source: &str) 
     let path = top_result_path(context.output)?;
     match selected_file_symbol_query(context) {
         Ok(Some(_)) => Some(format!(
-            "Next: summary.nextStepQuery lists symbols in '{}'; select a definition before reading its body.",
+            "Next: optional summary.nextStepQuery maps '{}'; use if relevant and the target is unknown. Identified targets can be read directly.",
             workspace_relative_hint_path(path, context.handler_ctx),
         )),
         Ok(None) => None,

@@ -86,7 +86,7 @@ Tests for MCP server protocol, async startup, graceful shutdown, LZ4 compression
 - `result.instructions` contains `MANDATORY PRE-FLIGHT CHECK` with `Q1:`, `Q2:`, and the word `UNJUSTIFIED`
 - `result.instructions` contains `COST REALITY` with `3-24x cheaper` and `2 built-in calls in a row on the same file`
 - Section order: `INTENT -> TOOL MAPPING` appears BEFORE `MANDATORY PRE-FLIGHT CHECK`, which appears BEFORE `COST REALITY`, which appears BEFORE `NEVER READ` and `ANTI-PATTERNS` (positive triggers first, negative rules after)
-- `STRATEGY RECIPES` block contains the section header, the `<=3 search calls` rule-of-thumb, and a `xray_help for the full catalog` reference — NONE of the individual recipe bracket-labels are inlined anymore (the full 7-recipe catalog is delivered on-demand via `xray_help`)
+- `STRATEGY RECIPES` contains an on-demand `xray_help` reference and conditional steps, prioritizing necessary evidence over a fixed call quota. Individual recipe bracket-labels are not inlined.
 
 **Unit tests:** `test_instructions_has_intent_mapping`, `test_instructions_has_preflight_check`, `test_instructions_has_cost_reality`, `test_instructions_section_order`, `test_instructions_strategy_recipes_trimmed`
 

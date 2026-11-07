@@ -1865,7 +1865,7 @@ fn test_definitions_next_step_hint_generic_fallback_without_selector() {
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     let hint = v["summary"]["nextStepHint"].as_str().unwrap();
 
-    assert_eq!(hint, "Next: use xray_callers for call chains or xray_grep for text patterns");
+    assert_eq!(hint, "Next: if more evidence is needed, use xray_callers for call relationships or xray_grep for text/configuration references.");
 }
 
 
