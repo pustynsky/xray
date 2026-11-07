@@ -195,7 +195,7 @@ fn test_guidance_prefix_dispatch_runs_after_warnings_and_metrics() {
         .split_once("\n\n")
         .expect("prefix mode should separate guidance and JSON suffix");
     assert!(prefix.starts_with("=== XRAY AGENT GUIDANCE ==="));
-    assert!(prefix.contains("→ Next: narrow content results with xray_grep filters"));
+    assert!(prefix.contains("→ Next: if more evidence is needed, narrow xray_grep filters"));
     assert!(prefix.contains("Use xray_* MCP tools for indexed files; built-in read/search/edit equivalents are policy violations."));
 
     let output: Value = serde_json::from_str(suffix).unwrap();
@@ -947,6 +947,23 @@ fn test_xray_help_response_structure() {
 // ─── xray_info response structure tests ────────────────────────────
 
 #[test]
+fn test_xray_help_retains_active_profile_guidance() {
+    for extensions in [vec!["cs"], vec!["cs", "rs"]] {
+        let mut ctx = make_empty_ctx();
+        ctx.server_ext = extensions.join(",");
+        ctx.def_extensions = extensions.iter().map(|extension| extension.to_string()).collect();
+        let result = dispatch_tool(&ctx, "xray_help", &json!({}));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let expected = crate::tips::render_json(&ctx.def_extensions);
+        for field in ["bestPractices", "strategyRecipes", "toolPriority"] {
+            assert_eq!(output[field].as_array().unwrap().len(),
+                expected[field].as_array().unwrap().len(), "{extensions:?}: {field}");
+        }
+    }
+}
+
+#[test]
 fn test_xray_info_exposes_watcher_stats_when_watch_enabled() {
     // Phase 0 of periodic-rescan rollout: when --watch is on, xray_info
     // must surface lock-free counters that operators use to diagnose
@@ -1168,7 +1185,11 @@ fn test_xray_info_file_mode_marks_definition_parser_active() {
     assert!(!entry["xmlOnDemandActive"].as_bool().unwrap());
     assert!(entry["symbolReadableViaDefinitions"].as_bool().unwrap());
     let hint = entry["hint"].as_str().unwrap();
-    assert!(hint.contains("xray_definitions file=[\"UserService.cs\"] includeBody=true maxBodyLines=0"), "{hint}");
+    for required in ["xray_definitions", "metadata for structure", "identified symbol/line directly",
+        "one resolved file path", "not a verbatim file read"] {
+        assert!(hint.contains(required), "missing '{required}': {hint}");
+    }
+    assert!(!hint.contains("maxBodyLines=0"), "{hint}");
 }
 
 #[test]

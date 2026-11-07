@@ -868,7 +868,7 @@ fn handle_contains_line_mode(
                     } else {
                         // Parent definition — metadata only, skip body to save budget
                         obj["bodyOmitted"] = json!(
-                            "parent definition - use includeBody with name filter to get full body"
+                            "parent metadata only - read this parent's body only if the task requires it"
                         );
                     }
                 }
@@ -1998,7 +1998,7 @@ fn add_definitions_next_queries(
         push_unique_query(&mut queries, json!({
             "tool": "xray_definitions", "args": query,
             "operation": "readSelectedDefinition",
-            "reason": "Read this selected definition; the discovery query is unchanged.",
+            "reason": "Optional exact read of this selected definition if needed; the discovery query is unchanged.",
         }));
     }
     if !queries.is_empty() {

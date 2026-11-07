@@ -407,17 +407,19 @@ fn test_xray_definitions_has_contains_line() {
 
     let contains_line_description = props["containsLine"]["description"].as_str().unwrap();
     assert!(
-        contains_line_description.contains("Minimum value: 1"),
+        contains_line_description.contains("minimum 1"),
         "containsLine schema should name the minimum line number; got: {contains_line_description}"
     );
     assert!(
-        contains_line_description.contains("Requires a real 'file' path"),
+        contains_line_description.contains("one resolved file path"),
         "containsLine schema should require a real file path; got: {contains_line_description}"
     );
     assert!(
-        contains_line_description.contains("switches the query into line-containment lookup"),
+        contains_line_description.contains("Definitions containing this line"),
         "containsLine schema should explain lookup mode; got: {contains_line_description}"
     );
+    assert!(contains_line_description.contains("For index-backed definitions"));
+    assert!(contains_line_description.contains("Ignores name"));
 }
 
 // --- maxResults=0 means unlimited tests ---

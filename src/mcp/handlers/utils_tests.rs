@@ -427,6 +427,24 @@ fn test_inject_response_guidance_grep_parser_active_file_hint() {
     assert_eq!(query["args"]["includeBody"], false);
     assert!(query["args"].get("maxBodyLines").is_none());
     assert_eq!(query["semanticsChanged"], true);
+    assert!(query["reason"].as_str().unwrap().contains("Optional symbol map"));
+    assert!(query["reason"].as_str().unwrap().contains("first returned file"));
+    let hint = output["summary"]["nextStepHint"].as_str().unwrap();
+    assert!(hint.starts_with("Next: optional"));
+    assert!(hint.contains("Identified targets can be read directly"));
+}
+
+#[test]
+fn test_optional_next_step_hints_preserve_legacy_prefix_label() {
+    let ctx = HandlerContext { server_ext: "rs".to_string(), ..Default::default() };
+    for tool in ["xray_grep", "xray_fast", "xray_definitions", "xray_callers",
+        "xray_edit", "xray_git_history"] {
+        let result = ToolCallResult::success(json!({"items": [], "summary": {}}).to_string());
+        let result = inject_response_guidance(result, tool, &ctx.server_ext, &ctx);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let hint = output["summary"]["nextStepHint"].as_str().unwrap();
+        assert!(hint.starts_with("Next: if "), "{tool}: {hint}");
+    }
 }
 
 #[test]

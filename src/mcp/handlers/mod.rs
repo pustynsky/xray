@@ -270,20 +270,18 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                 }
             } else {
                 format!(
-                    "PREFERRED for code exploration AND module structure discovery. \
-                     REPLACES directory listing for understanding code — use file='<dirname>' to get ALL classes, methods, \
-                     interfaces in ONE call (more informative than directory tree which only shows file names). \
-                     REPLACES read_file for indexed source files — use includeBody=true maxBodyLines=0 to get full file content. \
-                     Search code definitions — classes, interfaces, methods, properties, enums. \
+                    "PREFERRED for code exploration and source-body reading. \
+                     Discover structure with metadata; read identified bodies or containsLine targets directly without an overview. \
+                     Definition bodies are not whole files; container/member source overlaps. \
+                     Disambiguate by file/signature/range. \
                      Uses pre-built AST index for instant results (~0.001s). \
                      LANGUAGE-SPECIFIC: Supports {}. Only these extensions are indexed — for other file types (JSON, config, MD) use xray_grep.{} \
                      Requires server started with --definitions flag. \
                      Supports 'containsLine' to find which method/class contains a given line number. \
                      Supports 'includeBody' to return actual source code inline. \
-                     When results exceed maxResults and no name filter is set, automatically returns a \
-                     directory-grouped summary (autoSummary) with definition counts per subdirectory and \
-                     top-3 largest classes/interfaces per group, instead of truncated entries. \
-                     Add a name filter or narrow the file scope to get individual definitions. \
+                     Broad metadata queries can return autoSummary. Use offset=0 for ordinary list results, or narrow the query. \
+                     Line caps and response byte budgets still apply; use returned bodyContinuation arguments \
+                     when more source is needed. \
                      ADVISORY HINTS: Property/Field results may include 'valueSourceHint' (string) when the \
                      symbol carries an attribute with a string-literal argument — the hint surfaces those \
                      literals as ready-to-grep keys for external config files (manifest, appsettings, env, \
@@ -299,7 +297,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "name": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Name(s) to search (substring). Each array entry is one term; multiple entries = OR."
+                        "description": "Names (substring). Non-regex entries are OR, not file/name pairs; page/body limits are shared. Regex: use one alternation pattern."
                     },
                     "kind": {
                         "type": "array",
@@ -333,15 +331,15 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "containsLine": {
                         "type": "integer",
-                        "description": "Find definition(s) containing this line number. Minimum value: 1. Requires a real 'file' path and switches the query into line-containment lookup. Returns innermost method + parent class. With includeBody=true, body is emitted ONLY for the innermost (most specific) definition; parent definitions get 'bodyOmitted' hint instead — this maximizes body budget for the target method."
+                        "description": "Definitions containing this line (minimum 1). Use one resolved file path; basenames can match several. Ignores name. For index-backed definitions, kind/parent still filter; only the innermost body is emitted and parents are metadata."
                     },
                     "regex": {
                         "type": "boolean",
-                        "description": "Treat name as regex pattern (default: false)."
+                        "description": "Treat name as regex (default: false). Pass one pattern; use alternation for multiple names."
                     },
                     "exactNameOnly": {
                         "type": "boolean",
-                        "description": "Match definition names exactly. Also disables XML text-content matching, auto-correction, fuzzy name suggestions, and nearest-match name hints. (default: false)"
+                        "description": "Match names exactly, case-insensitively; overloads can still match. Disables XML text-content matching, auto-correction, fuzzy name suggestions and nearest-match name hints (default: false)."
                     },
                     "autoCorrect": {
                         "type": "boolean",
@@ -349,7 +347,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "maxResults": {
                         "type": "integer",
-                        "description": "Page size (default: 100, 0=all remaining)"
+                        "description": "Shared page size (default: 100, 0=all remaining); not input-name ordering."
                     },
                     "offset": {
                         "type": "integer",
@@ -357,7 +355,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "continuationToken": {
                         "type": "string",
-                        "description": "Next page: repeat this query with the token, omit offset; stop when absent."
+                        "description": "List continuation: repeat the query with this token, omit offset. Prefer returned resultStatus.page.nextArgs. Body continuation is separate."
                     },
                     "excludeDir": {
                         "type": "array",
@@ -374,19 +372,19 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "maxBodyLines": {
                         "type": "integer",
-                        "description": "Max source lines per definition when includeBody=true (default: 100, 0=unlimited)"
+                        "description": "Source-line cap per definition (default: 100). 0 disables only this cap; shared line and response byte budgets still apply."
                     },
                     "maxTotalBodyLines": {
                         "type": "integer",
-                        "description": "Max total body lines across all results (default: 500, 0=unlimited)"
+                        "description": "Shared body-line cap across results (default: 500). 0 disables only this cap; response byte budgets still apply."
                     },
                     "bodyLineStart": {
                         "type": "integer",
-                        "description": "Body range start (absolute file line, 1-based, inclusive). Overrides anchor centering; pair with bodyLineEnd."
+                        "description": "Body range start (absolute file line, 1-based, inclusive), clamped to each selected definition. Overrides anchor centering; pair with bodyLineEnd. Not a raw-file slice."
                     },
                     "bodyLineEnd": {
                         "type": "integer",
-                        "description": "Filter body to end at this absolute file line number (1-based, inclusive). Use with bodyLineStart for precise body extraction."
+                        "description": "Body range end (absolute file line, 1-based, inclusive), clamped to each selected definition. Pair with bodyLineStart."
                     },
                     "bodyTarget": {
                         "type": "object",
@@ -1990,10 +1988,9 @@ fn file_metadata_entry(
         entry["lossyUtf8"] = json!(true);
     }
     if indexed_by_definitions {
-        entry["hint"] = json!(format!(
-            "{} has an active definition parser. Prefer xray_definitions file=[\"{}\"] includeBody=true maxBodyLines=0 over read_file for symbol-level reads.",
-            raw_path, raw_path
-        ));
+        entry["hint"] = json!(
+            "AST-readable via xray_definitions: request metadata for structure, or read an identified symbol/line directly. containsLine selects by line and needs one resolved file path; bodies are not a verbatim file read."
+        );
     } else if xml_on_demand_active {
         entry["hint"] = json!(format!(
             "{} is XML-on-demand parseable. Use xray_definitions file=[\"{}\"] containsLine=N or name=[\"ElementOrText\"] instead of raw read_file scans.",

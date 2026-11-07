@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.10.1 (2026-11-07)
+
+- **Clarify source-reading guidance.** Read identified symbols directly; use
+  metadata maps only when discovery is needed. Tool descriptions, instructions,
+  help and hints distinguish definition bodies from files, line caps from byte
+  budgets, and list continuation from versioned body coverage. Navigation is
+  optional and batching preserves target identity. Defaults, query generation,
+  response algorithms and parameter schema structure are unchanged.
+
 ## 0.10.0 (2026-10-31)
 
 - **Suggest MCP updates without delaying initialization.** Background anonymous

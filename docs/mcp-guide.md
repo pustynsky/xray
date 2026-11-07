@@ -164,9 +164,9 @@ The manual workspace registration below does not configure SDK Agent Host.
    - **TASK ROUTING table:** maps user tasks to recommended tools (auto-generated, context-aware based on indexed file extensions).
    - **MANDATORY PRE-FLIGHT CHECK:** Q1/Q2/Q3 questions the model should answer in `<thinking>` before ANY built-in tool call (read_file, apply_diff, search_files, write_to_file, list_files, list_directory, directory_tree, search_and_replace, insert_content). Explicit "habit/familiarity → UNJUSTIFIED" rule.
    - **COST REALITY:** measured token/round-trip ratios (5x, 24x, 3x fewer) for common built-in patterns vs the xray equivalent. Rule of thumb: 2 built-in calls in a row on the same file = you should have used xray.
-   - **DECISION TRIGGERs:** hard prohibitions for file reading and editing that redirect LLM to xray tools.
+   - **DECISION TRIGGERs:** routing guards for built-in operations, including editing and search. Indexed-body reads prefer selected definitions; required outside context has a scoped fallback.
    - **Fallback rule:** guidance for uncertain file types.
-   - **Strategy Recipes:** the top-3 most common multi-step workflow patterns (Architecture Exploration, Call Chain Investigation, Stack Trace / Bug Investigation). The remaining 4 recipes (Code History, Code Health Scan, Code Review, Angular Component Hierarchy) are available via `xray_help` to keep the system-prompt budget under control.
+   - **Strategy Recipes:** an on-demand `xray_help` reference rather than inlined recipes. Steps are conditional; minimize unnecessary rounds without a fixed call quota or loss of evidence.
    - **Named policy anchor:** the instructions are wrapped in `=== XRAY_POLICY ===` / `================================` so the agent sees a stable, reusable policy name during MCP initialization.
 
 5. **Verify** — ask the AI: _"Use xray_grep to find all files containing HttpClient"_
@@ -246,16 +246,19 @@ Behavior rules:
 
 ### `nextStepHint` dictionary
 
-The `nextStepHint` value depends on which tool was called:
+The `nextStepHint` value depends on which tool was called. Navigation is optional:
+stop when evidence is sufficient, and verify that suggested corrections preserve
+the intended target and restrictions. A generated first-file symbol map is not
+a search continuation or an exhaustive plan; skip it for an identified target.
 
 | Tool | `nextStepHint` |
 |------|----------------|
-| `xray_grep` | `"Next: narrow content results with xray_grep filters, or use xray_definitions when a parser-active target file is known"` |
-| `xray_fast` | `"Next: use xray_definitions file=[\"<match>\"] to inspect parser-active files, or xray_grep for content"` |
-| `xray_definitions` | `"Next: use xray_callers for call chains or xray_grep for text patterns"` |
-| `xray_callers` | `"Next: use xray_definitions includeBody=true for source or xray_grep for text refs"` |
-| `xray_edit` | `"Next: use xray_definitions to verify or xray_grep to check related files"` |
-| `xray_git_*` / `xray_branch_status` | `"Next: use xray_definitions for code context or xray_callers for impact"` |
+| `xray_grep` | `"Next: if more evidence is needed, narrow xray_grep filters or read an identified parser-active target with xray_definitions."` |
+| `xray_fast` | `"Next: if more evidence is needed, inspect parser-active targets with xray_definitions, or use xray_grep for content."` |
+| `xray_definitions` | `"Next: if more evidence is needed, use xray_callers for call relationships or xray_grep for text/configuration references."` |
+| `xray_callers` | `"Next: if more evidence is needed, use xray_definitions for selected source or xray_grep for text references."` |
+| `xray_edit` | `"Next: if verification is needed, use xray_definitions for selected source or xray_grep for related references."` |
+| `xray_git_*` / `xray_branch_status` | `"Next: if more evidence is needed, use xray_definitions for selected source or xray_callers for call impact."` |
 | `xray_info`, `xray_help`, `xray_reindex`, `xray_reindex_definitions` | _(not present)_ |
 
 For `xray_grep` and `xray_fast` the server first tries a result-aware hint derived from the matched files. The values above are the fallbacks used when no result-specific hint applies.
@@ -267,7 +270,7 @@ Example:
   "summary": {
     "tool": "xray_grep",
     "policyReminder": "=== XRAY_POLICY === Prefer xray MCP tools over environment built-ins. Check xray applicability before next tool call. Use environment tools only with explicit justification. Indexed extensions: cs, ts, tsx. For other file types, use read_file or environment tools. INTENT->TOOL: context-around-match->xray_grep showLines | read-method-body->xray_definitions includeBody | stack-trace (file:line)->xray_definitions containsLine | replace-in-files->xray_edit | list-dir->xray_fast dirsOnly | find-callers->xray_callers. ================================",
-    "nextStepHint": "Next: narrow content results with xray_grep filters, or use xray_definitions when a parser-active target file is known"
+    "nextStepHint": "Next: if more evidence is needed, narrow xray_grep filters or read an identified parser-active target with xray_definitions."
   }
 }
 ```
@@ -281,6 +284,15 @@ Set `XRAY_TRANSPORT_MAX_BYTES` in the MCP server environment when a client needs
 With `includeBody=true`, `containsLine` centers the available body window on the requested line. Explicit `bodyLineStart`/`bodyLineEnd` ranges take precedence. `bodyStartLine` and `bodyEndLine` describe the actual delivered fragment; `bodyAnchorVisible` reports whether it contains the anchor. `bodyComplete` covers the whole definition (and requested doc comments), while `bodyRangeComplete` covers only the requested range.
 
 Partial bodies provide `bodyContinuation.beforeArgs` and/or `nextArgs` for `xray_definitions`. Pass these argument objects unchanged. They target one exact source file and definition range through `bodyTarget`, with a SHA-256 hash of the decoded file snapshot used for the read. A changed source or missing/ambiguous definition requires a fresh lookup. Cross-tool filters that cannot be represented by `xray_definitions` produce `bodyContinuationUnavailable` instead of a broader query.
+
+For a local question, a complete requested range may be sufficient. For a
+whole-symbol read, track delivered ranges and every outstanding before/after
+branch on the same versioned target. A final fragment can have
+`bodyRangeComplete=true`, `bodyComplete=false`, and no continuation on that
+branch; do not wait for the last response to claim whole-symbol completeness.
+Absence of continuation, including `bodyContinuationUnavailable`, is not proof
+that all source has been delivered. `safeForExactSemantics` is not a missing-body
+signal: file/parent/base-type scope can make it false even with full source.
 
 Paginated lists provide `resultStatus.page.nextArgs`, including the original query and the final continuation token after byte fitting. Use it with the same tool and stop when it is absent. Unknown argument names must be corrected before Xray can generate ready-to-run continuation arguments.
 
@@ -855,23 +867,24 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 
 | Parameter           | Type    | Default | Description                                                                              |
 | ------------------- | ------- | ------- | ---------------------------------------------------------------------------------------- |
-| `name`              | array&lt;string&gt;  | —       | Substring or multi-element array OR search (e.g., `["AppComponent"]` or `["Foo", "Bar"]`). **BREAKING 2026-04-25:** array required |
+| `name`              | array&lt;string&gt;  | —       | Non-regex entries combine as OR, not file/name pairs. Page/body budgets are shared; results are ranked, not input-ordered. **BREAKING 2026-04-25:** array required |
 | `kind`              | array&lt;string&gt;  | —       | Filter by definition kind. Multi-element array for multi-kind OR (e.g., `["class", "interface", "enum"]`). Valid: class, interface, method, property, field, enum, struct, record, constructor, delegate, event, enumMember, function, typeAlias, variable, storedProcedure, table, view, sqlFunction, userDefinedType, column, sqlIndex, xmlElement. **BREAKING 2026-04-25:** array required |
 | `attribute`         | string  | —       | Filter by C# attribute or TypeScript decorator                                           |
 | `baseType`          | string  | —       | Exact outer base-type/interface name, case-insensitive. `IAccessTable` matches `IAccessTable<Model>` and `Contracts.IAccessTable<Model>`, not `Wrapper<IAccessTable<Model>>` or `IAccessTableFactory`. Qualified queries match the written qualification; explicit generic arguments must match |
 | `baseTypeTransitive`| boolean | false   | With `baseType`, traverses outer base-type names transitively (BFS, max depth 10). Generic arguments do not create inheritance edges. Descendant lookup is name-only, without namespace resolution or generic substitution |
 | `file`              | array&lt;string&gt;  | —       | Filter by file path. Directories resolving under the canonical index root use boundary matching; aliases, unresolved paths, and other terms use substring matching. Multi-element array for OR. **BREAKING 2026-04-25:** array required |
 | `parent`            | array&lt;string&gt;  | —       | Filter by parent class name. Multi-element array for OR. **BREAKING 2026-04-25:** array required |
-| `containsLine`      | integer | —       | Find definition containing a line number (requires `file`). With `includeBody=true`, body is emitted only for innermost definition; parents get `bodyOmitted` |
-| `regex`             | boolean | false   | Treat `name` as regex                                                                    |
+| `containsLine`      | integer | —       | Select by line using one resolved file path; a basename may match several files. Ignores `name`. For index-backed definitions, kind/parent still filter and only the innermost gets a body |
+| `regex`             | boolean | false   | Use one pattern with alternation; an array of regex names is not OR                      |
+| `exactNameOnly`     | boolean | false   | Case-insensitive exact names, not unique overload identity; verify file/signature/range   |
 | `maxResults`        | integer | 100     | Page size (0 = all remaining)                                                            |
 | `offset`            | integer | 0       | Offset in the stable sorted definitions list; mutually exclusive with `continuationToken` |
 | `continuationToken` | string  | —       | Snapshot-bound token from `resultStatus.page` for the next page                           |
 | `excludeDir`        | array   | —       | Exclude directories                                                                      |
 | `includeBody`       | boolean | false   | Include source code body inline                                                          |
 | `includeDocComments`| boolean | false   | Expand body upward to include `///` (C#/Rust) or `/** */` (TypeScript) doc-comments. Implies `includeBody=true`. Adds `docCommentLines` field |
-| `maxBodyLines`      | integer | 100     | Max lines per definition body (0 = unlimited)                                            |
-| `maxTotalBodyLines` | integer | 500     | Max total body lines across all results (0 = unlimited)                                  |
+| `maxBodyLines`      | integer | 100     | Per-definition line cap; 0 disables only this cap, not shared line or byte budgets        |
+| `maxTotalBodyLines` | integer | 500     | Shared body-line cap; 0 disables only this cap, not response byte budgets                  |
 | `audit`             | boolean | false   | Return index coverage report instead of search results                                   |
 | `auditMinBytes`     | integer | 500     | Min file size to flag as suspicious in audit mode                                        |
 | `crossValidate`     | boolean | false   | With `audit=true`, compares definition index files against file-list index to find coverage gaps |
@@ -896,7 +909,11 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 
 Find which method/class contains a given line number. No more `read_file` just to figure out "what method is on line 812".
 
-With `includeBody=true`, body is emitted **only for the innermost (most specific) definition**. Parent definitions receive `bodyOmitted` with a hint instead — this maximizes the body budget for the target method.
+For index-backed definitions with `includeBody=true`, body is emitted **only for
+the innermost (most specific) definition**. Parent definitions receive intentional
+`bodyOmitted` metadata; read them only if needed. XML on-demand containment uses
+element blocks and `parentChain`, including parent promotion for leaf elements;
+the indexed kind/parent filtering and innermost-only rule do not describe that path.
 
 ```json
 // Request
@@ -931,7 +948,7 @@ With `includeBody=true`:
       "name": "QueryService",
       "kind": "class",
       "lines": "1-900",
-      "bodyOmitted": "parent definition - use includeBody with name filter to get full body"
+      "bodyOmitted": "parent metadata only - read this parent's body only if the task requires it"
     }
   ]
 }
@@ -939,15 +956,30 @@ With `includeBody=true`:
 
 ### `includeBody` — Return Source Code Inline
 
-Retrieve the actual source code of definitions without a separate `read_file` call. Three-level protection prevents response explosion:
+Retrieve selected definition source without a separate `read_file` call. Use
+metadata when the target is unknown; read an identified target directly without
+a mandatory overview. Bodies are AST ranges, not verbatim files: imports and
+other context outside definitions can be absent, and container/member bodies
+overlap. For required outside context, try scoped content search before a
+permitted exact raw read.
 
-- **`maxBodyLines`:** caps lines per individual definition (default: 100, 0 = unlimited).
-- **`maxTotalBodyLines`:** caps total body lines across all results (default: 500, 0 = unlimited).
+- **`maxBodyLines`:** caps lines per definition (default: 100; 0 disables this cap only).
+- **`maxTotalBodyLines`:** caps shared body lines (default: 500; 0 disables this cap only).
 - **`maxResults`:** caps the number of definitions returned (default: 100).
+- Response byte budgets still apply, including when both line caps are 0.
 
 When a definition's body exceeds `maxBodyLines`, the `body` array is truncated and `bodyTruncated: true` is set. When the global `maxTotalBodyLines` budget is exhausted, remaining definitions receive `bodyOmitted: true` with a `bodyWarning` message. If the source file cannot be read, `bodyError` is returned instead.
 
-When body is truncated, the summary includes `totalBodyLinesAvailable` — the total body lines that would have been returned without truncation. Use this value to calibrate `maxTotalBodyLines` for a retry (e.g., if `totalBodyLinesReturned: 500` and `totalBodyLinesAvailable: 2300`, set `maxTotalBodyLines: 2300`). The field is absent when all bodies fit within the budget.
+`totalBodyLinesAvailable` describes available source lines, not a byte estimate
+or a required retry budget. Short bodies are previews; read enough source,
+helpers and tests for the question. Follow returned `bodyContinuation` arguments
+for source still needed instead of blindly raising line caps or re-reading
+intentional parent metadata. Absolute `bodyLineStart`/`bodyLineEnd` ranges are
+clamped to selected definitions, not arbitrary raw-file slices.
+
+Batch compatible ordinary name filters when useful. Preserve separate generated
+`bodyTarget` reads/continuations and targets needing different ranges or filters;
+do not rebuild them as a broader batch.
 
 ```json
 // Request
@@ -1196,8 +1228,11 @@ When `xray_definitions` finds more results than `maxResults` and **no `name` fil
 - No `name` filter — broad exploration query
 - `includeBody` is false — not requesting source code
 - `sortBy` is not set — when sorting is requested, individual ranked results are returned instead
+- No explicit list page was requested (`offset`, including 0, or `continuationToken`)
 
-**To get individual definitions instead**, add a `name` filter or narrow the `file` scope.
+**To get individual definitions instead**, use `offset=0`, add a `name` filter,
+or narrow the `file` scope. `maxResults=0` also disables auto-summary, but may
+produce a much larger result.
 
 | Response field | Description |
 |---|---|

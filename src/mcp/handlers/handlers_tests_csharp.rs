@@ -742,8 +742,9 @@ fn test_xray_definitions_enum_member_kind() {
     assert_eq!(defs[1]["name"], "MyService");
     assert!(defs[1].get("body").is_none(), "Parent should NOT have body");
     assert!(defs[1]["bodyOmitted"].is_string(), "Parent should have bodyOmitted hint");
-    assert!(defs[1]["bodyOmitted"].as_str().unwrap().contains("parent definition"),
-        "bodyOmitted should contain hint text");
+    let hint = defs[1]["bodyOmitted"].as_str().unwrap();
+    assert!(hint.contains("parent metadata only"), "{hint}");
+    assert!(hint.contains("only if the task requires it"), "{hint}");
     cleanup_tmp(&tmp);
 }
 

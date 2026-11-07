@@ -490,4 +490,4 @@ for locations, schema, migration, client configuration, and
 
 ## `xray tips` — Best Practices Guide
 
-Prints the same best practices and strategy recipes available via the `xray_help` MCP tool. Includes step-by-step patterns for common tasks (architecture exploration, call chain investigation, stack trace analysis) with a target of ≤3 search calls per task.
+Prints the same best practices and strategy recipes available via the `xray_help` MCP tool. Patterns for architecture exploration, call chains and stack traces use conditional steps: read identified targets directly and minimize unnecessary rounds without a fixed call quota or loss of evidence.

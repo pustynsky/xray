@@ -113,29 +113,29 @@ fn test_render_instructions_contains_key_terms() {
     // xray_help reference (soft, not urgent)
     assert!(text.contains("xray_help"), "instructions should mention xray_help");
     assert!(!text.contains("IMPORTANT: Call xray_help first"), "instructions should NOT have urgent xray_help prompt");
-    // Strategy recipes trimmed: reference + query budget are inlined, detailed
-    // recipe bodies live only in xray_help.
+    // Detailed recipes live in xray_help; necessary evidence has no call quota.
     assert!(text.contains("STRATEGY RECIPES"),
         "instructions should keep the STRATEGY RECIPES reference line");
     assert!(!text.contains("[Architecture Exploration]"),
         "Architecture Exploration recipe body should be xray_help-only");
-    assert!(text.contains("<=3 search calls"), "instructions should mention query budget");
+    assert!(text.contains("minimize unnecessary rounds, not evidence"));
+    assert!(!text.contains("<=3 search calls"));
     // Dynamic extension list: verify all definition extensions appear in the NEVER READ rule
     for ext in crate::definitions::definition_extensions() {
         assert!(text.contains(&format!(".{}", ext)),
             "instructions should mention .{} extension in NEVER READ rule", ext);
     }
-    assert!(text.contains("NEVER READ"), "instructions should have absolute prohibition on reading indexed files");
+    assert!(text.contains("NEVER READ"), "instructions should prefer structural reads for indexed bodies");
     assert!(text.contains("FILES DIRECTLY"), "instructions should have FILES DIRECTLY in prohibition");
     assert!(text.contains("DECISION TRIGGER"), "instructions should have decision trigger");
     assert!(text.contains("ONLY exception for"), "instructions should list exceptions for indexed file reading");
-    // Response hints auto-follow rule (renamed from ZERO-RESULT HINTS)
-    assert!(text.contains("RESPONSE HINTS"), "instructions should have RESPONSE HINTS auto-follow rule");
+    assert!(text.contains("RESPONSE HINTS"), "instructions should explain response hints");
     assert!(!text.contains("ZERO-RESULT HINTS"), "instructions should NOT have old ZERO-RESULT HINTS (renamed to RESPONSE HINTS)");
-    assert!(text.contains("AUTOMATICALLY follow the hint"), "instructions should tell LLM to auto-follow hints");
-    assert!(text.contains("NEAREST MATCH"), "instructions should have NEAREST MATCH auto-follow rule");
-    assert!(text.contains("KIND MISMATCH"), "instructions should have KIND MISMATCH auto-follow rule");
-    assert!(text.contains("NEVER ask the user whether to follow a hint"), "instructions should prohibit asking user about hints");
+    assert!(text.contains("navigation suggestions are optional"));
+    assert!(text.contains("verify nearest-name/kind suggestions before adopting them"));
+    assert!(text.contains("preserve the intended target and restrictions"));
+    assert!(!text.contains("AUTOMATICALLY follow the hint"));
+    assert!(!text.contains("ALWAYS follow it automatically"));
     // Error recovery rule
     assert!(text.contains("ERROR RECOVERY"), "instructions should have ERROR RECOVERY rule");
     assert!(text.contains("NEVER fall back to built-in tools"), "ERROR RECOVERY should prohibit fallback");
@@ -244,10 +244,9 @@ fn test_render_instructions_empty_extensions() {
     //   1. CRITICAL OVERRIDE     — "before using ANY built-in tool, STOP and check..."
     //   2. FILE EDITING          — "before calling ANY built-in edit tool ... STOP"
     //   3. FILE SEARCH           — "before calling search_files — STOP"
-    //   4. RESPONSE HINTS route  — "if the response hint says 'Use xray_grep...'"
     let dt_count = text.matches("DECISION TRIGGER").count();
-    assert_eq!(dt_count, 4,
-        "Empty def_extensions should have 4 DECISION TRIGGERs (critical override + editing + search_files + response hints), got {}", dt_count);
+    assert_eq!(dt_count, 3,
+        "Empty def_extensions should have 3 DECISION TRIGGERs (critical override + editing + search_files), got {}", dt_count);
     // Should contain fallback note
     assert!(text.contains("xray_definitions is not available"),
         "Empty def_extensions should have fallback note about xray_definitions");
@@ -698,11 +697,11 @@ fn test_render_instructions_example_line() {
 #[test]
 fn test_render_instructions_examples_per_language() {
     let text = render_instructions(&["cs", "ts", "sql", "rs"]);
-    assert!(text.contains("C#: xray_definitions file=[\"UserService.cs\"] includeBody=true maxBodyLines=0"),
+    assert!(text.contains("C#: xray_definitions file=[\"src/Services/UserService.cs\"] name=[\"GetUserAsync\"] exactNameOnly=true includeBody=true"),
         "EXAMPLES should include C#");
-    assert!(text.contains("TS: xray_definitions file=[\"user.service.ts\"] includeBody=true maxBodyLines=0"),
+    assert!(text.contains("TS: xray_definitions file=[\"src/user.service.ts\"] name=[\"getUser\"] exactNameOnly=true includeBody=true"),
         "EXAMPLES should include TypeScript");
-    assert!(text.contains("SQL: xray_definitions file=[\"usp_GetUser.sql\"] kind=[\"storedProcedure\"] includeBody=true maxBodyLines=0"),
+    assert!(text.contains("SQL: xray_definitions file=[\"usp_GetUser.sql\"] name=[\"usp_GetUser\"] kind=[\"storedProcedure\"] includeBody=true maxBodyLines=0"),
         "EXAMPLES should include SQL stored procedure pattern");
     assert!(text.contains("Rust: xray_definitions file=[\"src/lib.rs\"] name=[\"parse\"] includeBody=true maxBodyLines=0"),
         "EXAMPLES should include Rust");
@@ -723,6 +722,53 @@ fn test_instructions_has_known_symbol_rule() {
     assert!(text.contains("I already know the class/method/procedure/function name and want its body"));
     assert!(text.contains("parent=[\"Y\"] includeBody=true maxBodyLines=0"));
     assert!(text.contains("file=[\"known/path.ext\"] name=[\"X\"] includeBody=true maxBodyLines=0"));
+}
+
+#[test]
+fn test_guidance_contract_direct_reads_and_source_limits() {
+    let text = render_instructions(&["cs"]);
+    for required in [
+        "skip this map for an identified target",
+        "not unique overload identity",
+        "clamped to definitions, not raw-file slices",
+        "containsLine needs one resolved path and ignores name",
+        "0 disables only its line cap, not byte caps",
+        "containers overlap members, imports are not included",
+        "Track all branches/ranges for whole-symbol coverage",
+        "the last fragment can still have bodyComplete=false",
+        "A complete local range need not trigger a full read",
+        "first few selected reads are candidates, not an exhaustive plan",
+        "structural/content tools cannot deliver required context or edit ranges",
+    ] {
+        assert!(text.contains(required), "missing guidance contract: {required}");
+    }
+    for obsolete in ["no includeBody first", "removes all limits", "full file content"] {
+        assert!(!text.contains(obsolete), "obsolete guidance: {obsolete}");
+    }
+}
+
+#[test]
+fn test_guidance_contract_help_identity_batching_and_continuation() {
+    let examples = parameter_examples(&["cs".to_string()]);
+    let definitions = &examples["xray_definitions"];
+    for parameter in ["maxBodyLines", "maxTotalBodyLines", "exactNameOnly", "bodyTarget"] {
+        assert!(definitions[parameter].as_str().is_some(), "missing help for {parameter}");
+    }
+    assert!(definitions["name"].as_str().unwrap().contains("not file/name pairs"));
+    assert!(definitions["regex"].as_str().unwrap().contains("not OR"));
+    assert!(definitions["bodyTarget"].as_str().unwrap().contains("Do not batch"));
+    assert!(definitions["autoSummary"].as_str().unwrap().contains("offset=0"));
+
+    let help = tool_help("xray_definitions", &["cs".to_string()]).unwrap();
+    let workflow = help["paginationWorkflow"].to_string();
+    for required in ["page.nextArgs", "beforeArgs/nextArgs", "all remaining before/after branches",
+        "bodyRangeComplete", "bodyContinuationUnavailable", "safeForExactSemantics is not a missing-body flag"] {
+        assert!(workflow.contains(required), "missing continuation guidance: {required}");
+    }
+    let catalog = render_json(&["cs".to_string()]).to_string();
+    for obsolete in ["removes all limits", "~16KB (~4K tokens)", "Don't skip step 2"] {
+        assert!(!catalog.contains(obsolete), "obsolete catalog guidance: {obsolete}");
+    }
 }
 
 #[test]
@@ -1098,10 +1144,11 @@ fn test_instructions_strategy_recipes_trimmed() {
     // Header and on-demand reference must still be present.
     assert!(text.contains("STRATEGY RECIPES"),
         "instructions should keep a short STRATEGY RECIPES reference line");
-    assert!(text.contains("<=3 search calls"),
-        "STRATEGY RECIPES line should keep the query-budget rule of thumb");
-    assert!(text.contains("xray_help for the full catalog"),
-        "STRATEGY RECIPES line should point at xray_help for the full catalog");
+    assert!(text.contains("minimize unnecessary rounds, not evidence"),
+        "STRATEGY RECIPES should prioritize evidence over a fixed call quota");
+    assert!(text.contains("xray_help for task-specific recipes"),
+        "STRATEGY RECIPES should point at on-demand recipes");
+    assert!(text.contains("steps are conditional"));
     // NONE of the individual recipe bracket-labels should be inlined anymore.
     assert!(!text.contains("[Architecture Exploration]"),
         "Architecture Exploration recipe body should NOT be inlined in instructions");
@@ -1722,4 +1769,3 @@ fn test_tips_includes_line_regex_perf_tip() {
     // "the gate is indexed-corpus size; surviving files may be fewer" would
     // legitimately use the word and should not fail.
 }
-
