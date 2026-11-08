@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Recover definition indexing after interrupted parses.** Reset reused C#,
+  TypeScript/TSX and Rust parsers before each independent document so a timeout
+  cannot leak the previous file's nodes into the next file or discard an entire
+  worker chunk through a buffer-bounds panic. Definition-cache version 13 rejects
+  older caches, including zero-panic caches that may contain mixed-source results;
+  definitions-enabled serve startup rebuilds and persists fresh results without
+  changing source files. Existing timeout, size-limit and skipped-file behavior
+  remain unchanged; see [definition-cache recovery](docs/storage.md#definition-cache-recovery).
+
 ## 0.10.1 (2026-11-07)
 
 - **Clarify source-reading guidance.** Read identified symbols directly; use

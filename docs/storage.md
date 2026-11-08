@@ -100,6 +100,33 @@ Header readers (`read_root_from_index_file`, `read_format_version_from_index_fil
 dispatch by magic so both layouts coexist on disk and the lightweight metadata
 lookups (`xray info`, find-by-root scans) stay zero-copy regardless of layout.
 
+### Definition-cache recovery
+
+Definition-cache version **13** invalidates results produced before independent
+document parser resets. An interrupted tree-sitter parse could resume with the
+previous document's nodes, causing a buffer-bounds panic that discarded an entire
+worker sub-chunk, or silently mixing definitions, calls and line ranges when the
+stale ranges happened to fit. Consequently, even a version-12 cache reporting
+zero worker panics is rejected. Direct loading and fallback discovery enforce the
+same version gate for legacy compressed and sharded caches, with or without
+metadata sidecars.
+
+On the next definitions-enabled `xray serve` startup for a bound workspace, the
+rejected cache is a cache miss: Xray automatically builds a fresh definition
+index, saves version 13, and reloads it. Unchanged source files are reparsed;
+changing their timestamps, clearing panic counters, editing configuration or
+manually deleting caches is not a repair requirement. Explicit recovery is also
+available through `xray_reindex_definitions` or `xray def-index`; preserve the
+original directory, extension set and exclude policy.
+
+Parser timeouts and size limits remain in force. A file that times out or exceeds
+the parse limit still yields the existing empty/skipped result; genuinely empty
+files remain valid. Zero worker panics and discovered-file totals alone do not
+prove full coverage. Use `xray def-audit` with the same directory/extensions and
+`--min-bytes 0 --show-lossy` to inspect empty-file exceptions and lossy inputs;
+classify remaining empty, oversized or timed-out sources rather than treating
+lossy conversion warnings as proof of this panic.
+
 ### Single LZ4 frame layout (legacy / small indexes)
 
 ```rust

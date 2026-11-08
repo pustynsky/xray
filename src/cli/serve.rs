@@ -2741,6 +2741,81 @@ mod serve_respect_git_exclude_tests {
     }
 
     #[cfg(all(test, feature = "lang-rust"))]
+    fn parser_reuse_automatic_v12_recovery(panics: usize) {
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        let root = crate::clean_path(&std::fs::canonicalize(&source).unwrap().to_string_lossy());
+        let path = source.join("recovery.rs");
+        let empty = source.join("empty.rs");
+        std::fs::write(&path, "pub fn recovery_target() {}\npub fn recovery_caller() { recovery_target(); }\n").unwrap();
+        std::fs::write(&empty, "").unwrap();
+        let mtimes = [std::fs::metadata(&path).unwrap().modified().unwrap(), std::fs::metadata(&empty).unwrap().modified().unwrap()];
+        let base = fixture.path().join("indexes");
+        let old = definitions::DefinitionIndex {
+            root: root.clone(), format_version: 12, extensions: vec!["rs".into()],
+            files: vec![path.to_string_lossy().into_owned(), empty.to_string_lossy().into_owned()],
+            path_to_id: [(code_xray::path_identity_key(&path), 0), (code_xray::path_identity_key(&empty), 1)].into(),
+            worker_panics: panics, ..Default::default()
+        };
+        definitions::save_definition_index(&old, &base).unwrap();
+        let extensions = vec!["rs".into()];
+        let workspace = Arc::new(RwLock::new(mcp::handlers::determine_initial_binding(&root, &extensions, false)));
+        let ready = Arc::new(AtomicBool::new(false));
+        let terminal = Arc::new(AtomicBool::new(false));
+        let building = Arc::new(AtomicBool::new(false));
+        let (index, _, _, _) = load_or_build_definition_index(
+            &root, &extensions, &base, "rs", false, true,
+            &ready, &terminal, &building, false, 1, &workspace,
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !(ready.load(Ordering::Acquire) && terminal.load(Ordering::Acquire) && !building.load(Ordering::Acquire)) {
+            assert!(Instant::now() < deadline, "automatic definition recovery did not become ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let assert_recovered = |index: &definitions::DefinitionIndex| {
+            assert_eq!(index.format_version, 13, "old cache must be rebuilt, not relabelled");
+            assert_eq!(index.worker_panics, 0);
+            assert_eq!(index.parse_errors, 0);
+            assert_eq!(index.empty_file_ids.len(), 1, "the genuinely empty fixture is the only skip");
+            let target = index.definitions.iter().find(|entry| entry.name == "recovery_target").unwrap();
+            assert_eq!(target.line_start, 1);
+            let caller = index.definitions.iter().position(|entry| entry.name == "recovery_caller").unwrap();
+            assert_eq!(index.definitions[caller].line_start, 2);
+            assert!(index.method_calls[&(caller as u32)].iter().any(|call|
+                call.method_name == "recovery_target" && call.line == 2));
+            assert!(!index.input_fingerprints.is_empty());
+        };
+        let index = index.unwrap();
+        assert_recovered(&index.read().unwrap());
+        let persisted = definitions::load_definition_index(&root, "rs", &base).unwrap();
+        assert_recovered(&persisted);
+        assert_eq!([std::fs::metadata(&path).unwrap().modified().unwrap(), std::fs::metadata(&empty).unwrap().modified().unwrap()], mtimes);
+        let ready = Arc::new(AtomicBool::new(false));
+        let terminal = Arc::new(AtomicBool::new(false));
+        let building = Arc::new(AtomicBool::new(false));
+        let (reloaded, _, _, _) = load_or_build_definition_index(
+            &root, &extensions, &base, "rs", false, true,
+            &ready, &terminal, &building, false, 1, &workspace,
+        );
+        assert!(ready.load(Ordering::Acquire) && terminal.load(Ordering::Acquire));
+        assert!(!building.load(Ordering::Acquire), "persisted reload must not start another build");
+        assert_recovered(&reloaded.unwrap().read().unwrap());
+    }
+
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn parser_reuse_automatic_v12_zero_panic_recovery() {
+        parser_reuse_automatic_v12_recovery(0);
+    }
+
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn parser_reuse_automatic_v12_panicked_recovery() {
+        parser_reuse_automatic_v12_recovery(11);
+    }
+
+    #[cfg(all(test, feature = "lang-rust"))]
     fn definition_startup_switch(cached: bool) {
         let tmp = tempfile::tempdir().unwrap();
         let roots: Vec<String> = ["a", "b"].iter().map(|name| {

@@ -341,8 +341,73 @@ fn test_find_def_index_meta_rejects_extension_mismatch() {
 
 #[test]
 fn test_definition_index_version_is_pinned() {
-    assert_eq!(crate::definitions::DEFINITION_INDEX_VERSION, 12);
+    assert_eq!(crate::definitions::DEFINITION_INDEX_VERSION, 13);
 }
+
+fn parser_reuse_save_cache(index: &DefinitionIndex, base: &std::path::Path, sharded: bool, sidecar: bool) {
+    std::fs::create_dir_all(base).unwrap();
+    let path = definition_index_path_for(&index.root, "cs", base);
+    if sharded {
+        let entries: Vec<_> = index.definitions.iter().collect();
+        crate::index::save_sharded(&path, &index.build_head(), entries, "parser-reuse").unwrap();
+    } else {
+        crate::index::save_compressed(&path, index, "parser-reuse").unwrap();
+    }
+    if sidecar {
+        crate::index::save_index_meta(&path, &crate::index::definition_index_meta(index));
+    }
+}
+
+fn parser_reuse_reject_literal_v12(panics: usize, sharded: bool, sidecar: bool) {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().to_str().unwrap();
+    let base = fixture.path().join("indexes");
+    let mut index = cache_467_definition_fixture(root, 'a', 1);
+    index.format_version = 12;
+    index.worker_panics = panics;
+    parser_reuse_save_cache(&index, &base, sharded, sidecar);
+    assert!(matches!(load_definition_index(root, "cs", &base),
+        Err(crate::SearchError::IndexLoad { message, .. }) if message.contains("format version mismatch")),
+        "literal v12 must be rejected, even with {panics} panics");
+    assert!(find_definition_index_for_dir(root, &base, &["cs".to_string()]).is_none(),
+        "fallback discovery must not revive literal v12");
+
+    let mut current = cache_467_definition_fixture(root, 'b', 1);
+    current.format_version = 13;
+    current.method_calls.insert(0, vec![crate::definitions::CallSite {
+        method_name: "TargetSentinel".into(), receiver_type: None, line: 7,
+        call_kind: crate::definitions::CallSiteKind::Unknown, receiver_is_generic: false,
+    }]);
+    current.input_fingerprints.insert("source.cs".into(), crate::definitions::DefinitionInputFingerprint {
+        size: 41, modified_nanos: 17, content_hash: [7; 32],
+    });
+    parser_reuse_save_cache(&current, &base, sharded, sidecar);
+    let direct = load_definition_index(root, "cs", &base).unwrap();
+    let fallback = find_definition_index_for_dir(root, &base, &["cs".into()]).unwrap();
+    for loaded in [direct, fallback] {
+        assert_eq!(loaded.format_version, 13);
+        assert_eq!(loaded.worker_panics, 0);
+        assert_eq!(serde_json::to_value(&loaded.definitions).unwrap(), serde_json::to_value(&current.definitions).unwrap());
+        assert_eq!(loaded.method_calls, current.method_calls);
+        assert_eq!(loaded.input_fingerprints, current.input_fingerprints);
+    }
+}
+
+macro_rules! parser_reuse_v12_tests {
+    ($name:ident, $panics:expr, $sharded:expr, $sidecar:expr) => {
+        #[test]
+        fn $name() { parser_reuse_reject_literal_v12($panics, $sharded, $sidecar); }
+    };
+}
+
+parser_reuse_v12_tests!(parser_reuse_v12_zero_compressed, 0, false, false);
+parser_reuse_v12_tests!(parser_reuse_v12_zero_compressed_sidecar, 0, false, true);
+parser_reuse_v12_tests!(parser_reuse_v12_zero_sharded, 0, true, false);
+parser_reuse_v12_tests!(parser_reuse_v12_zero_sharded_sidecar, 0, true, true);
+parser_reuse_v12_tests!(parser_reuse_v12_panics_compressed, 11, false, false);
+parser_reuse_v12_tests!(parser_reuse_v12_panics_compressed_sidecar, 11, false, true);
+parser_reuse_v12_tests!(parser_reuse_v12_panics_sharded, 11, true, false);
+parser_reuse_v12_tests!(parser_reuse_v12_panics_sharded_sidecar, 11, true, true);
 
 #[test]
 fn test_def_index_format_version_correct_loads_ok() {

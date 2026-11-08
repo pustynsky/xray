@@ -27,6 +27,8 @@ pub(crate) fn parse_rust_definitions(
     // PARSE-001: bound parse wall-clock so a single pathological file cannot
     // pin a worker thread indefinitely.
     parser.set_timeout_micros(PARSE_TIMEOUT_MICROS);
+    // Interrupted parses retain state; this call starts an independent document.
+    parser.reset();
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => {
