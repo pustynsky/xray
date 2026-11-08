@@ -203,7 +203,7 @@ fn test_rust_macro_graph_cache_roundtrip_and_old_version_rejection() {
     crate::index::save_sharded(&path, &old_head, entries, "definition-index").unwrap();
     let error = load_definition_index(&index.root, "rs", tmp.path()).unwrap_err();
     assert!(error.to_string().contains("format version mismatch"), "{error}");
-    assert_eq!(DEFINITION_INDEX_VERSION, 12);
+    assert_eq!(loaded.format_version, DEFINITION_INDEX_VERSION);
     drop(index);
     *lock.write().unwrap() = loaded;
     let down = rust_macro_graph(&ctx, json!({"method": ["main"], "direction": "down", "depth": 1}));

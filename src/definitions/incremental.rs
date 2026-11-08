@@ -23,6 +23,10 @@ use super::parser_sql::parse_sql_definitions;
 #[cfg(feature = "lang-rust")]
 use super::parser_rust::parse_rust_definitions;
 
+#[cfg(all(test, any(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-rust")))]
+#[path = "parser_reuse_tests.rs"]
+mod parser_reuse_tests;
+
 /// Parse a file WITHOUT accessing the DefinitionIndex.
 ///
 /// Returns a `ParsedFileResult` containing all parsed data ready to be applied.

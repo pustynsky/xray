@@ -262,7 +262,8 @@ pub struct CallSite {
 
 /// Format version for DefinitionIndex. Bump when changing layout or call-analysis semantics.
 /// Loading an index with a different version triggers a rebuild.
-pub const DEFINITION_INDEX_VERSION: u32 = 12;
+/// Version 13 invalidates incomplete or mixed-source results from interrupted parser reuse.
+pub const DEFINITION_INDEX_VERSION: u32 = 13;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct DefinitionInputFingerprint {
