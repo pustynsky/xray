@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Update the rustix dependency.** Upgrade transitive `rustix` to 1.1.6 and its
+  required `linux-raw-sys` dependency to 0.12.1 to resolve RUSTSEC-2026-0486.
+
 - **Install with empty MCP configuration files.** Treat empty or whitespace-only
   MCP configs as empty objects with a warning, preserving original backups.
   Workspace restore retains the backup bytes, including BOM and encoding.
