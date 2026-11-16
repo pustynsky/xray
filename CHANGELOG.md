@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Update the rustix dependency.** Upgrade transitive `rustix` to 1.1.6 and its
+  required `linux-raw-sys` dependency to 0.12.1 to resolve RUSTSEC-2026-0486.
+
+- **Install with empty MCP configuration files.** Treat empty or whitespace-only
+  MCP configs as empty objects with a warning, preserving original backups.
+  Workspace restore retains the backup bytes, including BOM and encoding.
+  Malformed nonempty JSON and non-MCP files remain strictly validated.
+  Installation examples now show `-UserMcp -EnableCopilotCli` for CLI-only users
+  without reading or writing personal VS Code configuration.
+
 - **Recover definition indexing after interrupted parses.** Reset reused C#,
   TypeScript/TSX and Rust parsers before each independent document so a timeout
   cannot leak the previous file's nodes into the next file or discard an entire
