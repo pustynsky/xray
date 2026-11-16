@@ -48,6 +48,13 @@ Shortest. The script is fetched and executed in-memory; nothing is left on disk.
 & ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content)) -UserMcp
 ```
 
+**Using only Copilot CLI?** Select it explicitly so setup does not read or write
+personal VS Code configuration or profile-association files:
+
+```powershell
+& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content)) -UserMcp -EnableCopilotCli
+```
+
 #### From Command Prompt (`cmd.exe`)
 
 CMD has no PowerShell host, so launch the same installer through the built-in `powershell.exe`:
@@ -347,6 +354,14 @@ Configuration** in the intended window and supply its exact path:
 even when its chat is displayed inside VS Code. Without either switch, both
 registrations are configured. Repeat setup for another VS Code profile if
 needed; workspace settings stay in the same shared profile directory.
+
+Existing MCP configuration files that are empty or contain only whitespace are
+treated as empty objects with a warning. Setup preserves their original contents
+in a `.bak` file before writing a registration; workspace `-Restore` can restore
+that empty content exactly. `-PlanOnly` does not write configs or backups.
+Nonempty malformed JSON is still rejected without overwriting it. Other JSON
+files, including workspace profiles, Copilot trust settings, and VS Code
+profile-association state, retain their existing strict validation.
 
 Each Xray profile contains the workspace root and ordinary `serve` arguments:
 

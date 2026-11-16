@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Install with empty MCP configuration files.** Treat empty or whitespace-only
+  MCP configs as empty objects with a warning, preserving original backups.
+  Workspace restore retains the backup bytes, including BOM and encoding.
+  Malformed nonempty JSON and non-MCP files remain strictly validated.
+  Installation examples now show `-UserMcp -EnableCopilotCli` for CLI-only users
+  without reading or writing personal VS Code configuration.
+
 - **Recover definition indexing after interrupted parses.** Reset reused C#,
   TypeScript/TSX and Rust parsers before each independent document so a timeout
   cannot leak the previous file's nodes into the next file or discard an entire

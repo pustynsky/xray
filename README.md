@@ -47,6 +47,12 @@ Built on the same [`ignore`](https://crates.io/crates/ignore) crate that backs [
 & ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content)) -UserMcp
 ```
 
+**Copilot CLI only (no VS Code configuration):**
+
+```powershell
+& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content)) -UserMcp -EnableCopilotCli
+```
+
 | What you need | Command |
 |---|---|
 | One repository | `setup-xray.ps1 -RepoPath <path> -UserMcp` (add `-MigrateLegacy` to migrate old workspace registrations) |

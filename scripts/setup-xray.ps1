@@ -532,7 +532,13 @@ $Script:XrayMcpMarker = 'managed-by-setup-xray.ps1-do-not-edit'
 $Script:XrayVisibleWarning = 'xray MCP entry added by setup-xray.ps1 (embeds a per-machine local path). If this file is git-tracked, MAKE SURE you want to commit/push this change.'
 
 function ConvertFrom-SetupJson {
-    param([Parameter(Mandatory)] [string]$Text, [Parameter(Mandatory)] [string]$Path)
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string]$Text, [Parameter(Mandatory)] [string]$Path,
+        [switch]$AllowEmpty)
+
+    if ($AllowEmpty -and [string]::IsNullOrWhiteSpace($Text)) {
+        Write-Warning "Empty MCP configuration in $Path. Treating it as an empty object."
+        return [PSCustomObject]@{}
+    }
 
     # Copilot CLI prefixes its managed config with // header comments.
     $jsonText = $Text -replace '\A(?:\s*//[^\r\n]*(?:\r\n|\r|\n|\z))*', ''
@@ -590,13 +596,13 @@ function ConvertFrom-SetupJsonToken {
 }
 
 function Read-SetupJson {
-    param([Parameter(Mandatory)] [string]$Path)
+    param([Parameter(Mandatory)] [string]$Path, [switch]$AllowEmpty)
 
     $text = $null
     $value = [PSCustomObject]@{}
     if (Test-Path -LiteralPath $Path) {
         $text = [IO.File]::ReadAllText($Path)
-        $value = ConvertFrom-SetupJson -Text $text -Path $Path
+        $value = ConvertFrom-SetupJson -Text $text -Path $Path -AllowEmpty:$AllowEmpty
     }
     return [PSCustomObject]@{ Path = $Path; Text = $text; Value = $value }
 }
@@ -618,11 +624,13 @@ function Write-SetupText {
         [Parameter(Mandatory)] [string]$Path,
         [AllowEmptyString()] [string]$Text,
         [AllowNull()] $OriginalText,
-        [switch]$Backup
+        [switch]$Backup,
+        [byte[]]$Bytes
     )
 
     $exists = Test-Path -LiteralPath $Path
-    if ($exists -and [IO.File]::ReadAllText($Path) -ceq $Text) { return $false }
+    $writeBytes = $PSBoundParameters.ContainsKey('Bytes')
+    if (-not $writeBytes -and $exists -and [IO.File]::ReadAllText($Path) -ceq $Text) { return $false }
     if (($null -eq $OriginalText -and $exists) -or
         ($null -ne $OriginalText -and (-not $exists -or [IO.File]::ReadAllText($Path) -cne $OriginalText))) {
         throw "File changed during setup: $Path. Retry rather than overwriting concurrent changes."
@@ -633,7 +641,8 @@ function Write-SetupText {
     }
     $temp = Join-Path $parent ([IO.Path]::GetRandomFileName())
     try {
-        [IO.File]::WriteAllText($temp, $Text, [Text.UTF8Encoding]::new($false))
+        if ($writeBytes) { [IO.File]::WriteAllBytes($temp, $Bytes) }
+        else { [IO.File]::WriteAllText($temp, $Text, [Text.UTF8Encoding]::new($false)) }
         if ($Backup) { Backup-McpJson -Path $Path }
         if ($exists) {
             if ([IO.File]::ReadAllText($Path) -cne $OriginalText) {
@@ -666,7 +675,7 @@ function Write-SetupJson {
     param([Parameter(Mandatory)] $Document, [switch]$Backup)
 
     $after = ConvertTo-SetupJson -Value $Document.Value -Path $Document.Path -Compress
-    if ($null -ne $Document.Text) {
+    if ($null -ne $Document.Text -and -not [string]::IsNullOrWhiteSpace($Document.Text)) {
         $before = ConvertFrom-SetupJson -Text $Document.Text -Path $Document.Path
         if ((ConvertTo-SetupJson -Value $before -Path $Document.Path -Compress) -ceq $after) { return $false }
     }
@@ -677,12 +686,16 @@ function Write-SetupJson {
 }
 
 function Restore-McpJson {
-    param([Parameter(Mandatory)] [string]$Path)
+    param([Parameter(Mandatory)] [string]$Path, [switch]$AllowEmpty)
 
     if (-not (Test-Path -LiteralPath "$Path.bak")) { return $false }
-    $backup = Read-SetupJson -Path "$Path.bak"
+    $bytes = [IO.File]::ReadAllBytes("$Path.bak")
+    $reader = [IO.StreamReader]::new([IO.MemoryStream]::new($bytes))
+    try { $text = $reader.ReadToEnd() }
+    finally { $reader.Dispose() }
+    $null = ConvertFrom-SetupJson -Text $text -Path "$Path.bak" -AllowEmpty:$AllowEmpty
     $original = if (Test-Path -LiteralPath $Path) { [IO.File]::ReadAllText($Path) } else { $null }
-    [void](Write-SetupText -Path $Path -Text $backup.Text -OriginalText $original)
+    [void](Write-SetupText -Path $Path -Text $text -OriginalText $original -Bytes $bytes)
     Remove-Item -LiteralPath "$Path.bak" -Force
     Write-Host "Restored $Path from backup" -ForegroundColor Green
     return $true
@@ -925,7 +938,7 @@ function Get-LegacyMcpState {
         $parseError = $false
         if (Test-Path -LiteralPath $path) {
             try {
-                $document = Read-SetupJson -Path $path
+                $document = Read-SetupJson -Path $path -AllowEmpty
                 $containerProperty = $document.Value.PSObject.Properties[$definition.Container]
                 $container = if ($containerProperty) { $containerProperty.Value } elseif ($definition.Relative -eq '.mcp.json') { $document.Value } else { $null }
                 if ($containerProperty -and $container -isnot [PSCustomObject]) {
@@ -997,7 +1010,7 @@ function Remove-XrayServerEntry {
         if ($PSBoundParameters.ContainsKey('ExpectedText')) { throw "File changed during setup: $Path. Retry rather than overwriting concurrent changes." }
         return 'absent'
     }
-    $document = Read-SetupJson -Path $Path
+    $document = Read-SetupJson -Path $Path -AllowEmpty
     if ($PSBoundParameters.ContainsKey('ExpectedText') -and $document.Text -cne $ExpectedText) {
         throw "File changed during setup: $Path. Retry rather than overwriting concurrent changes."
     }
@@ -1347,7 +1360,7 @@ function Get-UserMcpMigrationConfigs {
         @{ Relative = '.vscode/mcp.json'; Container = 'servers' }
     )) {
         $path = Join-Path $RepoRoot $definition.Relative
-        $document = Read-SetupJson -Path $path
+        $document = Read-SetupJson -Path $path -AllowEmpty
         $container = $document.Value.PSObject.Properties[$definition.Container]
         $entry = if ($container -and $container.Value -is [PSCustomObject]) { $container.Value.PSObject.Properties['xray'] } else { $null }
         if (-not $container -and $definition.Relative -eq '.mcp.json') { $entry = $document.Value.PSObject.Properties['xray'] }
@@ -1538,7 +1551,7 @@ function Remove-UserMcpWorkspace {
     param([string]$ProfilePath, [string]$Profiles, [string]$Binary, [object[]]$Targets,
         [switch]$DryRun, [switch]$KeepBinary, [switch]$KeepBackups)
     foreach ($target in $Targets) {
-        $document = Read-SetupJson -Path $target.Path
+        $document = Read-SetupJson -Path $target.Path -AllowEmpty
         $container = $document.Value.PSObject.Properties[$target.Container]
         if ($container -and $container.Value -isnot [PSCustomObject]) {
             throw "Expected an object for $($target.Container) in $($target.Path)."
@@ -1559,7 +1572,7 @@ function Remove-UserMcpWorkspace {
         return
     }
     foreach ($target in $Targets) {
-        $document = Read-SetupJson -Path $target.Path
+        $document = Read-SetupJson -Path $target.Path -AllowEmpty
         $container = $document.Value.PSObject.Properties[$target.Container]
         $entry = if ($container -and $container.Value -is [PSCustomObject]) { $container.Value.PSObject.Properties['xray'] } else { $null }
         if ($entry) {
@@ -1789,7 +1802,7 @@ $targets = @(
 if ($VSCodeMcpPath -and -not $UserMcp) { Write-Error '-VSCodeMcpPath requires -UserMcp.' }
 if (-not $UserMcp -and -not $Uninstall) {
     foreach ($target in @(Get-UserMcpTargets -RepoRoot $RepoPath -IncludeVSCode ($selectAll -or $EnableVSCode) | Where-Object Selected)) {
-        $document = Read-SetupJson -Path $target.Path
+        $document = Read-SetupJson -Path $target.Path -AllowEmpty
         $container = $document.Value.PSObject.Properties[$target.Container]
         if ($container -and $container.Value -isnot [PSCustomObject]) {
             throw "Expected an object for $($target.Container) in $($target.Path)."
@@ -1851,10 +1864,10 @@ if ($Restore) {
         }
         if (Test-Path -LiteralPath "$($target.Path).bak") {
             if ($isGitRepo) { Protect-McpPath -RepoRoot $RepoPath -RelativePath $target.Relative -ExcludePath $excludePath }
-            if (Restore-McpJson -Path $target.Path) {
+            if (Restore-McpJson -Path $target.Path -AllowEmpty) {
                 $restored = $true
                 if ($target.Client -eq 'Copilot CLI') {
-                    $document = Read-SetupJson -Path $target.Path
+                    $document = Read-SetupJson -Path $target.Path -AllowEmpty
                     $container = $document.Value.PSObject.Properties['mcpServers']
                     $hasXray = $container -and $container.Value -is [PSCustomObject] -and $container.Value.PSObject.Properties['xray']
                     if (-not $hasXray -or -not (Test-Path -LiteralPath (Join-Path $RepoPath '.mcp.json') -PathType Leaf)) {
@@ -1958,7 +1971,7 @@ foreach ($target in ($targets | Where-Object { $_.Selected })) {
                 }
             }
         }
-        $target.Document = Read-SetupJson -Path $target.Path
+        $target.Document = Read-SetupJson -Path $target.Path -AllowEmpty
         $container = $target.Document.Value.PSObject.Properties[$target.Container]
         if ($container -and $container.Value -isnot [PSCustomObject]) {
             throw "Expected an object for $($target.Container) in $($target.Path)."

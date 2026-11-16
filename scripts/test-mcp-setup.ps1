@@ -1346,13 +1346,47 @@ try {
             finally { $env:APPDATA = $oldAppData; $env:VSCODE_PORTABLE = $oldPortable }
         }
 
-        Test-Case 'CLI-only setup does not depend on VS Code state' {
-            $f = New-UserMcpFixture
-            Write-FixtureFile (Join-Path $f.Home 'appdata\Code\User\globalStorage\storage.json') '{'
-            $result = Invoke-UserMcpSetup $f @{ EnableCopilotCli = $true; VSCodeMcpPath = '' }
-            Assert-Success $result
-            Assert-True ((Read-SetupJson (Join-Path $f.Home 'mcp-config.json')).Value.mcpServers.xray.args[0] -eq 'serve-workspace') 'CLI/SDK configured independently'
-            Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.Home 'appdata\Code\User\mcp.json'))) 'VS Code not selected'
+        Test-Case 'blank MCP personal configs support read-only plans and exact backups' {
+            foreach ($text in @('', " `t`r`n")) {
+                $f = New-UserMcpFixture
+                $cli = Join-Path $f.Home 'mcp-config.json'
+                $vscode = Join-Path $f.Home 'vscode\mcp.json'
+                $workspacePaths = @('.mcp.json', '.github\mcp.json', '.vscode\mcp.json') | ForEach-Object { Join-Path $f.Repo $_ }
+                foreach ($path in @($cli, $vscode) + $workspacePaths) { Write-FixtureFile $path $text }
+                $plan = Invoke-UserMcpSetup $f @{ PlanOnly = $true }
+                Assert-Success $plan
+                Assert-True ($plan.Output -match 'Empty MCP configuration') 'Blank MCP config reported'
+                foreach ($path in @($cli, $vscode) + $workspacePaths) {
+                    Assert-True ([IO.File]::ReadAllText($path) -ceq $text) 'Plan preserves blank config bytes'
+                    Assert-True (-not (Test-Path -LiteralPath "$path.bak")) 'Plan creates no backup'
+                }
+                Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.Install 'workspaces'))) 'Plan creates no workspace profile'
+                Assert-Success (Invoke-UserMcpSetup $f)
+                Assert-True ((Get-FixtureJson $cli).mcpServers.xray.args[0] -eq 'serve-workspace') 'Blank CLI config initialized'
+                Assert-True ((Get-FixtureJson $vscode).servers.xray.args[0] -eq 'serve-workspace') 'Blank VS Code config initialized'
+                foreach ($path in @($cli, $vscode)) {
+                    Assert-True ([IO.File]::ReadAllText("$path.bak") -ceq $text) 'Original blank personal config backed up exactly'
+                }
+                foreach ($path in $workspacePaths) {
+                    Assert-True ([IO.File]::ReadAllText($path) -ceq $text) 'Blank workspace configs left untouched'
+                }
+            }
+        }
+
+        Test-Case 'CLI-only setup does not depend on blank MCP or malformed VS Code state' {
+            foreach ($text in @('', " `t`r`n", '{')) {
+                $f = New-UserMcpFixture
+                $state = Join-Path $f.Home 'appdata\Code\User\globalStorage\storage.json'
+                $mcp = Join-Path $f.Home 'appdata\Code\User\mcp.json'
+                Write-FixtureFile $state '{'
+                Write-FixtureFile $mcp $text
+                $result = Invoke-UserMcpSetup $f @{ EnableCopilotCli = $true; VSCodeMcpPath = '' }
+                Assert-Success $result
+                Assert-True ((Read-SetupJson (Join-Path $f.Home 'mcp-config.json')).Value.mcpServers.xray.args[0] -eq 'serve-workspace') 'CLI/SDK configured independently'
+                Assert-True ([IO.File]::ReadAllText($state) -ceq '{') 'Unselected VS Code profile state untouched'
+                Assert-True ([IO.File]::ReadAllText($mcp) -ceq $text) 'Unselected VS Code MCP config untouched'
+                Assert-True (-not (Test-Path -LiteralPath "$mcp.bak")) 'Unselected VS Code config has no backup'
+            }
         }
 
         Test-Case 'personal relative paths use PowerShell location, not process CWD' {
@@ -1613,6 +1647,58 @@ try {
             Assert-True ([IO.File]::ReadAllText($path) -ceq $text) 'Tracked file unchanged'
             Assert-True (((Invoke-SetupGit $f.Repo @('ls-files', '--stage', '--', $relative)).Lines -join '') -ceq $index) 'Index unchanged'
             Assert-True (-not (Test-Path "$path.bak")) 'No tracked-file backup'
+        }
+    }
+
+    Test-Case 'blank MCP workspace configs initialize and restore exact original bytes' {
+        foreach ($encoding in @([Text.UTF8Encoding]::new($false), [Text.UTF8Encoding]::new($true), [Text.UnicodeEncoding]::new($false, $true))) {
+            foreach ($text in @('', " `t`r`n")) {
+                $f = New-Fixture
+                $paths = @('.github\mcp.json', '.vscode\mcp.json') | ForEach-Object { Join-Path $f.Repo $_ }
+                $personalPaths = @((Join-Path $f.Home 'mcp-config.json'), (Join-Path $f.Home 'appdata\Code\User\mcp.json'))
+                foreach ($path in $paths + $personalPaths) { Write-FixtureFile $path $text }
+                $hashes = @{}
+                foreach ($path in $paths) {
+                    [IO.File]::WriteAllText($path, $text, $encoding)
+                    $hashes[$path] = (Get-FileHash -LiteralPath $path).Hash
+                }
+                $result = Invoke-FixtureSetup $f -Inline
+                Assert-Success $result
+                Assert-True ($result.Output -match 'Empty MCP configuration') 'Blank workspace MCP config reported'
+                Assert-True ((Get-FixtureJson $paths[0]).mcpServers.xray.command -eq (Join-Path $f.Install 'xray.exe')) 'Blank workspace CLI config initialized'
+                Assert-True ((Get-FixtureJson $paths[1]).servers.xray.command -eq (Join-Path $f.Install 'xray.exe')) 'Blank workspace VS Code config initialized'
+                foreach ($path in $paths) {
+                    Assert-True ((Get-FileHash -LiteralPath "$path.bak").Hash -ceq $hashes[$path]) 'Original blank workspace config backed up byte-for-byte'
+                }
+                Assert-Success (Invoke-FixtureSetup $f @{ Restore = $true } -Inline)
+                foreach ($path in $paths) {
+                    Assert-True ((Get-FileHash -LiteralPath $path).Hash -ceq $hashes[$path]) 'Blank workspace config restored byte-for-byte including BOM and encoding'
+                }
+                foreach ($path in $personalPaths) {
+                    Assert-True ([IO.File]::ReadAllText($path) -ceq $text) 'Personal preflight leaves blank configs untouched'
+                    Assert-True (-not (Test-Path -LiteralPath "$path.bak")) 'Personal preflight creates no backup'
+                }
+            }
+        }
+    }
+
+    Test-Case 'blank MCP support does not relax strict JSON reads' {
+        $f = New-Fixture
+        $path = Join-Path $f.Home 'config.json'
+        foreach ($text in @('', " `t`r`n", '{')) {
+            Write-FixtureFile $path $text
+            $failed = $false
+            try { $null = Read-SetupJson -Path $path }
+            catch { $failed = $true }
+            Assert-True $failed 'Non-MCP JSON reads remain strict'
+            if (-not [string]::IsNullOrWhiteSpace($text)) {
+                $failed = $false
+                try { $null = Read-SetupJson -Path $path -AllowEmpty }
+                catch { $failed = $true }
+                Assert-True $failed 'Nonblank malformed MCP JSON is still rejected'
+            }
+            Assert-True ([IO.File]::ReadAllText($path) -ceq $text) 'Rejected JSON bytes preserved'
+            Assert-True (-not (Test-Path -LiteralPath "$path.bak")) 'Rejected JSON creates no backup'
         }
     }
 
