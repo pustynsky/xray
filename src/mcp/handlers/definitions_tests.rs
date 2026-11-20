@@ -7312,7 +7312,8 @@ fn test_scope_diagnostic_dispatch_transport_budget() {
                     assert!(output.get("suggestedMatches").is_none());
                     assert!(output.get("recommendedNextQueries").is_none(), "{output}");
                     if contains_line {
-                        assert!(output.get("resultStatus").is_none(), "{output}");
+                        assert!(output["resultStatus"]["indexGeneration"].is_u64(), "{output}");
+                        assert!(output["resultStatus"].get("status").is_none(), "{output}");
                     } else {
                         assert_eq!(output["resultStatus"]["status"], "not_found", "{output}");
                     }

@@ -2887,6 +2887,109 @@ fn test_workspace_switch_panic_guard_preserves_unresolved_and_reindexing_status(
 }
 
 #[test]
+#[cfg(feature = "lang-rust")]
+fn definition_rebuild_freshness_recovers_only_observations_before_build() {
+    let (_temp, ctx, roots) = definition_switch_fixture();
+    let ctx = std::sync::Arc::new(ctx);
+    let args = json!({"dir": roots[1], "ext": ["rs"]});
+    assert!(!handle_xray_reindex_definitions_inner(&ctx, &args).is_error);
+    assert!(!ctx.watch_enabled);
+    let index = ctx.def_index.as_ref().unwrap();
+    let tracker = index.read().unwrap().freshness.clone();
+    let path = std::path::Path::new(&roots[1]).join("a.rs");
+    tracker.observe([&path], true);
+
+    let (reached, entered) = std::sync::mpsc::channel();
+    let (resume, release) = std::sync::mpsc::channel();
+    super::PRIMARY_REINDEX_BARRIERS.lock().unwrap().insert(
+        roots[1].clone(), super::ContentCrossBuildBarrier { reached, resume: release },
+    );
+    let rebuild = std::thread::spawn({
+        let ctx = ctx.clone();
+        let args = args.clone();
+        move || handle_xray_reindex_definitions_inner(&ctx, &args)
+    });
+    entered.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    std::fs::write(&path, "pub fn updated_during_rebuild() {}\n").unwrap();
+    tracker.observe([&path], true);
+    resume.send(()).unwrap();
+    let result = rebuild.join().unwrap();
+    assert!(!result.is_error, "{result:?}");
+    assert_eq!(index.read().unwrap().freshness_reason(), Some("index_update_in_progress"));
+
+    std::fs::write(&path, "pub fn recovered_without_watcher() {}\n").unwrap();
+    let result = handle_xray_reindex_definitions_inner(&ctx, &args);
+    assert!(!result.is_error, "{result:?}");
+    let live = index.read().unwrap();
+    assert_eq!(live.freshness_reason(), None);
+    assert!(live.name_index.contains_key("recovered_without_watcher"));
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
+fn definition_rebuild_freshness_publishes_readable_sources_and_recovers() {
+    let (_temp, ctx, roots) = definition_switch_fixture();
+    let args = json!({"dir": roots[1], "ext": ["rs"]});
+    assert!(!handle_xray_reindex_definitions_inner(&ctx, &args).is_error);
+    let root = std::path::Path::new(&roots[1]);
+    let unreadable = root.join("a.rs");
+    std::fs::write(root.join("healthy.rs"), "pub fn available_during_rebuild() {}\n").unwrap();
+    crate::definitions::install_definition_source_read_error(
+        &unreadable, std::io::ErrorKind::PermissionDenied,
+    );
+    let result = handle_xray_reindex_definitions_inner(&ctx, &args);
+    crate::definitions::remove_definition_source_read_error(&unreadable);
+    assert!(!result.is_error, "{result:?}");
+    let index = ctx.def_index.as_ref().unwrap();
+    {
+        let live = index.read().unwrap();
+        assert_eq!(live.freshness_reason(), Some("definition_input_unavailable"));
+        assert!(live.name_index.contains_key("available_during_rebuild"));
+        assert!(!live.name_index.contains_key("from_a"));
+    }
+
+    crate::definitions::reconcile_definition_index_with_scope(
+        index, &roots[1], &["rs".into()], false, None, None,
+    );
+    let live = index.read().unwrap();
+    assert!(live.name_index.contains_key("from_a"));
+    assert_eq!(live.freshness_reason(), None);
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
+fn definition_rebuild_freshness_preserves_newer_publication() {
+    let (_temp, ctx, roots) = definition_switch_fixture();
+    let ctx = std::sync::Arc::new(ctx);
+    let args = json!({"dir": roots[1], "ext": ["rs"]});
+    assert!(!handle_xray_reindex_definitions_inner(&ctx, &args).is_error);
+    let (reached, entered) = std::sync::mpsc::channel();
+    let (resume, release) = std::sync::mpsc::channel();
+    super::PRIMARY_REINDEX_BARRIERS.lock().unwrap().insert(
+        roots[1].clone(), super::ContentCrossBuildBarrier { reached, resume: release },
+    );
+    let older = std::thread::spawn({
+        let ctx = ctx.clone();
+        let args = args.clone();
+        move || handle_xray_reindex_definitions_inner(&ctx, &args)
+    });
+    entered.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    let path = std::path::Path::new(&roots[1]).join("a.rs");
+    std::fs::write(&path, "pub fn newer_publication() {}\n").unwrap();
+    let newer = handle_xray_reindex_definitions_inner(&ctx, &args);
+    assert!(!newer.is_error, "{newer:?}");
+    std::fs::write(&path, "pub fn rejected_candidate() {}\n").unwrap();
+    resume.send(()).unwrap();
+    let rejected = older.join().unwrap();
+    assert!(rejected.is_error);
+    assert!(rejected.content[0].text.contains("changed during rebuild"));
+    let live = ctx.def_index.as_ref().unwrap().read().unwrap();
+    assert!(live.name_index.contains_key("newer_publication"));
+    let persisted = crate::definitions::load_definition_index(&roots[1], "rs", &ctx.index_base).unwrap();
+    assert!(persisted.name_index.contains_key("newer_publication"));
+}
+
+#[test]
 fn test_definition_reindex_publish_failure_preserves_unresolved_workspace() {
     for workspace_changed in [false, true] {
         let (temp, ctx, roots) = definition_switch_fixture();

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::definitions::DefinitionIndex;
 use crate::mcp::protocol::ToolCallResult;
 use crate::clean_path;
 
@@ -201,6 +202,55 @@ pub(crate) fn attach_result_status(output: Value, result_status: Value) -> Value
         }
     }
     Value::Object(ordered)
+}
+
+/// Stamp the applied generation and freshness while the caller still holds
+/// the same definition-index read guard used to build the result.
+pub(super) fn attach_definition_index_result_status(
+    output: Value,
+    mut result_status: Value,
+    index: &DefinitionIndex,
+) -> Value {
+    result_status["indexGeneration"] = json!(index.definition_generation);
+    if let Some(reason) = index.freshness_reason() {
+        mark_definition_result_unsettled(&mut result_status, reason);
+    }
+    attach_result_status(output, result_status)
+}
+
+fn mark_definition_result_unsettled(result_status: &mut Value, reason: &str) {
+    result_status["status"] = json!("partial");
+    result_status["complete"] = json!(false);
+    result_status["safeForExactSemantics"] = json!(false);
+    result_status["safeForExhaustiveClaims"] = json!(false);
+    result_status["totalKnown"] = json!(false);
+    if let Some(page) = result_status.get_mut("page").and_then(Value::as_object_mut) {
+        page.insert("totalKnown".to_string(), json!(false));
+    }
+    if result_status["reasons"].is_null() {
+        result_status["reasons"] = json!([]);
+    }
+    if let Some(reasons) = result_status["reasons"].as_array_mut()
+        && !reasons.iter().any(|existing| existing == reason)
+    {
+        reasons.push(json!(reason));
+    }
+}
+
+// A budget error builds a replacement status without the index guard.
+// Carry forward freshness from the result's snapshot, never re-read the index.
+fn preserve_definition_index_status(source_status: &Value, result_status: &mut Value) {
+    let Some(generation) = source_status.get("indexGeneration") else {
+        return;
+    };
+    result_status["indexGeneration"] = generation.clone();
+    if let Some(reasons) = source_status.get("reasons").and_then(Value::as_array) {
+        for reason in reasons.iter().filter_map(Value::as_str) {
+            if matches!(reason, "index_update_in_progress" | "definition_input_unavailable") {
+                mark_definition_result_unsettled(result_status, reason);
+            }
+        }
+    }
 }
 
 pub(crate) fn set_result_status(output: &mut Value, result_status: Value) {
@@ -2521,6 +2571,7 @@ fn call_tree_node_page_skeleton(output: &Value) -> Value {
 
 #[allow(clippy::too_many_arguments)]
 fn call_tree_node_page_error(
+    source_status: &Value,
     code: &str,
     message: &str,
     max_bytes: usize,
@@ -2568,6 +2619,7 @@ fn call_tree_node_page_error(
             },
         },
     });
+    preserve_definition_index_status(source_status, &mut result["resultStatus"]);
     if measure_json_size(&result) > max_bytes {
         result = json!({
             "error": {
@@ -2594,7 +2646,8 @@ fn fit_call_tree_node_page(
     original_bytes: usize,
 ) -> Option<Value> {
     let root = output.get("callTree")?.as_array()?.first()?;
-    let page = output.get("resultStatus")?.get("page")?;
+    let source_status = output.get("resultStatus")?;
+    let page = source_status.get("page")?;
     let root_offset = page.get("offset")?.as_u64()? as usize;
     let root_total = page.get("total")?.as_u64()? as usize;
     let node_offset = page
@@ -2604,13 +2657,11 @@ fn fit_call_tree_node_page(
     let workspace_generation = page.get("workspaceGeneration")?.as_u64()?;
     let index_epoch = page.get("indexEpoch")?.as_u64()?;
     let query_fingerprint = page.get("queryFingerprint")?.as_str()?;
-    let total_known = output
-        .get("resultStatus")?
-        .get("totalKnown")?
-        .as_bool()?;
+    let total_known = source_status.get("totalKnown")?.as_bool()?;
     let records = flatten_call_tree_root(root, root_offset);
     if node_offset >= records.len() {
         return Some(call_tree_node_page_error(
+            source_status,
             "continuation_offset_out_of_range",
             "The call-tree continuation node offset is outside the rebuilt root.",
             max_bytes,
@@ -2716,6 +2767,7 @@ fn fit_call_tree_node_page(
         build_candidate(keep, false)
     } else {
         call_tree_node_page_error(
+            source_status,
             "single_item_exceeds_response_budget",
             "The next complete call-tree node record exceeds the response byte budget.",
             max_bytes,
@@ -2870,6 +2922,7 @@ fn oversized_page_item_error(output: &Value, max_bytes: usize) -> Value {
             },
         },
     });
+    preserve_definition_index_status(&output["resultStatus"], &mut result["resultStatus"]);
     if measure_json_size(&result) > max_bytes {
         result = json!({
             "error": {

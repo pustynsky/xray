@@ -454,6 +454,8 @@ pub fn start_watcher(
                         file_index_dirty.store(true, Ordering::Relaxed);
                     }
 
+                    let mut event_dirty = HashSet::new();
+                    let mut event_removed = HashSet::new();
                     let queued = classify_event_paths(
                         &event.kind,
                         &event.paths,
@@ -464,9 +466,26 @@ pub fn start_watcher(
                                         && (matches_extensions(path, &definition_extensions)
                                             || is_angular_template_path(path)))
                         },
-                        &mut dirty_files,
-                        &mut removed_files,
+                        &mut event_dirty,
+                        &mut event_removed,
                     );
+                    let relevant_dirty: Vec<_> = event_dirty.iter().filter(|path| {
+                        is_definition_update_candidate(path, &definition_extensions, &def_index)
+                    }).cloned().collect();
+                    let relevant_dirty = included_paths_by_index_rules(
+                        &dir_str, &relevant_dirty, respect_git_exclude, true,
+                    );
+                    let removed: Vec<_> = event_removed.iter().cloned().collect();
+                    let (relevant_removed, _) = inspect_definition_batch(&def_index, &removed, &[]);
+                    observe_definition_paths(&def_index, relevant_dirty.iter().chain(&relevant_removed), Some(&scope), true);
+                    for path in event_dirty {
+                        removed_files.remove(&path);
+                        dirty_files.insert(path);
+                    }
+                    for path in event_removed {
+                        dirty_files.remove(&path);
+                        removed_files.insert(path);
+                    }
                     if queued && batch_start.is_none() {
                         batch_start = Some(Instant::now());
                     }
@@ -729,6 +748,8 @@ pub(crate) fn reindex_paths_sync_scoped(
     }
 
     // Apply via the same non-blocking helpers used by the watcher.
+    let (definition_removals, _) = inspect_definition_batch(def_index, &removed_clean, &[]);
+    observe_definition_paths(def_index, definition_dirty_clean.iter().chain(&definition_removals), None, false);
     let content_result = update_content_index(index, &removed_clean, &content_dirty_clean);
     if !content_result.ok {
         stats.content_lock_poisoned = true;
@@ -972,6 +993,8 @@ fn process_batch_with_scope(
 
     let batch_start = std::time::Instant::now();
 
+    let (definition_removals, _) = inspect_definition_batch(def_index, &removed_clean, &[]);
+    observe_definition_paths(def_index, definition_dirty_clean.iter().chain(&definition_removals), scope, false);
     // Update content index using batch_purge for O(total_postings) instead of O(N × total_postings)
     let content_result = update_content_index_with_scope(index, &removed_clean, &content_dirty_clean, expected_extensions, scope);
     if !content_result.ok {
@@ -1420,6 +1443,7 @@ fn inspect_definition_batch(
                         || index
                             .pending_definition_inputs
                             .contains_key(&crate::path_identity_key(path))
+                        || index.freshness.contains(path)
                 })
                 .cloned()
                 .collect();
@@ -1474,6 +1498,19 @@ fn reactivate_exhausted_definition_inputs(
     }
 }
 
+
+fn observe_definition_paths<'a>(
+    def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
+    paths: impl IntoIterator<Item = &'a PathBuf>,
+    scope: Option<&code_xray::IndexMutationScope>,
+    supersede: bool,
+) {
+    if let Some(index) = def_index.as_ref().and_then(|index| index.read().ok())
+        && scope.is_none_or(|scope| scope.matches(&index.root))
+    {
+        index.freshness.observe(paths, supersede);
+    }
+}
 
 fn update_definition_index(
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
@@ -1554,7 +1591,7 @@ fn update_definition_index_batch(
     let mut deferred_removed = HashSet::new();
     let mut deferred_dirty = HashSet::new();
 
-    let (workspace_root, existing_owner_keys) = match def_idx.read() {
+    let (workspace_root, existing_owner_keys, freshness, tickets) = match def_idx.read() {
         Ok(index) => {
             if scope.is_some_and(|scope| !scope.matches(&index.root)) {
                 return DefUpdateResult::unchanged();
@@ -1564,7 +1601,8 @@ fn update_definition_index_batch(
                 .map(|path| definitions::definition_input_key(path))
                 .filter(|owner_key| index.template_owners.contains_key(owner_key))
                 .collect();
-            (index.root.clone(), owner_keys)
+            let tickets = index.freshness.observe(&all_changed_paths, false);
+            (index.root.clone(), owner_keys, Arc::clone(&index.freshness), tickets)
         }
         Err(error) => {
             error!(%error, "Failed to acquire definition index read lock (poisoned)");
@@ -1696,6 +1734,7 @@ fn update_definition_index_batch(
             .iter()
             .map(|update| update.owner_key.clone()),
     );
+    input_keys.extend(transient_paths.keys().map(|path| definitions::definition_input_key(path)));
     let expected_fingerprints = match def_idx.read() {
         Ok(index) => input_keys
             .into_iter()
@@ -1730,10 +1769,22 @@ fn update_definition_index_batch(
             }
             let lock_wait_ms = write_wait_start.elapsed().as_secs_f64() * 1000.0;
             let update_start = std::time::Instant::now();
-            let conflicts = definitions::definition_fingerprint_conflicts(
+            if !Arc::ptr_eq(&freshness, &index.freshness) {
+                return DefUpdateResult::unchanged();
+            }
+            let mut conflicts = definitions::definition_fingerprint_conflicts(
                 &index,
                 &expected_fingerprints,
             );
+            conflicts.extend(freshness.conflicts(&tickets).iter().map(|path| definitions::definition_input_key(path)));
+            transient_paths.retain(|path, _| {
+                if conflicts.contains(&definitions::definition_input_key(path)) {
+                    deferred_dirty.insert(path.clone());
+                    false
+                } else {
+                    true
+                }
+            });
             if !conflicts.is_empty() {
                 let rejected_keys = definitions::retain_stable_prepared_definition_inputs(
                     &mut parsed,
@@ -1799,12 +1850,16 @@ fn update_definition_index_batch(
                 })
                 .cloned()
                 .collect();
+            let stale_cleanup = stable_dirty.iter().any(|path| {
+                !parsed_paths.contains(path) && index.path_to_id.contains_key(&crate::path_identity_key(path))
+            });
             let removed_indexed = !removed_indexed_paths.is_empty();
             applied_path_set.extend(removed_indexed_paths);
             let exhausted = !transient_resolution.exhausted_paths.is_empty();
             let applied_changes = !parsed.is_empty()
                 || !angular_updates.is_empty()
                 || removed_indexed
+                || stale_cleanup
                 || exhausted;
 
             for path in &stable_removed {
@@ -1841,6 +1896,9 @@ fn update_definition_index_batch(
             retry_dirty_paths.dedup();
             let mut retry_removed_paths: Vec<_> = deferred_removed.into_iter().collect();
             retry_removed_paths.sort_unstable();
+            let unresolved = retry_dirty_paths.iter().chain(&retry_removed_paths)
+                .map(|path| crate::path_identity_key(path)).collect();
+            freshness.acknowledge(&tickets, &unresolved);
             DefUpdateResult {
                 ok: true,
                 lock_wait_ms,
@@ -2997,7 +3055,9 @@ fn periodic_rescan_once_with_scope(
     let file_drift = file_index_added + file_index_removed > 0;
     let angular_definition_paths = angular_template_drift_paths(def_index);
     let angular_definition_drift = !angular_definition_paths.is_empty();
-    let definition_scan_needed = content_drift || angular_definition_drift;
+    let definition_work_pending = def_index.as_ref().and_then(|index| index.read().ok())
+        .is_some_and(|index| index.freshness.needs_retry(!index.pending_definition_inputs.is_empty()));
+    let definition_scan_needed = content_drift || angular_definition_drift || definition_work_pending;
     let drift_detected = content_drift || file_drift || angular_definition_drift;
     let mut index_changed = false;
 

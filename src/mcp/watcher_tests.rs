@@ -33,6 +33,93 @@ fn workspace_scope_fixture() -> (tempfile::TempDir, [String; 2], crate::mcp::han
 
 #[test]
 #[cfg(feature = "lang-rust")]
+fn definition_freshness_is_visible_until_atomic_publish() {
+    let (_tmp, roots, ctx) = workspace_scope_fixture();
+    let path = PathBuf::from(&roots[0]).join("probe.rs");
+    let generation = |ctx: &crate::mcp::handlers::HandlerContext| {
+        ctx.def_index.as_ref().unwrap().read().unwrap().definition_generation
+    };
+    let before = generation(&ctx);
+    let query = || {
+        [
+            ("xray_callers", serde_json::json!({"method": ["marker_a"], "depth": 1, "ext": ["rs"]})),
+            ("xray_definitions", serde_json::json!({"name": ["fresh_caller"], "exactNameOnly": true})),
+        ].map(|(tool, args)| {
+            let response = crate::mcp::handlers::dispatch_tool(&ctx, tool, &args);
+            assert!(!response.is_error, "{}", response.content[0].text);
+            serde_json::from_str::<Value>(&response.content[0].text).unwrap()
+        })
+    };
+    let check_pending = |answers: [Value; 2]| {
+        for answer in answers {
+            let status = &answer["resultStatus"];
+            assert_eq!(status["indexGeneration"], before, "{answer}");
+            assert_eq!(status["status"], "partial", "{answer}");
+            assert_eq!(status["complete"], false, "{answer}");
+            assert_eq!(status["safeForExhaustiveClaims"], false, "{answer}");
+            assert_eq!(status["totalKnown"], false, "{answer}");
+            assert!(status["reasons"].as_array().unwrap().iter().any(|r| r == "index_update_in_progress"));
+        }
+    };
+    assert_eq!(query()[0]["resultStatus"]["status"], "not_found");
+    std::fs::write(&path, "fn marker_a() {}\nfn fresh_caller() { marker_a(); }\n").unwrap();
+    let scope = code_xray::IndexMutationScope::for_worker(&roots[0], Arc::clone(&ctx.watcher_generation), 0);
+    observe_definition_paths(&ctx.def_index, [&path], Some(&scope), true);
+    check_pending(query());
+
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let resume_rx = std::sync::Mutex::new(resume_rx);
+    let timeout = Duration::from_secs(5);
+    install_definition_update_before_write_hook(Arc::new(
+        DefinitionUpdateBeforeWriteHook::with_action(&path, vec![1], Arc::new(move |_| {
+            ready_tx.send(()).unwrap();
+            let _ = resume_rx.lock().unwrap().recv_timeout(timeout);
+        })),
+    ));
+    std::thread::scope(|threads| {
+        let worker = threads.spawn(|| process_watcher_batch_with_scope(
+            &ctx.index, &ctx.def_index, &mut HashSet::from([path.clone()]), &mut HashSet::new(),
+            &roots[0], &["rs".into()], &["rs".into()], false, &ctx.trigram_build_gate, &scope,
+        ));
+        ready_rx.recv_timeout(timeout).unwrap();
+        check_pending(query());
+        resume_tx.send(()).unwrap();
+        assert!(worker.join().unwrap().index_changed);
+    });
+    remove_definition_update_before_write_hook(&path);
+    let [callers, definitions] = query();
+    for answer in [&callers, &definitions] {
+        assert_eq!(answer["resultStatus"]["indexGeneration"], before + 1);
+        assert_eq!(answer["resultStatus"]["status"], "complete");
+    }
+    assert_eq!(callers["callTree"][0]["method"], "fresh_caller");
+    assert_eq!(definitions["definitions"][0]["name"], "fresh_caller");
+
+    // A dirty event whose file disappears before parsing removes the indexed graph.
+    std::fs::remove_file(&path).unwrap();
+    let cleanup = update_definition_index(&ctx.def_index, &[], std::slice::from_ref(&path));
+    assert!(cleanup.applied_changes);
+    assert_eq!(generation(&ctx), before + 2);
+    assert_eq!(query()[1]["resultStatus"]["indexGeneration"], before + 2);
+}
+
+#[test]
+fn definition_freshness_newer_path_observation_survives_old_acknowledgement() {
+    let index = DefinitionIndex::default();
+    let a = PathBuf::from("a.rs");
+    let b = PathBuf::from("b.rs");
+    let first = index.freshness.observe([&a, &b], true);
+    let newer = index.freshness.observe([&a], true);
+    index.freshness.acknowledge(&first, &HashSet::new());
+    assert!(!index.freshness.contains(&b));
+    assert_eq!(index.freshness_reason(), Some("index_update_in_progress"));
+    index.freshness.acknowledge(&newer, &HashSet::new());
+    assert_eq!(index.freshness_reason(), None);
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
 fn test_watcher_workspace_scope_rejects_prepared_work_and_round_trip() {
     for mode in ["event", "rescan", "definitions"] {
         for round_trip in [false, true] {
@@ -2366,6 +2453,7 @@ fn persistent_permission_denied_converges_after_bounded_definition_retries() {
             .path_to_id
             .contains_key(&crate::path_identity_key(&path)));
         assert!(!definition_index.selector_index.contains_key("app-child"));
+        assert_eq!(definition_index.freshness_reason(), Some("definition_input_unavailable"));
     }
 
     std::fs::write(
@@ -2383,6 +2471,7 @@ fn persistent_permission_denied_converges_after_bounded_definition_retries() {
     assert_eq!(definition_index.definition_generation, generation + 2);
     assert!(definition_index.pending_definition_inputs.is_empty());
     assert!(definition_index.selector_index.contains_key("app-recovered"));
+    assert_eq!(definition_index.freshness_reason(), None);
 }
 
 #[cfg(feature = "lang-typescript")]

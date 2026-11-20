@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use regex::Regex;
 use serde_json::{json, Value};
@@ -2067,8 +2068,40 @@ fn commit_staged_file(
 }
 
 
+fn begin_definition_edit(
+    ctx: &HandlerContext,
+    path: &Path,
+) -> Option<(Arc<crate::definitions::DefinitionFreshness>, crate::definitions::DefinitionScan)> {
+    if !matches!(definition_path_eligibility(ctx, path), DefinitionPathEligibility::Eligible) {
+        return None;
+    }
+    let index = ctx.def_index.as_ref()?.read().ok()?;
+    if !crate::is_path_within(&path.to_string_lossy(), &index.root)
+        || path_targets_git_internals(path)
+        || !crate::mcp::watcher::is_included_by_index_rules(&index.root, path, ctx.respect_git_exclude, true)
+    {
+        return None;
+    }
+    let tracker = Arc::clone(&index.freshness);
+    let reservation = tracker.start_scan();
+    Some((tracker, reservation))
+}
+
+fn record_definition_edit(
+    ctx: &HandlerContext,
+    path: &Path,
+    tracker: &Arc<crate::definitions::DefinitionFreshness>,
+) {
+    if let Some(index) = ctx.def_index.as_ref().and_then(|index| index.read().ok())
+        && Arc::ptr_eq(&index.freshness, tracker)
+    {
+        tracker.observe([path], true);
+    }
+}
+
 /// Write modified content back to file, restoring original line endings.
 fn write_file_with_endings(
+    ctx: &HandlerContext,
     target: &PreparedEditTarget,
     content: &str,
 ) -> Result<(), String> {
@@ -2084,7 +2117,14 @@ fn write_file_with_endings(
         target.metadata.as_ref(),
     )?;
 
-    if let Err(error) = commit_staged_file(target, &tmp) {
+    let pending = begin_definition_edit(ctx, &target.logical_path);
+    let commit = commit_staged_file(target, &tmp);
+    if let Some((tracker, _reservation)) = pending
+        && commit.as_ref().err().is_none_or(|error| error.committed)
+    {
+        record_definition_edit(ctx, &target.logical_path, &tracker);
+    }
+    if let Err(error) = commit {
         remove_file_best_effort(&tmp);
         if error.committed {
             let committed_file = serde_json::to_string(&target.write_path)
@@ -2516,6 +2556,7 @@ fn handle_single_file_edit(
     if !dry_run
         && !content_unchanged
         && let Err(error) = write_file_with_endings(
+            ctx,
             &target,
             &edit_result.modified_content,
         )
@@ -2913,7 +2954,14 @@ fn handle_multi_file_edit(
         for (renamed, (edit_index, path_str, resolved, temp)) in temp_files.iter().enumerate() {
             let target = &edit_results[*edit_index].1;
             debug_assert_eq!(resolved, &target.write_path);
-            if let Err(e) = commit_staged_file(target, temp) {
+            let pending = begin_definition_edit(ctx, &target.logical_path);
+            let commit = commit_staged_file(target, temp);
+            if let Some((tracker, _reservation)) = pending
+                && commit.as_ref().err().is_none_or(|error| error.committed)
+            {
+                record_definition_edit(ctx, &target.logical_path, &tracker);
+            }
+            if let Err(e) = commit {
                 // Best-effort cleanup of remaining temp files
                 for (_, _, _, temp_path) in &temp_files[renamed..] {
                     remove_file_best_effort(temp_path);

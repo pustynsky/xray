@@ -649,6 +649,44 @@ fn test_angular_template_source_variants_survive_storage_roundtrip() {
 
 
 #[test]
+#[cfg(feature = "lang-rust")]
+fn test_reloaded_definition_cache_retries_unreadable_source_without_mtime_change() {
+    use crate::definitions::{
+        DefIndexArgs, build_definition_index, install_definition_source_read_error,
+        reconcile_definition_index_with_scope, remove_definition_source_read_error,
+    };
+    use std::sync::{Arc, RwLock};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let dir = crate::clean_path(&root.to_string_lossy());
+    let source = root.join("recover.rs");
+    let empty = root.join("empty.rs");
+    std::fs::write(&source, "pub fn recovered_from_cache() {}\n").unwrap();
+    std::fs::write(&empty, "// no definitions\n").unwrap();
+    install_definition_source_read_error(&source, std::io::ErrorKind::PermissionDenied);
+    let mut index = build_definition_index(&DefIndexArgs {
+        dir: dir.clone(), ext: "rs".into(), threads: 1, respect_git_exclude: false,
+    });
+    remove_definition_source_read_error(&source);
+    // Make the normal mtime filter skip the unchanged source.
+    index.created_at = index.created_at.saturating_add(60);
+    let cache = root.join("index");
+    save_definition_index(&index, &cache).unwrap();
+    let loaded = load_definition_index(&dir, "rs", &cache).unwrap();
+    assert_eq!(loaded.freshness_reason(), Some("definition_input_unavailable"));
+    assert_eq!(loaded.pending_definition_inputs.len(), 1);
+    assert!(loaded.pending_definition_inputs.contains_key(&crate::path_identity_key(&source)));
+    assert!(!loaded.name_index.contains_key("recovered_from_cache"));
+
+    let index = Arc::new(RwLock::new(loaded));
+    reconcile_definition_index_with_scope(&index, &dir, &["rs".into()], false, None, None);
+    let recovered = index.read().unwrap();
+    assert!(recovered.name_index.contains_key("recovered_from_cache"));
+    assert_eq!(recovered.freshness_reason(), None);
+}
+
+#[test]
 fn test_def_index_format_version_mismatch_returns_err() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_string_lossy().to_string();

@@ -18,8 +18,7 @@ use crate::definitions::{
 
 use super::HandlerContext;
 use super::advisory_hints::{interface_vias_caveat, interfaces_declaring_method, low_count_caveat};
-#[allow(unused_imports)] // `self` needed by test submodules for utils::ExcludePatterns
-use super::utils::{self, add_collection_accounting, attach_result_status, build_result_status, count_tree_nodes, inject_body_into_obj, inject_branch_warning, inject_index_degraded, intersect_trigram_postings, json_to_string, name_similarity, read_enum_string_with_default, read_string};
+use super::utils::{self, add_collection_accounting, build_result_status, count_tree_nodes, inject_body_into_obj, inject_branch_warning, inject_index_degraded, intersect_trigram_postings, json_to_string, name_similarity, read_enum_string_with_default, read_string};
 
 /// Closed enum of accepted `direction` values for `xray_callers`.
 ///
@@ -1079,7 +1078,7 @@ fn build_ambiguous_root_result(
         "includesTests": !production_only,
         "builtInExcludes": if production_only { json!(["test files", "test methods"]) } else { Value::Array(Vec::new()) },
     });
-    let output = attach_result_status(output, result_status);
+    let output = utils::attach_definition_index_result_status(output, result_status, index);
     ToolCallResult::success(json_to_string(&output))
 }
 
@@ -1541,7 +1540,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             template_results.len(),
             total_template_roots,
         );
-        let output = attach_result_status(output, result_status);
+        let output = utils::attach_definition_index_result_status(output, result_status, &def_idx);
         return ToolCallResult::success(json_to_string(&output));
     }
     // ─── End Angular template tree ───────────────────────────────────
@@ -1878,7 +1877,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             total_top_level_roots.saturating_sub(tree.len()),
             impact_analysis,
         );
-        let output = attach_result_status(output, result_status);
+        let output = utils::attach_definition_index_result_status(output, result_status, &def_idx);
         ToolCallResult::success(json_to_string(&output))
     } else {
         let mut builder = CalleeTreeBuilder {
@@ -2055,7 +2054,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             false,
         );
 
-        let output = attach_result_status(output, result_status);
+        let output = utils::attach_definition_index_result_status(output, result_status, &def_idx);
         ToolCallResult::success(json_to_string(&output))
     }
 }
@@ -2614,7 +2613,7 @@ fn handle_multi_method_callers(
         0,
         impact_analysis && direction == "up",
     );
-    let output = attach_result_status(output, result_status);
+    let output = utils::attach_definition_index_result_status(output, result_status, &def_idx);
 
     ToolCallResult::success(json_to_string(&output))
 }

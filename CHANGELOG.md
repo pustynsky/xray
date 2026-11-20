@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Report definition snapshot freshness in MCP.** Index-backed `xray_callers`
+  and `xray_definitions` responses report `resultStatus.indexGeneration` and
+  return partial results while observed updates have not been applied or a
+  known definition input remains unavailable. (#410)
+
 - **Update the rustix dependency.** Upgrade transitive `rustix` to 1.1.6 and its
   required `linux-raw-sys` dependency to 0.12.1 to resolve RUSTSEC-2026-0486.
 
