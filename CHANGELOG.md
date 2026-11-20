@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Avoid a global trigram rebuild for narrowly scoped substring searches** ([#398](https://github.com/pustynsky/xray/issues/398)). Selective `ext=` and `dir=` queries can search the current tokens while trigrams are dirty or rebuilding. Broad scopes and line-regex searches keep their existing rebuild behavior.
+
 - **Report definition snapshot freshness in MCP.** Index-backed `xray_callers`
   and `xray_definitions` responses report `resultStatus.indexGeneration` and
   return partial results while observed updates have not been applied or a

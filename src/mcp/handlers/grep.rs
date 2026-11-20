@@ -3452,6 +3452,14 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     result
 }
 
+fn should_bypass_trigram_for_scope(scope: &ResolvedFileScope, terms: &[String]) -> bool {
+    // A fallback scans the global dictionary once per substring term. Favor it
+    // only for highly selective requests with few scans; keep wide and heavily
+    // batched requests on the path that amortizes the rebuild across queries.
+    let substring_terms = terms.iter().filter(|term| !has_non_token_chars(term)).count();
+    scope.is_empty() || (scope.len() <= scope.total_files() / 16 && substring_terms <= 4)
+}
+
 fn search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let parsed = match parse_grep_args(args, &ctx.server_dir()) {
         Ok(p) => p,
@@ -3494,9 +3502,14 @@ fn search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         return ToolCallResult::error(error);
     }
     let trigram_skipped = will_auto_switch_to_phrase || scope_already_narrow;
-    let trigram_timing = if (parsed.use_substring || parsed.use_line_regex)
-        && !will_auto_switch_to_phrase
-        && !scope_already_narrow
+    // For substring queries with extension/directory filters, the content
+    // snapshot (not coverage from the file-list index) decides selectivity.
+    let consider_scoped_bypass = parsed.use_substring
+        && !trigram_skipped
+        && (!parsed.ext_filter.is_empty() || parsed.dir_filter.is_some());
+    let mut trigram_timing = if (parsed.use_substring || parsed.use_line_regex)
+        && !trigram_skipped
+        && !consider_scoped_bypass
     {
         // lineRegex shares the substring branch's trigram dependency: AC-4
         // adds a literal-trigram prefilter (`compute_literal_prefilter`) that
@@ -3509,35 +3522,13 @@ fn search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         None
     };
 
-    let lock_wait_start = Instant::now();
-    let index = match ctx.index.read() {
-        Ok(idx) => idx,
-        Err(e) => return ToolCallResult::error(format!("Failed to acquire index lock: {}", e)),
-    };
-    let lock_wait_ms = lock_wait_start.elapsed().as_secs_f64() * 1000.0;
-    if lock_wait_ms > 100.0 {
-        info!(lock_wait_ms = format_args!("{:.1}", lock_wait_ms),
-            "[grep-trace] slow read-lock acquisition on content index");
-    }
-    let trigram_rebuild_in_flight = ctx.trigram_build_gate.is_building();
-    let trigram_stale = trigram_skipped && (index.trigram_dirty || trigram_rebuild_in_flight);
-    let stale_safe_search_enabled = trigram_stale && !will_auto_switch_to_phrase;
-    if stale_safe_search_enabled {
-        info!(
-            scope_already_narrow,
-            file_filter_count = parsed.file_filter.len(),
-            exact_file_path = parsed.exact_file_path.is_some(),
-            "[grep-trace] trigram rebuild skipped; stale-safe search path enabled"
-        );
-    }
-
     let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&parsed.exclude_dir);
     let exclude_lower: Vec<String> = parsed.exclude.iter()
         .map(|s| utils::normalize_path_sep(s).to_lowercase())
         .collect();
     let requested_mode = grep_requested_mode(&parsed);
 
-    let grep_params = GrepSearchParams {
+    let mut grep_params = GrepSearchParams {
         ext_filter: &parsed.ext_filter,
         show_lines: parsed.show_lines,
         context_lines: parsed.context_lines,
@@ -3555,14 +3546,58 @@ fn search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         dir_auto_converted_note: parsed.dir_auto_converted_note.clone(),
         auto_balance: parsed.auto_balance,
         max_occurrences_per_term: parsed.max_occurrences_per_term,
-        lock_wait_ms,
-        trigram_stale,
+        lock_wait_ms: 0.0,
+        trigram_stale: false,
         requested_mode,
         files_only: parsed.files_only,
         invert_cap: parsed.invert_cap,
         invert: parsed.invert,
     };
-    let file_scope = resolve_grep_file_scope(&index, &grep_params);
+    let acquire_snapshot = |lock_wait_ms: &mut f64| {
+        let start = Instant::now();
+        let result = ctx.index.read().map_err(|error| {
+            ToolCallResult::error(format!("Failed to acquire index lock: {}", error))
+        });
+        *lock_wait_ms += start.elapsed().as_secs_f64() * 1000.0;
+        result
+    };
+    let (index, file_scope) = {
+        let mut index = match acquire_snapshot(&mut grep_params.lock_wait_ms) {
+            Ok(index) => index,
+            Err(error) => return error,
+        };
+        let mut scope = resolve_grep_file_scope(&index, &grep_params);
+        if consider_scoped_bypass {
+            if !index.trigram_dirty && !ctx.trigram_build_gate.is_building() {
+                // Preserve timing fields for trigram-backed requests.
+                trigram_timing = Some(TrigramEnsureOutcome::default());
+            } else if !should_bypass_trigram_for_scope(&scope, &parsed.terms) {
+                // Never wait for the rebuild while holding its read lock.
+                drop(index);
+                trigram_timing = Some(ensure_trigram_index(ctx));
+                index = match acquire_snapshot(&mut grep_params.lock_wait_ms) {
+                    Ok(index) => index,
+                    Err(error) => return error,
+                };
+                scope = resolve_grep_file_scope(&index, &grep_params);
+            }
+        }
+        (index, scope)
+    };
+    if grep_params.lock_wait_ms > 100.0 {
+        info!(lock_wait_ms = format_args!("{:.1}", grep_params.lock_wait_ms),
+            "[grep-trace] slow read-lock acquisition on content index");
+    }
+    // The dirty bit is cleared before a replacement trigram is published.
+    // Also cover a new watcher publish between ensure and read-lock acquisition.
+    grep_params.trigram_stale = (trigram_skipped || consider_scoped_bypass)
+        && (index.trigram_dirty || ctx.trigram_build_gate.is_building());
+    if grep_params.trigram_stale && !will_auto_switch_to_phrase {
+        info!(
+            scoped_files = file_scope.len(),
+            "[grep-trace] using current token dictionary instead of stale trigrams"
+        );
+    }
     let scope_coverage = if coverage_requested {
         match collect_grep_scope_coverage(ctx, &index, &grep_params, &file_scope) {
             Ok(coverage) => Some(coverage),
@@ -4367,10 +4402,13 @@ fn handle_substring_search(
         // to brute-force token matching to avoid false negatives from missing
         // trigram entries for newly-added tokens.
         let matched_tokens: Vec<&str> = if params.trigram_stale {
-            index.index.keys()
+            let mut tokens: Vec<&str> = index.index.keys()
                 .filter(|k| k.contains(term.as_str()))
                 .map(String::as_str)
-                .collect()
+                .collect();
+            // Match the trigram path's token order for consistent score sums.
+            tokens.sort_unstable();
+            tokens
         } else {
             let matched_token_indices = find_matching_tokens_for_term(term, trigram_idx);
             matched_token_indices.iter()
