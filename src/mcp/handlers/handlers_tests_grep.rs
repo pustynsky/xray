@@ -555,6 +555,98 @@ fn test_narrow_substring_treats_inflight_trigram_rebuild_as_stale() {
     assert_eq!(output["summary"]["totalFiles"], 1);
 }
 
+fn selective_substring_fixture() -> (HandlerContext, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::clean_path(&tmp.path().canonicalize().unwrap().to_string_lossy());
+    std::fs::create_dir(tmp.path().join("projects")).unwrap();
+    std::fs::write(tmp.path().join("projects/A.csproj"), "BrandNewNeedle\n").unwrap();
+    std::fs::write(tmp.path().join("projects/B.csproj"), "RunThing(17)\n").unwrap();
+    let mut files = vec![format!("{root}/projects/A.csproj"), format!("{root}/projects/B.csproj")];
+    files.extend((0..32).map(|id| format!("{root}/src/{id}.cs")));
+    let mut ctx = make_substring_ctx(
+        vec![("runthing", 1, vec![1]), ("17", 1, vec![1]), ("outsideneedle", 2, vec![1])],
+        files.iter().map(String::as_str).collect(),
+    );
+    ctx.workspace = Arc::new(RwLock::new(WorkspaceBinding::pinned(root)));
+    ctx.metrics = true;
+    {
+        let mut index = ctx.index.write().unwrap();
+        index.extensions.push("csproj".to_string());
+        index.index.insert("brandnewneedle".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+        index.file_token_counts[0] += 1;
+        index.total_tokens += 1;
+        index.trigram_dirty = true;
+    }
+    (ctx, tmp)
+}
+
+#[test]
+fn test_selective_substring_scopes_skip_dirty_trigram_and_preserve_mixed_pages() {
+    for scope in [json!({"ext": ["csproj"]}), json!({"dir": "projects"})] {
+        let (ctx, _tmp) = selective_substring_fixture();
+        let mut args = scope.clone();
+        args["terms"] = json!(["needle", "RunThing("]);
+        args["maxResults"] = json!(1);
+        let first = regex_queue_output(&ctx, &args);
+        assert_eq!(first["summary"]["searchMode"], "mixed-or");
+        assert_eq!(first["summary"]["totalFiles"], 2);
+        assert!(first["summary"].get("trigramBuildMs").is_none());
+        args["continuationToken"] = first["resultStatus"]["page"]["continuationToken"].clone();
+        assert!(args["continuationToken"].is_string());
+        let next = regex_queue_output(&ctx, &args);
+        assert_ne!(first["files"][0]["path"], next["files"][0]["path"]);
+        assert!(next["resultStatus"]["page"]["continuationToken"].is_null());
+        let mut count = scope;
+        count["terms"] = args["terms"].clone();
+        count["countOnly"] = json!(true);
+        let counts = regex_queue_output(&ctx, &count);
+        assert_eq!(counts["summary"]["totalFiles"], 2);
+        assert_eq!(counts["summary"]["totalOccurrences"], 2);
+        assert!(ctx.index.read().unwrap().trigram_dirty);
+
+        super::grep::warm_trigram_index(&ctx.index, &ctx.trigram_build_gate);
+        let warm_next = regex_queue_output(&ctx, &args);
+        assert_eq!(next["files"], warm_next["files"]);
+        args.as_object_mut().unwrap().remove("continuationToken");
+        let warm_first = regex_queue_output(&ctx, &args);
+        assert_eq!(first["files"], warm_first["files"]);
+        assert_eq!(warm_first["summary"]["trigramBuildMs"], 0.0);
+    }
+}
+
+#[test]
+fn test_selective_substring_uses_current_tokens_during_trigram_build() {
+    let (ctx, _tmp) = selective_substring_fixture();
+    ctx.index.write().unwrap().trigram_dirty = false;
+    *ctx.trigram_build_gate.building.lock().unwrap() = true;
+    std::thread::scope(|scope| {
+        let (send, receive) = std::sync::mpsc::channel();
+        let ctx = &ctx;
+        scope.spawn(move || {
+            send.send(dispatch_tool(ctx, "xray_grep", &json!({
+                "terms": ["newneedle"], "ext": ["csproj"]
+            }))).unwrap();
+        });
+        let response = receive.recv_timeout(std::time::Duration::from_secs(5));
+        *ctx.trigram_build_gate.building.lock().unwrap() = false;
+        ctx.trigram_build_gate.done.notify_all();
+        let response = response.expect("selective query must finish before the rebuild is released");
+        assert!(!response.is_error, "{}", response.content[0].text);
+        let output: Value = serde_json::from_str(&response.content[0].text).unwrap();
+        assert_eq!(output["summary"]["totalFiles"], 1);
+        assert!(output["summary"].get("trigramBuildMs").is_none());
+    });
+}
+
+#[test]
+fn test_wide_extension_scope_still_rebuilds_dirty_trigram() {
+    let (ctx, _tmp) = selective_substring_fixture();
+    let result = regex_queue_output(&ctx, &json!({"terms": ["needle"], "ext": ["cs", "csproj"]}));
+    assert_eq!(result["summary"]["totalFiles"], 2);
+    assert!(result["summary"]["trigramBuildMs"].is_number());
+    assert!(!ctx.index.read().unwrap().trigram_dirty);
+}
+
 #[test]
 fn test_wide_substring_waits_for_inflight_trigram_rebuild() {
     let mut ctx = make_substring_ctx(
