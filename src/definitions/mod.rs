@@ -91,7 +91,207 @@ pub(crate) fn replace_live_definition_index(
         .definition_generation
         .max(replacement.definition_generation)
         .saturating_add(1);
+    if crate::path_eq(&current.root, &replacement.root) {
+        current.freshness.set_walk_gaps(replacement.freshness.walk_gaps());
+        replacement.freshness = std::sync::Arc::clone(&current.freshness);
+    }
     *current = replacement;
+}
+
+/// Runtime observations for one live workspace, independent of graph contents.
+#[derive(Debug, Default)]
+pub(crate) struct DefinitionFreshness(std::sync::Mutex<DefinitionFreshnessState>);
+
+#[derive(Debug, Default)]
+struct DefinitionFreshnessState {
+    revision: u64,
+    paths: HashMap<PathBuf, u64>,
+    scans: usize,
+    walk_gaps: DefinitionWalkGaps,
+    walk_revision: u64,
+    last_unavailable_retry: Option<Instant>,
+}
+
+pub(crate) type DefinitionTickets = HashMap<PathBuf, u64>;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DefinitionWalkGaps(HashSet<PathBuf>);
+
+impl DefinitionWalkGaps {
+    pub(crate) fn record(&mut self, root: &Path, error: &ignore::Error) {
+        match error {
+            ignore::Error::Partial(errors) => {
+                for error in errors {
+                    self.record(root, error);
+                }
+                return;
+            }
+            ignore::Error::WithDepth { err, .. } | ignore::Error::WithLineNumber { err, .. } => {
+                self.record(root, err);
+                return;
+            }
+            _ => {}
+        }
+        let path = match error {
+            ignore::Error::WithPath { path, .. } => path,
+            ignore::Error::Loop { child, .. } => child,
+            _ => root,
+        };
+        self.0.insert(crate::path_identity_key(path));
+    }
+
+    pub(crate) fn contains(&self, key: &Path) -> bool {
+        self.0.iter().any(|prefix| key.starts_with(prefix))
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl DefinitionFreshness {
+    pub(crate) fn observe<P: AsRef<Path>>(
+        &self,
+        paths: impl IntoIterator<Item = P>,
+        supersede: bool,
+    ) -> DefinitionTickets {
+        let mut state = self.0.lock().unwrap();
+        paths.into_iter().map(|path| {
+            let key = crate::path_identity_key(path.as_ref());
+            let version = match state.paths.get(&key) {
+                Some(&version) if !supersede => version,
+                _ => {
+                    state.revision += 1;
+                    let version = state.revision;
+                    state.paths.insert(key.clone(), version);
+                    version
+                }
+            };
+            (key, version)
+        }).collect()
+    }
+
+    pub(crate) fn acknowledge(&self, tickets: &DefinitionTickets, unresolved: &HashSet<PathBuf>) {
+        let mut state = self.0.lock().unwrap();
+        for (path, version) in tickets {
+            if !unresolved.contains(path) && state.paths.get(path) == Some(version) {
+                state.paths.remove(path);
+            }
+        }
+    }
+
+    pub(crate) fn conflicts(&self, tickets: &DefinitionTickets) -> Vec<PathBuf> {
+        let state = self.0.lock().unwrap();
+        tickets.iter().filter(|(path, version)| state.paths.get(*path) != Some(*version))
+            .map(|(path, _)| path.clone()).collect()
+    }
+
+    pub(crate) fn outstanding(&self) -> DefinitionTickets {
+        self.0.lock().unwrap().paths.clone()
+    }
+
+    pub(crate) fn contains(&self, path: &Path) -> bool {
+        self.0.lock().unwrap().paths.contains_key(&crate::path_identity_key(path))
+    }
+
+    pub(crate) fn walk_gaps(&self) -> DefinitionWalkGaps {
+        self.0.lock().unwrap().walk_gaps.clone()
+    }
+
+    pub(crate) fn set_walk_gaps(&self, gaps: DefinitionWalkGaps) {
+        let mut state = self.0.lock().unwrap();
+        state.walk_revision += 1;
+        state.walk_gaps = gaps;
+    }
+
+    fn walk_baseline(&self) -> (u64, DefinitionWalkGaps) {
+        let state = self.0.lock().unwrap();
+        (state.walk_revision, state.walk_gaps.clone())
+    }
+
+    fn publish_walk(&self, baseline: u64, gaps: DefinitionWalkGaps) {
+        let mut state = self.0.lock().unwrap();
+        if state.walk_revision == baseline {
+            state.walk_gaps = gaps;
+        } else {
+            // An overlapping walk or rebuild may know of gaps this walk did not see.
+            state.walk_gaps.0.extend(gaps.0);
+        }
+        state.walk_revision += 1;
+    }
+
+    pub(crate) fn needs_retry(&self, unavailable: bool) -> bool {
+        let mut state = self.0.lock().unwrap();
+        if state.paths.keys().any(|key| !state.walk_gaps.contains(key)) {
+            return true;
+        }
+        if (unavailable || !state.walk_gaps.is_empty()) && state.last_unavailable_retry.is_none_or(|last| {
+            last.elapsed() >= Duration::from_secs(60)
+        }) {
+            state.last_unavailable_retry = Some(Instant::now());
+            return true;
+        }
+        false
+    }
+
+    fn reason(&self) -> Option<&'static str> {
+        let state = self.0.lock().unwrap();
+        if !state.walk_gaps.is_empty() {
+            Some("definition_input_unavailable")
+        } else if state.scans != 0 || !state.paths.is_empty() {
+            Some("index_update_in_progress")
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn start_scan(self: &std::sync::Arc<Self>) -> DefinitionScan {
+        self.0.lock().unwrap().scans += 1;
+        DefinitionScan(std::sync::Arc::clone(self))
+    }
+}
+
+pub(crate) struct DefinitionScan(std::sync::Arc<DefinitionFreshness>);
+
+impl Drop for DefinitionScan {
+    fn drop(&mut self) {
+        let Self(freshness) = self;
+        freshness.0.lock().unwrap().scans -= 1;
+    }
+}
+
+impl DefinitionIndex {
+    // Full builds retain failed file slots, even though no parse result was merged.
+    // Recover that evidence from both a new build and an existing cache.
+    fn mark_unparsed_build_inputs(&mut self) {
+        if self.parse_errors == 0 && self.worker_panics == 0 {
+            return;
+        }
+        let empty_ids: HashSet<_> = self.empty_file_ids.iter().map(|(id, _)| *id).collect();
+        for (path, &file_id) in &self.path_to_id {
+            if !empty_ids.contains(&file_id)
+                && !self.file_index.contains_key(&file_id)
+                && !self.input_fingerprints.contains_key(&definition_input_key(path))
+            {
+                self.pending_definition_inputs.entry(path.clone()).or_insert(PendingDefinitionInput {
+                    attempts: MAX_TRANSIENT_DEFINITION_ATTEMPTS,
+                    observed_revision: None,
+                });
+            }
+        }
+    }
+
+    pub(crate) fn freshness_reason(&self) -> Option<&'static str> {
+        if self.pending_definition_inputs.values().any(|entry| {
+            entry.attempts >= MAX_TRANSIENT_DEFINITION_ATTEMPTS
+        }) {
+            Some("definition_input_unavailable")
+        } else {
+            self.freshness.reason().or_else(|| {
+                (!self.pending_definition_inputs.is_empty()).then_some("index_update_in_progress")
+            })
+        }
+    }
 }
 
 pub(crate) fn definition_fingerprint_conflicts(
@@ -196,12 +396,23 @@ pub fn definition_extensions() -> &'static [&'static str] {
 
 /// Walk directory tree and collect all source files matching the given extensions.
 /// Returns cleaned file paths. Uses parallel walker with .gitignore support.
-pub(crate) fn collect_source_files(
+#[cfg(test)]
+fn collect_source_files(
     dir: &Path,
     extensions: &[String],
     threads: usize,
     respect_git_exclude: bool,
 ) -> Vec<String> {
+    walk_definition_sources(dir, extensions, threads, respect_git_exclude).0
+}
+
+fn walk_definition_sources(
+    dir: &Path,
+    extensions: &[String],
+    threads: usize,
+    respect_git_exclude: bool,
+) -> (Vec<String>, DefinitionWalkGaps) {
+    let walk_gaps = std::sync::Mutex::new(DefinitionWalkGaps::default());
     let mut walker = WalkBuilder::new(dir);
     walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(respect_git_exclude);
 
@@ -215,7 +426,11 @@ pub(crate) fn collect_source_files(
         Box::new(|entry| {
             let entry = match entry {
                 Ok(e) => e,
-                Err(_) => return ignore::WalkState::Continue,
+                Err(error) => {
+                    tracing::warn!(%error, "Definition build could not enumerate a path");
+                    walk_gaps.lock().unwrap().record(dir, &error);
+                    return ignore::WalkState::Continue;
+                }
             };
             if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                 return ignore::WalkState::Continue;
@@ -236,7 +451,7 @@ pub(crate) fn collect_source_files(
         })
     });
 
-    crate::index::recover_mutex(all_files, "def-index")
+    (crate::index::recover_mutex(all_files, "def-index"), walk_gaps.into_inner().unwrap())
 }
 
 /// Index a single file's parsed definitions into the DefinitionIndex.
@@ -1149,7 +1364,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 
     // ─── Collect all matching source files ─────────────────────
     let collect_start = Instant::now();
-    let files = collect_source_files(&dir, &extensions, args.threads, args.respect_git_exclude);
+    let (files, walk_gaps) = walk_definition_sources(&dir, &extensions, args.threads, args.respect_git_exclude);
     let collect_elapsed = collect_start.elapsed();
     let total_files = files.len();
     eprintln!("[def-index] Found {} files to parse", total_files);
@@ -1390,6 +1605,8 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         crate::index::force_mimalloc_collect();
     }
 
+    index.mark_unparsed_build_inputs();
+
     // ─── Angular template enrichment ──────────────────────────
     let enrich_start = Instant::now();
     #[cfg(feature = "lang-typescript")]
@@ -1454,6 +1671,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         .as_secs();
     index.definition_generation = 1;
 
+    index.freshness.set_walk_gaps(walk_gaps);
     index
 }
 

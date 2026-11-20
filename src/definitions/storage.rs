@@ -63,6 +63,7 @@ fn validate_loaded_definition_index(
     if !index.csharp_semantics.extension_methods_by_file.is_empty() {
         index.extension_methods = index.csharp_semantics.merged_extension_methods();
     }
+    index.mark_unparsed_build_inputs();
     Ok(index)
 }
 

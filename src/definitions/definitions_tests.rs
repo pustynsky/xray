@@ -1187,6 +1187,7 @@ fn test_definition_index_field_count_guard() {
         definition_generation: 0,
         input_fingerprints: HashMap::new(),
         pending_definition_inputs: HashMap::new(),
+        freshness: Default::default(),
     };
     drop(_guard);
 }
@@ -1764,6 +1765,40 @@ fn test_reconcile_nonblocking_excludes_git_internals_only() {
     let index = arc_index.read().unwrap();
     assert!(index.name_index.contains_key("visibleclass"));
     assert!(!index.name_index.contains_key("hiddenclass"));
+}
+
+#[test]
+fn test_reconcile_nonblocking_recovers_after_walk_failure() {
+    use std::sync::{Arc, RwLock};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path()).join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("Visible.cs");
+    std::fs::write(&path, "public class Visible {}\n").unwrap();
+    let dir = crate::clean_path(&root.to_string_lossy());
+    let extensions = ["cs".to_string()];
+    let index = Arc::new(RwLock::new(build_definition_index(&DefIndexArgs {
+        dir: dir.clone(), ext: "cs".into(), threads: 1, respect_git_exclude: false,
+    })));
+    index.read().unwrap().freshness.observe([&path], true);
+
+    let moved = root.with_file_name("moved");
+    std::fs::rename(&root, &moved).unwrap();
+    super::incremental::reconcile_definition_index_nonblocking(&index, &dir, &extensions, false);
+    {
+        let live = index.read().unwrap();
+        assert_eq!(live.freshness_reason(), Some("definition_input_unavailable"));
+        assert!(live.name_index.contains_key("visible"));
+        assert!(live.freshness.contains(&path));
+    }
+
+    std::fs::rename(&moved, &root).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    super::incremental::reconcile_definition_index_nonblocking(&index, &dir, &extensions, false);
+    let live = index.read().unwrap();
+    assert!(!live.name_index.contains_key("visible"));
+    assert_eq!(live.freshness_reason(), None);
 }
 
 #[test]

@@ -23,7 +23,7 @@ use crate::definitions::{
 use crate::ContentIndex;
 use crate::mcp::lock_order;
 
-use super::utils::{add_collection_accounting, attach_page_status, attach_result_status, best_match_tier, build_result_status, inject_body_into_obj, inject_branch_warning, inject_index_degraded, json_to_string, name_similarity, parse_page_request, read_enum_string_opt, read_string, PageRequest};
+use super::utils::{add_collection_accounting, attach_definition_index_result_status, attach_page_status, attach_result_status, best_match_tier, build_result_status, inject_body_into_obj, inject_branch_warning, inject_index_degraded, json_to_string, name_similarity, parse_page_request, read_enum_string_opt, read_string, PageRequest};
 use super::HandlerContext;
 use super::advisory_hints::value_source_hint;
 use super::file_scope::{intersect_sorted_candidate_ids, ResolvedFileScope};
@@ -615,6 +615,7 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
         content_idx,
         scope_telemetry.as_ref(),
         &page_request,
+        None,
     )
 }
 
@@ -941,6 +942,7 @@ fn handle_contains_line_mode(
         ));
     }
 
+    let output = attach_definition_index_result_status(output, json!({}), index);
     ToolCallResult::success(json_to_string(&output))
 }
 
@@ -2020,6 +2022,7 @@ fn format_search_output(
     content_idx: Option<&ContentIndex>,
     scope_telemetry: Option<&DefinitionScopeTelemetry>,
     page_request: &PageRequest,
+    auto_correction: Option<Value>,
 ) -> ToolCallResult {
     let mut file_cache: HashMap<String, Option<super::utils::BodySource>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
@@ -2115,7 +2118,17 @@ fn format_search_output(
     if !empty_file_scope {
         add_definitions_next_queries(&mut output, args, index, results, &mut file_cache);
     }
-    let output = attach_result_status(output, result_status);
+    if let Some(correction) = auto_correction {
+        result_status["status"] = json!("corrected");
+        result_status["safeForExhaustiveClaims"] = json!(false);
+        result_status["safeForExactSemantics"] = json!(false);
+        if let Some(reasons) = result_status.get_mut("reasons").and_then(Value::as_array_mut) {
+            let reason = correction.get("type").and_then(Value::as_str).unwrap_or("autoCorrected");
+            reasons.push(json!(reason));
+        }
+        result_status["correction"] = correction;
+    }
+    let output = attach_definition_index_result_status(output, result_status, index);
 
     ToolCallResult::success(json_to_string(&output))
 }
@@ -2861,31 +2874,11 @@ fn run_corrected_search(
 
     let search_elapsed = search_start.elapsed();
 
-    let tool_result = format_search_output(
+    Some(format_search_output(
         index, &results, args, total_results, &stats_info,
         &term_breakdown, search_elapsed, ctx, content_idx,
-        scope_telemetry.as_ref(), page_request,
-    );
-
-    if let Some(content) = tool_result.content.first()
-        && let Ok(mut output) = serde_json::from_str::<Value>(&content.text) {
-            if let Some(result_status) = output.get_mut("resultStatus") {
-                result_status["status"] = json!("corrected");
-                result_status["safeForExhaustiveClaims"] = json!(false);
-                result_status["safeForExactSemantics"] = json!(false);
-                result_status["correction"] = auto_correction.clone();
-                if let Some(reasons) = result_status.get_mut("reasons").and_then(Value::as_array_mut) {
-                    let reason = auto_correction
-                        .get("type")
-                        .and_then(Value::as_str)
-                        .unwrap_or("autoCorrected");
-                    reasons.push(json!(reason));
-                }
-            }
-            return Some(ToolCallResult::success(json_to_string(&output)));
-        }
-
-    Some(tool_result)
+        scope_telemetry.as_ref(), page_request, Some(auto_correction),
+    ))
 }
 
 
@@ -3409,7 +3402,7 @@ fn build_auto_summary_with_scope(
         },
         "summary": summary,
     });
-    let output = attach_result_status(output, result_status);
+    let output = attach_definition_index_result_status(output, result_status, index);
 
     ToolCallResult::success(json_to_string(&output))
 }

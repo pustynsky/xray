@@ -296,6 +296,20 @@ signal: file/parent/base-type scope can make it false even with full source.
 
 Paginated lists provide `resultStatus.page.nextArgs`, including the original query and the final continuation token after byte fitting. Use it with the same tool and stop when it is absent. Unknown argument names must be corrected before Xray can generate ready-to-run continuation arguments.
 
+Definition-index-backed `xray_callers` and `xray_definitions` results report
+`resultStatus.indexGeneration`: the applied generation of the graph used to answer
+that request. While a definition update is in progress (`index_update_in_progress`)
+or Xray knows a definition input is unavailable (`definition_input_unavailable`), the tool may
+still return indexed results, but reports `status="partial"`, `complete=false`,
+`safeForExactSemantics=false`, `safeForExhaustiveClaims=false`, and `totalKnown=false`
+(also on `page` when present). Treat matches as provisional and do not infer absence
+or exhaustive coverage from them. The freshness reason is appended to existing
+`reasons`. Direct XML parsing and definition coverage audit are not stamped.
+`indexGeneration` is not a continuation token and does not change cursor rules.
+Freshness reflects known work, not a check of the filesystem on each request.
+After a restart, transient observations must be rediscovered; a cached full build
+can still identify source files it discovered but could not read or parse.
+
 Definition discovery can return up to three `recommendedNextQueries` with `operation: "readSelectedDefinition"`. Each reads one selected file/name/kind/parent using `exactNameOnly=true`, `autoCorrect=false`, and a snapshot-bound `bodyTarget`. Applicable filters, ranges, enrichment, and body budgets are retained; the original discovery query is unchanged. Ambiguous identities or unavailable snapshots do not produce an exact read. Body continuation takes priority over optional hints.
 
 Cross-tool navigation uses `summary.nextStepQuery` when the selected target and original restrictions can be represented. Otherwise, the hint explains why no equivalent query was generated. Search alternatives, including punctuation cleanup, token intersection, and literal source-line matching, carry `semanticsChanged: true` outside `args`; they are not equivalent rewrites. Execute only the nested `args` object with its named tool. All hints count toward the final transport limit and may be omitted to preserve result delivery.

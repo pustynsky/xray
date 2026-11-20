@@ -1290,9 +1290,13 @@ fn start_definition_index_build(
         let index_build_elapsed = index_build_start.elapsed();
         crate::index::log_memory("def-build: finished");
         let save_start = Instant::now();
-        let save_result = if cache_hit { Ok(()) } else { definitions::save_definition_index(&new_idx, &index_base) };
+        let incomplete = new_idx.freshness_reason().is_some();
+        let save_result = if cache_hit || incomplete { Ok(()) } else { definitions::save_definition_index(&new_idx, &index_base) };
         let save_elapsed = save_start.elapsed();
-        let save_failed = if let Err(e) = save_result {
+        let save_failed = if incomplete {
+            // The cache format does not carry runtime coverage gaps.
+            true
+        } else if let Err(e) = save_result {
             warn!(error = %e, "Failed to save definition index to disk; keeping in-memory index");
             true
         } else {
@@ -1489,6 +1493,7 @@ fn load_or_build_definition_index(
             definition_generation: 0,
             input_fingerprints: HashMap::new(),
             pending_definition_inputs: HashMap::new(),
+            freshness: Default::default(),
         };
         let def_arc = Arc::new(RwLock::new(empty_def));
 

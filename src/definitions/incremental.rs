@@ -892,11 +892,20 @@ pub(crate) fn reconcile_definition_index_with_scope(
         .as_secs();
 
     let dir_path = canonicalize_or_warn(dir);
+    let (freshness, mut tickets, _scan, (walk_baseline, previous_gaps)) = match def_index.read() {
+        Ok(index) if scope.is_none_or(|scope| scope.matches(&index.root)) => {
+            let freshness = Arc::clone(&index.freshness);
+            let scan = freshness.start_scan();
+            (Arc::clone(&freshness), freshness.outstanding(), scan, freshness.walk_baseline())
+        }
+        _ => return (0, 0, 0),
+    };
 
     // ── Phase 1: Walk filesystem (NO lock needed) ──
     let mut disk_files: HashMap<PathBuf, SystemTime> = HashMap::new();
     let mut disk_paths_by_key: HashMap<PathBuf, PathBuf> = HashMap::new();
     let mut disk_revisions: HashMap<PathBuf, DefinitionInputRevision> = HashMap::new();
+    let mut walk_gaps = super::DefinitionWalkGaps::default();
 
     let mut walker = WalkBuilder::new(&dir_path);
     walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(respect_git_exclude);
@@ -904,7 +913,11 @@ pub(crate) fn reconcile_definition_index_with_scope(
     for entry in walker.build() {
         let entry = match entry {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(error) => {
+                warn!(%error, "Definition reconciliation could not enumerate a path");
+                walk_gaps.record(&dir_path, &error);
+                continue;
+            }
         };
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
@@ -977,14 +990,16 @@ pub(crate) fn reconcile_definition_index_with_scope(
                 to_update.push(path.clone());
                 added_keys.insert(path_key);
                 added += 1;
-            } else if idx.path_to_id.contains_key(&path_key) && *mtime > threshold {
+            } else if idx.path_to_id.contains_key(&path_key)
+                && (*mtime > threshold || previous_gaps.contains(&path_key))
+            {
                 to_update.push(path.clone());
                 modified += 1;
             }
         }
 
         for path in idx.path_to_id.keys() {
-            if !disk_paths_by_key.contains_key(path) {
+            if !disk_paths_by_key.contains_key(path) && !walk_gaps.contains(path) {
                 to_remove.push(path.clone());
             }
         }
@@ -993,9 +1008,8 @@ pub(crate) fn reconcile_definition_index_with_scope(
             .iter()
             .map(|path| crate::path_identity_key(path))
             .collect();
-        for (pending_key, pending) in &idx.pending_definition_inputs {
-            if pending.attempts < MAX_TRANSIENT_DEFINITION_ATTEMPTS
-                && update_keys.insert(pending_key.clone())
+        for pending_key in idx.pending_definition_inputs.keys().chain(tickets.keys()) {
+            if update_keys.insert(pending_key.clone())
                 && let Some(path) = disk_paths_by_key.get(pending_key)
             {
                 to_update.push(path.clone());
@@ -1003,6 +1017,15 @@ pub(crate) fn reconcile_definition_index_with_scope(
             }
         }
 
+        for path in idx.pending_definition_inputs.keys().chain(tickets.keys()) {
+            if !disk_paths_by_key.contains_key(path)
+                && !walk_gaps.contains(path)
+                && !idx.template_owners.contains_key(&definition_input_key(path))
+                && !idx.path_to_id.contains_key(path)
+            {
+                to_remove.push(path.clone());
+            }
+        }
         let template_inputs = if precomputed_angular_paths.is_none() {
             idx.template_owners
                 .iter()
@@ -1062,7 +1085,9 @@ pub(crate) fn reconcile_definition_index_with_scope(
     let modified = modified + angular_to_update.len();
     let removed = to_remove.len();
 
-    if to_update.is_empty() && to_remove.is_empty() && angular_to_update.is_empty() {
+    if to_update.is_empty() && to_remove.is_empty() && angular_to_update.is_empty()
+        && walk_gaps == previous_gaps
+    {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         info!(
             scanned,
@@ -1070,6 +1095,15 @@ pub(crate) fn reconcile_definition_index_with_scope(
             "Definition index reconciliation (non-blocking): all files up to date"
         );
         return (0, 0, 0);
+    }
+
+    if let Ok(index) = def_index.read() {
+        if !Arc::ptr_eq(&index.freshness, &freshness) {
+            return (0, 0, 0);
+        }
+        for (key, version) in freshness.observe(to_update.iter().chain(&to_remove).chain(&angular_to_update), false) {
+            tickets.entry(key).or_insert(version);
+        }
     }
 
     // ── Phase 3: Parse ALL files in parallel (NO lock needed) ──
@@ -1082,7 +1116,7 @@ pub(crate) fn reconcile_definition_index_with_scope(
             .extend(retry_batch.parsed_results);
         parsed_batch.transient_paths = retry_batch.transient_paths;
     }
-    let transient_paths: HashMap<PathBuf, Option<DefinitionInputRevision>> = parsed_batch
+    let mut transient_paths: HashMap<PathBuf, Option<DefinitionInputRevision>> = parsed_batch
         .transient_paths
         .iter()
         .map(|path| (path.clone(), super::definition_input_revision(path)))
@@ -1181,6 +1215,7 @@ pub(crate) fn reconcile_definition_index_with_scope(
             .iter()
             .map(|update| update.owner_key.clone()),
     );
+    input_keys.extend(transient_paths.keys().map(|path| definition_input_key(path)));
     let expected_fingerprints = {
         let index = match def_index.read() {
             Ok(index) => index,
@@ -1213,7 +1248,13 @@ pub(crate) fn reconcile_definition_index_with_scope(
         if scope.is_some_and(|scope| !scope.matches(&idx.root)) || idx.extensions != extensions {
             return (0, 0, 0);
         }
-        let conflicts = super::definition_fingerprint_conflicts(&idx, &expected_fingerprints);
+        if !Arc::ptr_eq(&idx.freshness, &freshness) {
+            return (0, 0, 0);
+        }
+        freshness.publish_walk(walk_baseline, walk_gaps);
+        let mut conflicts = super::definition_fingerprint_conflicts(&idx, &expected_fingerprints);
+        conflicts.extend(freshness.conflicts(&tickets).iter().map(|path| definition_input_key(path)));
+        transient_paths.retain(|path, _| !conflicts.contains(&definition_input_key(path)));
         if !conflicts.is_empty() {
             let rejected_keys = super::retain_stable_prepared_definition_inputs(
                 &mut parsed_results,
@@ -1263,6 +1304,10 @@ pub(crate) fn reconcile_definition_index_with_scope(
             .chain(angular_updates.iter().map(|update| &update.path))
             .cloned()
             .collect::<Vec<_>>();
+        let mut resolved_tickets: super::DefinitionTickets = resolved_paths.iter().filter_map(|path| {
+            let key = crate::path_identity_key(path);
+            tickets.get(&key).map(|version| (key, *version))
+        }).collect();
         let transient_resolution = resolve_transient_definition_inputs(
             &mut idx,
             &transient_paths,
@@ -1276,11 +1321,13 @@ pub(crate) fn reconcile_definition_index_with_scope(
             .count();
         let applied_modified = stable_updates.len().saturating_sub(applied_added)
             + stable_angular_updates.len();
-        let applied_removed = stable_removals.len()
-            + transient_resolution.exhausted_paths.len();
+        let removed_indexed = stable_removals.iter().filter(|path| {
+            idx.path_to_id.contains_key(&crate::path_identity_key(path))
+        }).count();
+        let applied_removed = removed_indexed + transient_resolution.exhausted_paths.len();
         let graph_changed = !applied_paths.is_empty()
             || !stale_cleanup_paths.is_empty()
-            || !stable_removals.is_empty()
+            || removed_indexed != 0
             || !angular_updates.is_empty()
             || !transient_resolution.exhausted_paths.is_empty();
 
@@ -1319,6 +1366,16 @@ pub(crate) fn reconcile_definition_index_with_scope(
         if graph_changed {
             idx.definition_generation = idx.definition_generation.saturating_add(1);
         }
+        for path in transient_paths.keys() {
+            let key = crate::path_identity_key(path);
+            if idx.pending_definition_inputs.get(&key).is_some_and(|pending| {
+                pending.attempts >= MAX_TRANSIENT_DEFINITION_ATTEMPTS
+            }) && let Some(&version) = tickets.get(&key) {
+                // Quarantine owns the unavailable status and the slower retry cadence.
+                resolved_tickets.insert(key, version);
+            }
+        }
+        freshness.acknowledge(&resolved_tickets, &HashSet::new());
         (applied_added, applied_modified, applied_removed)
     };
     // WRITE lock released here

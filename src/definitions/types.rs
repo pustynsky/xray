@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -415,6 +416,8 @@ pub struct DefinitionIndex {
     /// Runtime-only transient input attempts, keyed by normalized path.
     #[serde(skip)]
     pub pending_definition_inputs: HashMap<PathBuf, PendingDefinitionInput>,
+    #[serde(skip)]
+    pub(crate) freshness: Arc<super::DefinitionFreshness>,
 }
 
 
@@ -559,6 +562,7 @@ impl DefinitionIndex {
             definition_generation: head.definition_generation,
             input_fingerprints: head.input_fingerprints,
             pending_definition_inputs: HashMap::new(),
+            freshness: Default::default(),
         }
     }
 }

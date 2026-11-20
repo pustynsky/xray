@@ -2398,8 +2398,10 @@ fn cross_load_definition_index_at_generation(ctx: &HandlerContext, dir: &str, ex
             dir: bg_dir.clone(), ext: bg_ext.clone(), threads: 0,
             respect_git_exclude: bg_respect,
         }));
-        // On save failure retain the fresh index: a surviving disk shard may be stale.
-        let save_failed = if cache_hit {
+        // A surviving shard may be stale and cannot carry runtime coverage gaps.
+        let save_failed = if new_idx.freshness_reason().is_some() {
+            true
+        } else if cache_hit {
             false
         } else if let Err(e) = crate::definitions::save_definition_index(&new_idx, &bg_idx_base) {
             warn!(error = %e, "Failed to save definition index to disk; keeping in-memory index");
@@ -3367,6 +3369,15 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
         workspace_changed,
     );
     switch_panic_guard.expected = (dir.clone(), expected_generation);
+    // A rebuild prepared off-lock must not replace newer same-root work.
+    let rebuild_baseline = if workspace_changed {
+        None
+    } else {
+        match def_index_arc.read() {
+            Ok(index) => Some((index.definition_generation, index.freshness.outstanding())),
+            Err(error) => return ToolCallResult::error(format!("Failed to read definition index: {error}")),
+        }
+    };
     #[cfg(test)]
     pause_primary_reindex(&dir);
 
@@ -3386,7 +3397,11 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
     // we MUST keep the freshly-built `new_index` in memory and skip the
     // drop+reload step — otherwise the handler would silently re-publish stale
     // definitions while reporting fresh counts to the caller.
-    let save_failed = if let Err(e) = crate::definitions::save_definition_index(&new_index, &ctx.index_base) {
+    let save_failed = if rebuild_baseline.is_some() || new_index.freshness_reason().is_some() {
+        // Same-root builds must first win the publish fence. A partial build also
+        // needs to stay in memory because runtime coverage gaps aren't serialized.
+        true
+    } else if let Err(e) = crate::definitions::save_definition_index(&new_index, &ctx.index_base) {
         warn!(error = %e, "Failed to save definition index to disk; keeping in-memory index");
         true
     } else {
@@ -3433,7 +3448,32 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
                 switch_panic_guard.dismiss();
                 return superseded_reindex_response();
             }
-            crate::definitions::replace_live_definition_index(&mut idx, new_index);
+            if let Some((generation, _)) = &rebuild_baseline
+                && idx.definition_generation != *generation
+            {
+                switch_panic_guard.dismiss();
+                return ToolCallResult::error("Definition index changed during rebuild; retry xray_reindex_definitions.".to_string());
+            }
+            if let Some((_, tickets)) = &rebuild_baseline {
+                let walk_gaps = new_index.freshness.walk_gaps();
+                let unresolved_templates: std::collections::HashSet<_> = new_index.template_owners.keys()
+                    .filter(|key| !new_index.input_fingerprints.contains_key(*key))
+                    .map(|key| code_xray::path_identity_key(std::path::Path::new(key)))
+                    .collect();
+                let mut new_index = new_index;
+                let unresolved = tickets.keys().filter(|path| {
+                    walk_gaps.contains(path) || unresolved_templates.contains(*path)
+                }).cloned().collect();
+                for (path, input) in &idx.pending_definition_inputs {
+                    if walk_gaps.contains(path) || unresolved_templates.contains(path) {
+                        new_index.pending_definition_inputs.entry(path.clone()).or_insert(*input);
+                    }
+                }
+                crate::definitions::replace_live_definition_index(&mut idx, new_index);
+                idx.freshness.acknowledge(tickets, &unresolved);
+            } else {
+                crate::definitions::replace_live_definition_index(&mut idx, new_index);
+            }
             if ctx.watch_enabled && (completion_needed || definition_extensions_changed) {
                 ctx.watcher_generation.fetch_add(1, Ordering::AcqRel);
             }
@@ -3448,6 +3488,15 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
             switch_panic_guard.rollback();
             return ToolCallResult::error(format!("Failed to update in-memory definition index: {}", e));
         }
+    }
+
+    if rebuild_baseline.is_some()
+        && let Ok(index) = def_index_arc.read()
+        && code_xray::path_eq(&index.root, &dir)
+        && index.freshness_reason().is_none()
+        && let Err(error) = crate::definitions::save_definition_index(&index, &ctx.index_base)
+    {
+        warn!(%error, "Failed to save published definition index to disk");
     }
 
     // Force mimalloc to return freed pages (old index) to OS
